@@ -296,61 +296,75 @@ ce_inicial_pagada = min(max(0.0, ce_ini), max(0.0, com_exito))  # por seguridad
 if len(df_plan) > 0 and ce_inicial_pagada > 0:
     df_plan.at[0, "PAGO COMISION"] = ce_inicial_pagada
 
-# --- Comisión restante a repartir en cuotas iguales (cada cuota ≤ Apartado)
-restante = max(0.0, com_exito - ce_inicial_pagada)
-restante = int(round(restante))
+# --- Comisión restante en cuotas iguales, usando capacidad mensual (PB + PC ≤ Apartado)
+restante = int(round(max(0.0, com_exito - ce_inicial_pagada)))
+apartado_i = int(round(apartado))
 
 if restante > 0:
-    if apartado <= 0:
-        # Sin tope práctico: todo en un mes nuevo después de los PaB
+    # 1) Construye capacidades por mes a partir de N=2 (N=1 ya tiene CE inicial)
+    def capacidades_actuales(df):
+        caps = []
+        idxs = []
+        for i in range(len(df)):
+            if i == 0:
+                # N=1: no usamos para cuotas iguales (solo CE inicial)
+                continue
+            pb = int(df.at[i, "PAGO BANCO"])
+            pc = int(df.at[i, "PAGO COMISION"])
+            cap = max(0, apartado_i - (pb + pc))
+            if cap > 0:
+                caps.append(cap)
+                idxs.append(i)
+        return caps, idxs
+
+    caps, idxs = capacidades_actuales(df_plan)
+
+    # 2) Asegura que haya capacidad suficiente (agrega meses PB=0 con capacidad = Apartado)
+    while sum(caps) < restante:
         last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
         nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
-        df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, restante]
-    else:
-        # Encontrar el número de cuotas mínimo tal que cada cuota <= apartado
-        num_cuotas = max(1, math.ceil(restante / apartado))
-        # Ajustar para que la cuota base no exceda el Apartado
-        while math.ceil(restante / num_cuotas) > apartado:
-            num_cuotas += 1
+        df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, 0]
+        # Recalcula capacidades
+        caps, idxs = capacidades_actuales(df_plan)
 
-        # Construir cuotas estrictamente iguales (permitiendo ±1 por redondeo)
-        cuota_base = restante // num_cuotas
-        extras = restante - cuota_base * num_cuotas  # primeras 'extras' cuotas serán +1
-        cuotas = [cuota_base + 1] * extras + [cuota_base] * (num_cuotas - extras)
-        # Seguridad: ninguna cuota debe exceder el Apartado
-        cuotas = [min(c, int(apartado)) for c in cuotas]
+    # 3) Elige el número mínimo de cuotas k para que cuota ≤ min(capacidad de los k mejores meses)
+    #    (tomamos los k meses con mayor capacidad)
+    caps_sorted = sorted(caps, reverse=True)
+    k = None
+    for m in range(1, len(caps_sorted) + 1):
+        cap_min_topm = caps_sorted[m - 1]  # la menor capacidad dentro del top-m
+        cuota_necesaria = math.ceil(restante / m)
+        if cuota_necesaria <= cap_min_topm:
+            k = m
+            break
+    if k is None:
+        # fallback (no debería ocurrir porque sum(caps) ≥ restante): usar todos los meses
+        k = len(caps_sorted)
 
-        i = 0        # índice de cuota a colocar
-        fila = 1     # empezamos desde N=2 (fila index 1), N=1 ya tiene CE inicial sin tope
+    # 4) Calcula k cuotas casi iguales (±1) que caben en esos k meses
+    cuota_base = restante // k
+    extras = restante - cuota_base * k  # primeras 'extras' cuotas serán cuota_base+1
+    cuotas = [cuota_base + 1] * extras + [cuota_base] * (k - extras)
 
-        while i < len(cuotas):
-            # si no hay más filas, agregamos meses extra (PB=0)
-            if fila >= len(df_plan):
-                last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
-                nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
-                df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, 0]
+    # 5) Selecciona los índices de los k meses con mayor capacidad, luego ordénalos cronológicamente
+    #    Mapear capacidad→índice preservando originales
+    caps_with_idx = list(zip(caps, idxs))
+    caps_with_idx.sort(key=lambda x: x[0], reverse=True)  # por capacidad desc
+    sel = caps_with_idx[:k]
+    sel.sort(key=lambda x: x[1])  # cronológico
 
-            pb = int(df_plan.at[fila, "PAGO BANCO"])
-            pc = int(df_plan.at[fila, "PAGO COMISION"])
-            capacidad = max(0, int(apartado) - (pb + pc))
+    # 6) Asigna cuotas respetando capacidad de cada mes seleccionado
+    for (cuota, (cap, i)) in zip(cuotas, sel):
+        # seguridad (no debería exceder):
+        cuota_final = min(int(cuota), max(0, apartado_i - (int(df_plan.at[i, "PAGO BANCO"]) + int(df_plan.at[i, "PAGO COMISION"]))))
+        df_plan.at[i, "PAGO COMISION"] = int(df_plan.at[i, "PAGO COMISION"]) + cuota_final
 
-            cuota_obj = int(cuotas[i])
-
-            if capacidad >= cuota_obj:
-                # Podemos pagar comisión en el mismo mes del banco si cabe
-                df_plan.at[fila, "PAGO COMISION"] = pc + cuota_obj
-                i += 1
-            else:
-                # No cabe aquí; intenta el mes siguiente
-                fila += 1
-
-        # Si quedó alguna cuota sin colocar (no debería), crea meses al final
-        while i < len(cuotas):
-            last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
-            nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
-            df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, int(cuotas[i])]
-            i += 1
-
+    # 7) Si por redondeos quedó algo sin colocar (muy raro), agrega un mes nuevo y cierra exacto
+    faltante = restante - sum(cuotas)
+    if faltante > 0:
+        last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
+        nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
+        df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, faltante]
 # Formato final
 df_plan["PAGO BANCO"] = df_plan["PAGO BANCO"].round(0).astype(int)
 df_plan["PAGO COMISION"] = df_plan["PAGO COMISION"].round(0).astype(int)
