@@ -343,3 +343,132 @@ sum_pab = float(st.session_state["pab_table"]["PAGO BANCO"].sum()) if not st.ses
 st.caption(f"🔎 Control: Total PAGO BANCO objetivo = {total_pab:,.0f} | Total en tabla = {sum_pab:,.0f}")
 
 # Nota: Si cambias PAGO BANCO o N PaB arriba, la tabla se reinicia con el nuevo reparto.
+
+# =========================
+# 🧮 Recomendación automática de PAGO COMISION
+#   - Respeta: 1) CE inicial va 100% en la primera fila (N=1)
+#              2) Mientras haya PAGO BANCO>0, la comisión ese mes no supera (Apartado - PAGO BANCO)
+#              3) El resto (Comisión de éxito - CE inicial - comisiones usadas durante PAGO BANCO)
+#                 se reparte en el mínimo # de cuotas posibles, tope = Apartado;
+#                 si serían +6 cuotas, tope = 1.5 * Apartado
+#   - Si faltan filas para repartir, se agregan automáticamente con PAGO BANCO=0 y fechas mensuales
+# =========================
+
+st.markdown("### 💡 Recomendación de PAGO COMISIÓN")
+if st.button("🧮 Calcular recomendación de PAGO COMISIÓN", type="primary"):
+    import math
+
+    # Seguridades básicas
+    apartado = float(apartado_edit or 0.0)
+    ce_ini = float(ce_inicial or 0.0)
+    com_exito = float(comision_exito or 0.0)
+
+    if com_exito <= 0:
+        st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular la recomendación.")
+    else:
+        df_tab = st.session_state["pab_table"].copy()
+        # Asegurar tipos
+        df_tab["PAGO BANCO"] = pd.to_numeric(df_tab["PAGO BANCO"], errors="coerce").fillna(0.0)
+        df_tab["PAGO COMISION"] = pd.to_numeric(df_tab["PAGO COMISION"], errors="coerce").fillna(0.0)
+        df_tab["FECHA"] = pd.to_datetime(df_tab["FECHA"], errors="coerce")
+
+        # 1) Primera fila: CE inicial sí o sí
+        if not df_tab.empty and 1 in df_tab["N"].values:
+            df_tab.loc[df_tab["N"] == 1, "PAGO COMISION"] = ce_ini
+        else:
+            st.error("No hay fila N=1 en la tabla de pagos.")
+            st.stop()
+
+        # 2) Reparto durante meses con PAGO BANCO > 0 (desde fila 2)
+        #    Comision_mes = min(Apartado - PAGO_BANCO, restante), si Apartado > PAGO_BANCO
+        restante_total = max(0.0, com_exito - ce_ini)
+
+        # Tomar en cuenta que ya pusimos CE inicial; ahora intentamos usar comisiones mientras hay banco
+        for idx in df_tab.index:
+            n_val = int(df_tab.at[idx, "N"])
+            if n_val == 1:
+                continue  # ya fijado CE inicial
+            pago_bco = float(df_tab.at[idx, "PAGO BANCO"])
+            if pago_bco > 0 and apartado > 0 and restante_total > 0:
+                capacidad = max(0.0, apartado - pago_bco)
+                usar = min(capacidad, restante_total)
+                df_tab.at[idx, "PAGO COMISION"] = usar
+                restante_total -= usar
+            else:
+                # de momento 0; luego se puede usar si quedan cuotas por repartir
+                df_tab.at[idx, "PAGO COMISION"] = 0.0
+
+        # 3) Si aún queda restante (comisión por repartir), hacerlo en meses sin PAGO BANCO
+        if restante_total > 0:
+            # Determinar tope por cuota
+            if apartado <= 0:
+                # Si no hay Apartado, no hay tope práctico: usar 6 cuotas como guía con repartos iguales
+                tope = restante_total  # una sola cuota si se puede
+            else:
+                cuotas_min_con_tope_apartado = math.ceil(restante_total / apartado)
+                if cuotas_min_con_tope_apartado <= 6:
+                    tope = apartado
+                else:
+                    tope = 1.5 * apartado  # puede subir hasta 1.5×Apartado
+
+            # Buscar filas con PAGO BANCO == 0 existentes
+            sin_banco_idx = [i for i in df_tab.index if float(df_tab.at[i, "PAGO BANCO"]) <= 0.0]
+
+            # Si no hay suficientes filas sin banco para repartir, agregarlas
+            # Número de cuotas requeridas con el tope elegido
+            cuotas_req = max(1, math.ceil(restante_total / (tope if tope > 0 else restante_total)))
+            faltantes = max(0, cuotas_req - len(sin_banco_idx))
+
+            if faltantes > 0:
+                # Agregar filas al final, con fechas mes a mes y PAGO BANCO=0
+                if df_tab["FECHA"].notna().any():
+                    last_date = pd.to_datetime(df_tab["FECHA"].max()).normalize()
+                else:
+                    last_date = pd.Timestamp.today().normalize()
+
+                start_n = int(df_tab["N"].max()) + 1 if not df_tab.empty else 1
+                nuevas_filas = []
+                for k in range(faltantes):
+                    ndx = start_n + k
+                    # siguiente mes al último existente, al final de mes
+                    nueva_fecha = end_of_month(last_date + pd.DateOffset(months=k + 1)).date()
+                    nuevas_filas.append({
+                        "N": ndx,
+                        "FECHA": nueva_fecha,
+                        "PAGO BANCO": 0.0,
+                        "PAGO COMISION": 0.0
+                    })
+                df_tab = pd.concat([df_tab, pd.DataFrame(nuevas_filas)], ignore_index=True)
+                # Recalcular índice de filas sin banco
+                sin_banco_idx = [i for i in df_tab.index if float(df_tab.at[i, "PAGO BANCO"]) <= 0.0]
+
+            # Repartir restante en las filas sin banco (mínimo # de cuotas con tope)
+            for i in sin_banco_idx:
+                if restante_total <= 0:
+                    break
+                cuota = min(tope if tope > 0 else restante_total, restante_total)
+                df_tab.at[i, "PAGO COMISION"] = cuota
+                restante_total -= cuota
+
+            # Ajuste final por redondeos para que sume exactamente comision_exito
+            suma_actual = float(df_tab["PAGO COMISION"].sum())
+            diff_final = com_exito - suma_actual
+            if abs(diff_final) >= 0.5:
+                # ajustar en la última fila (o en la última sin banco)
+                ult_idx = sin_banco_idx[-1] if len(sin_banco_idx) > 0 else df_tab.index[-1]
+                df_tab.at[ult_idx, "PAGO COMISION"] += diff_final
+
+        # Redondeo estético
+        df_tab["PAGO COMISION"] = df_tab["PAGO COMISION"].round(0)
+
+        # Guardar y mostrar
+        st.session_state["pab_table"] = df_tab
+        st.success("✅ Recomendación de PAGO COMISIÓN aplicada.")
+        st.dataframe(df_tab, use_container_width=True)
+
+        # Resumen de control para comisión
+        total_com_rec = float(df_tab["PAGO COMISION"].sum())
+        st.caption(
+            f"🎯 Control comisión: CE inicial = {ce_ini:,.0f} | Comisión de éxito = {com_exito:,.0f} | "
+            f"Total comisión en tabla = {total_com_rec:,.0f}"
+        )
