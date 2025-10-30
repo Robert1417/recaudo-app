@@ -296,14 +296,14 @@ if len(df_plan) > 0 and ce_inicial_pagada > 0:
     df_plan.at[0, "PAGO COMISION"] = ce_inicial_pagada
 
 # --- Comisión restante en cuotas iguales, usando capacidad mensual (PB + PC ≤ Apartado)
+#     y asegurando que la suma quede EXACTA (si falta, se ajusta la última cuota aunque supere el Apartado)
 restante = int(round(max(0.0, com_exito - ce_inicial_pagada)))
 apartado_i = int(round(apartado))
 
 if restante > 0:
-    # 1) Construye capacidades por mes a partir de N=2 (N=1 ya tiene CE inicial)
+    # 1) Capacidades por mes a partir de N=2 (N=1 reservado para CE inicial)
     def capacidades_actuales(df):
-        caps = []
-        idxs = []
+        caps, idxs = [], []
         for i in range(len(df)):
             if i == 0:
                 continue
@@ -317,40 +317,53 @@ if restante > 0:
 
     caps, idxs = capacidades_actuales(df_plan)
 
-    # 2) Asegura que haya capacidad suficiente (agrega meses PB=0 con capacidad = Apartado)
-    while sum(caps) < restante:
+    # 2) Asegura capacidad suficiente (agrega meses PB=0 con capacidad = Apartado)
+    while sum(caps) < restante and apartado_i > 0:
         last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
         nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
         df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, 0]
         caps, idxs = capacidades_actuales(df_plan)
 
-    # 3) Mínimo k tal que cuota <= min(capacidad del top-k)
-    caps_sorted = sorted(caps, reverse=True)
-    k = None
-    for m in range(1, len(caps_sorted) + 1):
-        cap_min_topm = caps_sorted[m - 1]
-        cuota_necesaria = math.ceil(restante / m)
-        if cuota_necesaria <= cap_min_topm:
-            k = m
-            break
-    if k is None:
-        k = len(caps_sorted)
+    # 3) Reparto "casi igual" dentro de la capacidad
+    if apartado_i > 0 and sum(caps) > 0:
+        caps_sorted = sorted(caps, reverse=True)
+        k = None
+        for m in range(1, len(caps_sorted) + 1):
+            cap_min_topm = caps_sorted[m - 1]
+            cuota_necesaria = math.ceil(restante / m)
+            if cuota_necesaria <= cap_min_topm:
+                k = m
+                break
+        if k is None:
+            k = len(caps_sorted)
 
-    # 4) k cuotas casi iguales (±1)
-    cuota_base = restante // k
-    extras = restante - cuota_base * k
-    cuotas = [cuota_base + 1] * extras + [cuota_base] * (k - extras)
+        cuota_base = restante // k
+        extras = restante - cuota_base * k
+        cuotas = [cuota_base + 1] * extras + [cuota_base] * (k - extras)
 
-    # 5) Índices de los k con mayor capacidad, luego orden cronológico
-    caps_with_idx = list(zip(caps, idxs))
-    caps_with_idx.sort(key=lambda x: x[0], reverse=True)
-    sel = caps_with_idx[:k]
-    sel.sort(key=lambda x: x[1])
+        caps_with_idx = list(zip(caps, idxs))
+        caps_with_idx.sort(key=lambda x: x[0], reverse=True)
+        sel = caps_with_idx[:k]
+        sel.sort(key=lambda x: x[1])  # cronológico
 
-    # 6) Asignar cuotas respetando capacidad
-    for (cuota, (cap, i)) in zip(cuotas, sel):
-        cap_mes = max(0, apartado_i - (int(df_plan.at[i, "PAGO BANCO"]) + int(df_plan.at[i, "PAGO COMISION"])))
-        df_plan.at[i, "PAGO COMISION"] = int(df_plan.at[i, "PAGO COMISION"]) + min(int(cuota), cap_mes)
+        for (cuota, (cap, i)) in zip(cuotas, sel):
+            pb = int(df_plan.at[i, "PAGO BANCO"])
+            pc = int(df_plan.at[i, "PAGO COMISION"])
+            cap_mes = max(0, apartado_i - (pb + pc))
+            poner = min(int(cuota), cap_mes)
+            df_plan.at[i, "PAGO COMISION"] = pc + poner
+
+    # 4) AJUSTE EXACTO: si aún falta algo por redondeos/capacidad, lo sumamos en la ÚLTIMA fila (aunque supere el Apartado)
+    asignado_rest = int(df_plan["PAGO COMISION"].iloc[1:].sum()) if len(df_plan) > 1 else 0
+    faltante = restante - asignado_rest
+    if faltante > 0:
+        # usar la última fila existente (si solo hay N=1, creamos una nueva)
+        if len(df_plan) == 1:
+            last_date = df_plan["FECHA"].max()
+            nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
+            df_plan.loc[len(df_plan)] = [2, nueva_f, 0, 0]
+        idx_last = len(df_plan) - 1
+        df_plan.at[idx_last, "PAGO COMISION"] = int(df_plan.at[idx_last, "PAGO COMISION"]) + int(faltante)
 
 # ---------------------------
 # 🔧 Editor libre + validación
