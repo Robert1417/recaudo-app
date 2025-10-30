@@ -218,269 +218,84 @@ else:
             f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  "
             f"**{porcentaje:,.2f}%** de la Comisión de éxito"
         )
+# ---------- 5) Tabla de pagos automática ----------
+st.markdown("### 5) 📅 Plan de pagos sugerido")
 
-# =========================
-# 🧱 SECCIÓN: Tabla de pagos (PAGO BANCO)
-# - Crea un DataFrame editable con columnas: N, FECHA, PAGO BANCO, PAGO COMISION
-# - Reparte PAGO BANCO en N PaB
-# - Si el usuario cambia el PAGO BANCO de la fila 1, las demás filas se reequilibran
-# =========================
+# Validar que haya valores
+if pago_banco <= 0 or n_pab <= 0 or comision_exito <= 0:
+    st.info("Completa PAGO BANCO, N PaB y Comisión de éxito para generar la tabla.")
+    st.stop()
 
-import pandas as pd
+# ---- Cálculos ----
+com_restante = max(0.0, comision_exito - ce_inicial) if ce_inicial else comision_exito
+cuota_banco = round(pago_banco / n_pab, 0)
 
-st.markdown("---")
-st.header("📅 Tabla de pagos — PAGO BANCO")
+# número de cuotas de comisión (mínimo 1)
+if apartado_edit > 0:
+    n_com = int(np.ceil(com_restante / apartado_edit))
+else:
+    n_com = 1
+cuota_com = round(com_restante / n_com, 0)
 
-# Utilidad: último día del mes para un timestamp dado
-def end_of_month(ts: pd.Timestamp) -> pd.Timestamp:
-    return (ts + pd.offsets.MonthEnd(0)).normalize()
+# ---- Construcción tabla ----
+filas = []
+hoy = date.today()
 
-# Construir fechas por defecto:
-#  - Fila 1: hoy
-#  - Filas 2..N: último día de los meses siguientes
-today_ts = pd.Timestamp.today().normalize()
-
-def default_fechas(n: int) -> list:
-    if n <= 0:
-        return []
-    fechas = [today_ts.date()]
-    for k in range(1, n):
-        ts_k = (today_ts + pd.DateOffset(months=k))
-        fechas.append(end_of_month(ts_k).date())
-    return fechas
-
-# Inicializar/Resetear tabla cuando cambian PAGO BANCO o N PaB
-if "pab_table" not in st.session_state:
-    st.session_state["pab_table"] = None
-if "pab_last_total" not in st.session_state:
-    st.session_state["pab_last_total"] = None
-if "pab_last_n" not in st.session_state:
-    st.session_state["pab_last_n"] = None
-
-total_pab = float(pago_banco or 0.0)
-n_rows = int(n_pab or 1)
-
-def build_table(total: float, n: int) -> pd.DataFrame:
-    if n < 1:
-        n = 1
-    base = 0.0 if n == 0 else (total / n)
-    df0 = pd.DataFrame({
-        "N": list(range(1, n + 1)),
-        "FECHA": default_fechas(n),
-        "PAGO BANCO": [base for _ in range(n)],
-        "PAGO COMISION": [0.0 for _ in range(n)]  # la completaremos en otro paso
+# Pagos Banco
+for i in range(n_pab):
+    filas.append({
+        "N": i + 1,
+        "FECHA": pd.to_datetime(hoy) + pd.DateOffset(months=i),
+        "PAGO BANCO": cuota_banco,
+        "PAGO COMISIÓN": 0
     })
-    # Redondeo estético
-    df0["PAGO BANCO"] = df0["PAGO BANCO"].round(0)
-    df0["PAGO COMISION"] = df0["PAGO COMISION"].round(0)
-    return df0
 
-# Reset cuando cambian los parámetros
-if (st.session_state["pab_table"] is None or
-    st.session_state["pab_last_total"] != total_pab or
-    st.session_state["pab_last_n"] != n_rows):
-    st.session_state["pab_table"] = build_table(total_pab, n_rows)
-    st.session_state["pab_last_total"] = total_pab
-    st.session_state["pab_last_n"] = n_rows
+# Pagos Comisión
+for j in range(n_com):
+    filas.append({
+        "N": n_pab + j + 1,
+        "FECHA": pd.to_datetime(hoy) + pd.DateOffset(months=n_pab + j),
+        "PAGO BANCO": 0,
+        "PAGO COMISIÓN": cuota_com
+    })
 
-# Editor  (bloque seguro para evitar ArrowTypeError)
-st.caption("✅ Puedes editar **FECHA** (como texto YYYY-MM-DD) y el **PAGO BANCO de la primera fila**; el resto se reequilibrará automáticamente.")
+df_pagos = pd.DataFrame(filas)
 
-# 1) Vista segura para el editor: FECHA como string; números como float
-df_view = st.session_state["pab_table"].copy()
+# Ajustar última cuota para evitar redondeo excesivo
+dif_banco = pago_banco - df_pagos["PAGO BANCO"].sum()
+dif_com = com_restante - df_pagos["PAGO COMISIÓN"].sum()
+if dif_banco != 0:
+    df_pagos.loc[df_pagos["PAGO BANCO"] > 0, "PAGO BANCO"].iloc[-1] += dif_banco
+if dif_com != 0:
+    df_pagos.loc[df_pagos["PAGO COMISIÓN"] > 0, "PAGO COMISIÓN"].iloc[-1] += dif_com
 
-# Normalizar tipos
-df_view["N"] = pd.to_numeric(df_view["N"], errors="coerce").fillna(0).astype(int)
-for col_num in ["PAGO BANCO", "PAGO COMISION"]:
-    df_view[col_num] = pd.to_numeric(df_view[col_num], errors="coerce").fillna(0.0)
+# ---- Mostrar tabla ----
+st.dataframe(
+    df_pagos.style.format({
+        "PAGO BANCO": "{:,.0f}",
+        "PAGO COMISIÓN": "{:,.0f}"
+    }),
+    use_container_width=True
+)
 
-# FECHA -> string "YYYY-MM-DD" (o vacío)
-df_view["FECHA"] = pd.to_datetime(df_view["FECHA"], errors="coerce")
-df_view["FECHA"] = df_view["FECHA"].dt.strftime("%Y-%m-%d").fillna("")
+# ---- Totales ----
+total_banco = df_pagos["PAGO BANCO"].sum()
+total_com = df_pagos["PAGO COMISIÓN"].sum()
 
-edited = st.data_editor(
-    df_view,
-    num_rows="fixed",  # número de filas fijado por N PaB
-    use_container_width=True,
-    column_config={
-        "N": st.column_config.NumberColumn(format="%d", step=1, disabled=True),
-        # Usamos TextColumn para evitar mezcla de tipos; el usuario escribe YYYY-MM-DD
-        "FECHA": st.column_config.TextColumn(help="Formato: YYYY-MM-DD"),
-        "PAGO BANCO": st.column_config.NumberColumn(format="%.0f", step=1000),
-        "PAGO COMISION": st.column_config.NumberColumn(format="%.0f", step=1000),
-    },
-    key="editor_pab_main"
-).copy()
+st.markdown(
+    f"""
+    **Totales:**
+    - 🏦 Pago Banco = `{total_banco:,.0f}`
+    - 💼 Pago Comisión = `{total_com:,.0f}`
+    - 📊 Cuotas totales = `{len(df_pagos)}`
+    """
+)
 
-# 2) Convertir de vuelta a tipos de trabajo
-edited["N"] = pd.to_numeric(edited["N"], errors="coerce").fillna(0).astype(int)
-edited["PAGO BANCO"] = pd.to_numeric(edited["PAGO BANCO"], errors="coerce").fillna(0.0)
-edited["PAGO COMISION"] = pd.to_numeric(edited["PAGO COMISION"], errors="coerce").fillna(0.0)
-edited["FECHA"] = pd.to_datetime(edited["FECHA"], errors="coerce")  # vuelve a datetime64[ns]
-
-# Guardar de nuevo en sesión (en el formato de trabajo)
-st.session_state["pab_table"] = edited
-
-
-# --- Reglas de reequilibrio:
-# Si el usuario cambia el PAGO BANCO de la fila 1, las demás filas se ajustan iguales
-# para mantener la suma total = total_pab. (No tocamos PAGO COMISION aún)
-if not edited.empty:
-    # Asegurar tipos
-    edited["PAGO BANCO"] = pd.to_numeric(edited["PAGO BANCO"], errors="coerce").fillna(0.0)
-    edited["PAGO COMISION"] = pd.to_numeric(edited["PAGO COMISION"], errors="coerce").fillna(0.0)
-
-    # Total deseado
-    T = total_pab
-
-    # Valor de la fila 1 (editable por el usuario)
-    v1 = float(edited.loc[edited["N"] == 1, "PAGO BANCO"].iloc[0] if 1 in edited["N"].values else 0.0)
-
-    if n_rows == 1:
-        # Caso trivial: una única fila debe llevar todo el total
-        edited.loc[edited["N"] == 1, "PAGO BANCO"] = T
-    else:
-        # Reparto del remanente en filas 2..N
-        rem = max(0.0, T - v1)
-        per = rem / (n_rows - 1)
-
-        # Aplicar a filas 2..N
-        mask_rest = edited["N"] >= 2
-        edited.loc[mask_rest, "PAGO BANCO"] = per
-
-        # Corrección por redondeo para que la suma cierre exactamente en T
-        suma = float(edited["PAGO BANCO"].sum())
-        diff = T - suma
-        if abs(diff) >= 0.5:  # si hay diferencia relevante, ajústala en la última fila
-            edited.loc[edited["N"] == n_rows, "PAGO BANCO"] += diff
-
-    # Guardar de nuevo en sesión
-    st.session_state["pab_table"] = edited
-
-# Mostrar tabla resultante
-st.markdown("**Tabla resultante (balanceada):**")
-st.dataframe(st.session_state["pab_table"], use_container_width=True)
-
-# Resumen de control
-sum_pab = float(st.session_state["pab_table"]["PAGO BANCO"].sum()) if not st.session_state["pab_table"].empty else 0.0
-st.caption(f"🔎 Control: Total PAGO BANCO objetivo = {total_pab:,.0f} | Total en tabla = {sum_pab:,.0f}")
-
-# Nota: Si cambias PAGO BANCO o N PaB arriba, la tabla se reinicia con el nuevo reparto.
-# =========================
-# 🧮 Recomendación automática de PAGO COMISION
-# =========================
-
-st.markdown("### 💡 Recomendación de PAGO COMISIÓN")
-
-# =========================
-# 🧮 Cálculo de la recomendación
-# =========================
-if st.button("🧮 Calcular recomendación de PAGO COMISIÓN", type="primary"):
-    import math
-
-    apartado = float(apartado_edit or 0.0)
-    ce_ini = float(ce_inicial or 0.0)
-    com_exito = float(comision_exito or 0.0)
-
-    if com_exito <= 0:
-        st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular la recomendación.")
-    else:
-        df_tab = st.session_state["pab_table"].copy()
-
-        # Asegurar tipos
-        df_tab["PAGO BANCO"] = pd.to_numeric(df_tab["PAGO BANCO"], errors="coerce").fillna(0.0)
-        df_tab["PAGO COMISION"] = pd.to_numeric(df_tab["PAGO COMISION"], errors="coerce").fillna(0.0)
-        df_tab["FECHA"] = pd.to_datetime(df_tab["FECHA"], errors="coerce")
-
-        # 1️⃣ Primera fila: CE inicial sí o sí
-        if not df_tab.empty and 1 in df_tab["N"].values:
-            df_tab.loc[df_tab["N"] == 1, "PAGO COMISION"] = ce_ini
-        else:
-            st.error("No hay fila N=1 en la tabla de pagos.")
-            st.stop()
-
-        # 2️⃣ Reparto durante meses con PAGO BANCO > 0
-        restante_total = max(0.0, com_exito - ce_ini)
-
-        for idx in df_tab.index:
-            n_val = int(df_tab.at[idx, "N"])
-            if n_val == 1:
-                continue
-            pago_bco = float(df_tab.at[idx, "PAGO BANCO"])
-            if pago_bco > 0 and apartado > 0 and restante_total > 0:
-                capacidad = max(0.0, apartado - pago_bco)
-                usar = min(capacidad, restante_total)
-                df_tab.at[idx, "PAGO COMISION"] = usar
-                restante_total -= usar
-            else:
-                df_tab.at[idx, "PAGO COMISION"] = 0.0
-
-        # 3️⃣ Repartir el resto (cuando ya no hay PAGO BANCO)
-        if restante_total > 0:
-            if apartado <= 0:
-                tope = restante_total
-            else:
-                cuotas_min_con_tope_apartado = math.ceil(restante_total / apartado)
-                tope = apartado if cuotas_min_con_tope_apartado <= 6 else 1.5 * apartado
-
-            sin_banco_idx = [i for i in df_tab.index if float(df_tab.at[i, "PAGO BANCO"]) <= 0.0]
-            cuotas_req = max(1, math.ceil(restante_total / (tope if tope > 0 else restante_total)))
-            faltantes = max(0, cuotas_req - len(sin_banco_idx))
-
-            # Si faltan filas, agregarlas automáticamente
-            if faltantes > 0:
-                if df_tab["FECHA"].notna().any():
-                    last_date = pd.to_datetime(df_tab["FECHA"].max()).normalize()
-                else:
-                    last_date = pd.Timestamp.today().normalize()
-
-                start_n = int(df_tab["N"].max()) + 1 if not df_tab.empty else 1
-                nuevas_filas = []
-                for k in range(faltantes):
-                    ndx = start_n + k
-                    nueva_fecha = end_of_month(last_date + pd.DateOffset(months=k + 1)).date()
-                    nuevas_filas.append({
-                        "N": ndx,
-                        "FECHA": nueva_fecha,
-                        "PAGO BANCO": 0.0,
-                        "PAGO COMISION": 0.0
-                    })
-                df_tab = pd.concat([df_tab, pd.DataFrame(nuevas_filas)], ignore_index=True)
-                sin_banco_idx = [i for i in df_tab.index if float(df_tab.at[i, "PAGO BANCO"]) <= 0.0]
-
-            # Repartir restante en filas sin banco
-            for i in sin_banco_idx:
-                if restante_total <= 0:
-                    break
-                cuota = min(tope if tope > 0 else restante_total, restante_total)
-                df_tab.at[i, "PAGO COMISION"] = cuota
-                restante_total -= cuota
-
-            # Ajuste final (cerrar exacto)
-            suma_actual = float(df_tab["PAGO COMISION"].sum())
-            diff_final = com_exito - suma_actual
-            if abs(diff_final) >= 0.5:
-                ult_idx = sin_banco_idx[-1] if len(sin_banco_idx) > 0 else df_tab.index[-1]
-                df_tab.at[ult_idx, "PAGO COMISION"] += diff_final
-
-        # ✅ Redondeo estético y guardado
-        df_tab["PAGO COMISION"] = df_tab["PAGO COMISION"].round(0)
-        st.session_state["pab_table"] = df_tab
-        st.success("✅ Recomendación de PAGO COMISIÓN aplicada correctamente.")
-
-        # =========================
-        # 📊 Mostrar resultado sin errores
-        # =========================
-        df_show = df_tab.copy()
-        df_show["FECHA"] = df_show["FECHA"].apply(
-            lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else ""
-        )
-
-        st.dataframe(df_show, use_container_width=True)
-
-        # 🎯 Control resumen
-        total_com_rec = float(df_tab["PAGO COMISION"].sum())
-        st.caption(
-            f"🎯 Control comisión: CE inicial = {ce_ini:,.0f} | Comisión de éxito = {com_exito:,.0f} | "
-            f"Total comisión en tabla = {total_com_rec:,.0f}"
-        )
+# ---- Descargar tabla ----
+csv = df_pagos.to_csv(index=False, encoding="utf-8-sig")
+st.download_button(
+    "⬇️ Descargar tabla en CSV",
+    data=csv,
+    file_name=f"plan_pagos_{ref_input}.csv",
+    mime="text/csv"
+)
