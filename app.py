@@ -283,21 +283,44 @@ if (st.session_state["pab_table"] is None or
     st.session_state["pab_last_total"] = total_pab
     st.session_state["pab_last_n"] = n_rows
 
-# Editor
-st.caption("✅ Puedes editar **FECHA** y el **PAGO BANCO de la primera fila**; el resto se reequilibrará automáticamente.")
+# Editor  (bloque seguro para evitar ArrowTypeError)
+st.caption("✅ Puedes editar **FECHA** (como texto YYYY-MM-DD) y el **PAGO BANCO de la primera fila**; el resto se reequilibrará automáticamente.")
+
+# 1) Vista segura para el editor: FECHA como string; números como float
+df_view = st.session_state["pab_table"].copy()
+
+# Normalizar tipos
+df_view["N"] = pd.to_numeric(df_view["N"], errors="coerce").fillna(0).astype(int)
+for col_num in ["PAGO BANCO", "PAGO COMISION"]:
+    df_view[col_num] = pd.to_numeric(df_view[col_num], errors="coerce").fillna(0.0)
+
+# FECHA -> string "YYYY-MM-DD" (o vacío)
+df_view["FECHA"] = pd.to_datetime(df_view["FECHA"], errors="coerce")
+df_view["FECHA"] = df_view["FECHA"].dt.strftime("%Y-%m-%d").fillna("")
+
 edited = st.data_editor(
-    st.session_state["pab_table"],
+    df_view,
     num_rows="fixed",  # número de filas fijado por N PaB
     use_container_width=True,
     column_config={
         "N": st.column_config.NumberColumn(format="%d", step=1, disabled=True),
-        "FECHA": st.column_config.DateColumn(format="YYYY-MM-DD"),
-        # Permitimos editar PAGO BANCO libremente, pero reequilibramos según regla de negocio
+        # Usamos TextColumn para evitar mezcla de tipos; el usuario escribe YYYY-MM-DD
+        "FECHA": st.column_config.TextColumn(help="Formato: YYYY-MM-DD"),
         "PAGO BANCO": st.column_config.NumberColumn(format="%.0f", step=1000),
         "PAGO COMISION": st.column_config.NumberColumn(format="%.0f", step=1000),
     },
-    key="editor_pab"
+    key="editor_pab_main"
 ).copy()
+
+# 2) Convertir de vuelta a tipos de trabajo
+edited["N"] = pd.to_numeric(edited["N"], errors="coerce").fillna(0).astype(int)
+edited["PAGO BANCO"] = pd.to_numeric(edited["PAGO BANCO"], errors="coerce").fillna(0.0)
+edited["PAGO COMISION"] = pd.to_numeric(edited["PAGO COMISION"], errors="coerce").fillna(0.0)
+edited["FECHA"] = pd.to_datetime(edited["FECHA"], errors="coerce")  # vuelve a datetime64[ns]
+
+# Guardar de nuevo en sesión (en el formato de trabajo)
+st.session_state["pab_table"] = edited
+
 
 # --- Reglas de reequilibrio:
 # Si el usuario cambia el PAGO BANCO de la fila 1, las demás filas se ajustan iguales
@@ -349,40 +372,6 @@ st.caption(f"🔎 Control: Total PAGO BANCO objetivo = {total_pab:,.0f} | Total 
 
 st.markdown("### 💡 Recomendación de PAGO COMISIÓN")
 
-# =========================
-# 📅 Editor seguro de tabla de pagos (evita ArrowTypeError)
-# =========================
-if "pab_table" in st.session_state:
-    df_tmp = st.session_state["pab_table"].copy()
-
-    # 🔹 Normalizar columna FECHA — siempre string (para evitar ArrowTypeError)
-    if "FECHA" in df_tmp.columns:
-        df_tmp["FECHA"] = pd.to_datetime(df_tmp["FECHA"], errors="coerce")
-        df_tmp["FECHA"] = df_tmp["FECHA"].dt.strftime("%Y-%m-%d").fillna("")
-    else:
-        df_tmp["FECHA"] = ""
-
-    # 🔹 Asegurar tipos uniformes en todas las columnas
-    for col in df_tmp.columns:
-        if pd.api.types.is_numeric_dtype(df_tmp[col]):
-            df_tmp[col] = pd.to_numeric(df_tmp[col], errors="coerce").fillna(0)
-        else:
-            df_tmp[col] = df_tmp[col].astype(str).replace("nan", "").replace("NaT", "")
-
-    # 🔹 Evitar conflictos de clave con el otro editor
-    st.markdown("📅 **Tabla de pagos — PAGO BANCO (revisión final)**")
-    st.caption("✅ Ahora sí puedes editar sin errores — 100% compatible con PyArrow.")
-
-    edited = st.data_editor(
-        df_tmp,
-        hide_index=True,
-        use_container_width=True,
-        key="editor_pab_final"  # clave distinta del editor anterior
-    )
-
-    # 🔹 Restaurar tipo fecha después de editar
-    edited["FECHA"] = pd.to_datetime(edited["FECHA"], errors="coerce")
-    st.session_state["pab_table"] = edited
 # =========================
 # 🧮 Cálculo de la recomendación
 # =========================
