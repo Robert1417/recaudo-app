@@ -306,7 +306,6 @@ if restante > 0:
         idxs = []
         for i in range(len(df)):
             if i == 0:
-                # N=1: no usamos para cuotas iguales (solo CE inicial)
                 continue
             pb = int(df.at[i, "PAGO BANCO"])
             pc = int(df.at[i, "PAGO COMISION"])
@@ -323,60 +322,130 @@ if restante > 0:
         last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
         nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
         df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, 0]
-        # Recalcula capacidades
         caps, idxs = capacidades_actuales(df_plan)
 
-    # 3) Elige el número mínimo de cuotas k para que cuota ≤ min(capacidad de los k mejores meses)
-    #    (tomamos los k meses con mayor capacidad)
+    # 3) Mínimo k tal que cuota <= min(capacidad del top-k)
     caps_sorted = sorted(caps, reverse=True)
     k = None
     for m in range(1, len(caps_sorted) + 1):
-        cap_min_topm = caps_sorted[m - 1]  # la menor capacidad dentro del top-m
+        cap_min_topm = caps_sorted[m - 1]
         cuota_necesaria = math.ceil(restante / m)
         if cuota_necesaria <= cap_min_topm:
             k = m
             break
     if k is None:
-        # fallback (no debería ocurrir porque sum(caps) ≥ restante): usar todos los meses
         k = len(caps_sorted)
 
-    # 4) Calcula k cuotas casi iguales (±1) que caben en esos k meses
+    # 4) k cuotas casi iguales (±1)
     cuota_base = restante // k
-    extras = restante - cuota_base * k  # primeras 'extras' cuotas serán cuota_base+1
+    extras = restante - cuota_base * k
     cuotas = [cuota_base + 1] * extras + [cuota_base] * (k - extras)
 
-    # 5) Selecciona los índices de los k meses con mayor capacidad, luego ordénalos cronológicamente
-    #    Mapear capacidad→índice preservando originales
+    # 5) Índices de los k con mayor capacidad, luego orden cronológico
     caps_with_idx = list(zip(caps, idxs))
-    caps_with_idx.sort(key=lambda x: x[0], reverse=True)  # por capacidad desc
+    caps_with_idx.sort(key=lambda x: x[0], reverse=True)
     sel = caps_with_idx[:k]
-    sel.sort(key=lambda x: x[1])  # cronológico
+    sel.sort(key=lambda x: x[1])
 
-    # 6) Asigna cuotas respetando capacidad de cada mes seleccionado
+    # 6) Asignar cuotas respetando capacidad
     for (cuota, (cap, i)) in zip(cuotas, sel):
-        # seguridad (no debería exceder):
-        cuota_final = min(int(cuota), max(0, apartado_i - (int(df_plan.at[i, "PAGO BANCO"]) + int(df_plan.at[i, "PAGO COMISION"]))))
-        df_plan.at[i, "PAGO COMISION"] = int(df_plan.at[i, "PAGO COMISION"]) + cuota_final
+        cap_mes = max(0, apartado_i - (int(df_plan.at[i, "PAGO BANCO"]) + int(df_plan.at[i, "PAGO COMISION"])))
+        df_plan.at[i, "PAGO COMISION"] = int(df_plan.at[i, "PAGO COMISION"]) + min(int(cuota), cap_mes)
 
-    # 7) Si por redondeos quedó algo sin colocar (muy raro), agrega un mes nuevo y cierra exacto
-    faltante = restante - sum(cuotas)
-    if faltante > 0:
-        last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
-        nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
-        df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, faltante]
-        
-# Formato final
-df_plan["PAGO BANCO"] = df_plan["PAGO BANCO"].round(0).astype(int)
+# ---------------------------
+# 🔧 Editor libre + validación
+# ---------------------------
+
+# tipos consistentes
+df_plan["PAGO BANCO"]    = df_plan["PAGO BANCO"].round(0).astype(int)
 df_plan["PAGO COMISION"] = df_plan["PAGO COMISION"].round(0).astype(int)
 
-st.markdown("### 5) 📅 Plan de pagos sugerido")
-st.dataframe(df_plan, use_container_width=True)
+# objetivo para validación
+TARGET_PB  = int(round(float(pago_banco or 0.0)))
+CE_INI_INT = int(round(ce_inicial_pagada))
+TARGET_PC_REST = int(round(max(0.0, float(comision_exito or 0.0) - CE_INI_INT)))
 
+# — estado persistente del plan para ediciones
+if "plan_edit" not in st.session_state or aplicar:
+    st.session_state["plan_edit"] = df_plan.copy()
+
+def _add_row(df: pd.DataFrame) -> pd.DataFrame:
+    """Agregar una fila nueva al final (mes siguiente, PB=0, PC=0)."""
+    last_date = pd.to_datetime(df["FECHA"].max()).normalize() if len(df) else pd.Timestamp.today().normalize()
+    new_date  = end_of_month(last_date + pd.DateOffset(months=1))
+    new_N     = (int(df["N"].max()) + 1) if len(df) else 1
+    new_row   = pd.DataFrame([{"N": new_N, "FECHA": new_date, "PAGO BANCO": 0, "PAGO COMISION": 0}])
+    return pd.concat([df, new_row], ignore_index=True)
+
+# botón para agregar fila
+col_add, _ = st.columns([1,4])
+with col_add:
+    if st.button("➕ Agregar fila de pago"):
+        st.session_state["plan_edit"] = _add_row(st.session_state["plan_edit"])
+
+# Editor (solo fijamos la primera comisión luego de editar)
+st.markdown("### 5) 📅 Plan de pagos sugerido (editable)")
+edited = st.data_editor(
+    st.session_state["plan_edit"][["N", "FECHA", "PAGO BANCO", "PAGO COMISION"]],
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "N": st.column_config.NumberColumn(disabled=True, format="%d"),
+        "FECHA": st.column_config.DatetimeColumn(disabled=True),
+        "PAGO BANCO": st.column_config.NumberColumn(format="%.0f", step=1000),
+        "PAGO COMISION": st.column_config.NumberColumn(
+            format="%.0f", step=1000,
+            help="La primera fila de PAGO COMISION es fija (CE inicial)."
+        ),
+    },
+    key="editor_plan_libre",
+).copy()
+
+# Normalizar y fijar CE inicial en fila 1 (si existe)
+for c in ["PAGO BANCO", "PAGO COMISION"]:
+    edited[c] = pd.to_numeric(edited[c], errors="coerce").fillna(0).astype(int)
+if len(edited) > 0:
+    edited.at[0, "PAGO COMISION"] = CE_INI_INT
+
+# Guardar en sesión lo que el usuario dejó
+st.session_state["plan_edit"] = edited.copy()
+
+# ---------------------------
+# ✅ Validaciones 99% accuracy
+# ---------------------------
+EPS = 0.01  # 1% de tolerancia
+
+# 1) PAGO BANCO: todas las filas
+sum_pb = int(edited["PAGO BANCO"].sum())
+if TARGET_PB > 0:
+    acc_pb = 1.0 - abs(sum_pb - TARGET_PB) / TARGET_PB
+    if acc_pb >= (1.0 - EPS):
+        st.success(f"✔ PAGO BANCO ok: {sum_pb:,} de {TARGET_PB:,} (exactitud {acc_pb*100:.2f}%).")
+    else:
+        dif = sum_pb - TARGET_PB
+        verbo = "exceden" if dif > 0 else "faltan"
+        st.error(f"⚠ PAGO BANCO {verbo} {abs(dif):,}. Exactitud {acc_pb*100:.2f}% (< 99%).")
+else:
+    st.info("ℹ PAGO BANCO objetivo es 0; no se valida exactitud.")
+
+# 2) PAGO COMISION: **sin incluir** la primera fila (CE inicial)
+sum_pc_rest = int(edited["PAGO COMISION"].iloc[1:].sum()) if len(edited) > 1 else 0
+if TARGET_PC_REST > 0:
+    acc_pc = 1.0 - abs(sum_pc_rest - TARGET_PC_REST) / TARGET_PC_REST
+    if acc_pc >= (1.0 - EPS):
+        st.success(f"✔ PAGO COMISIÓN ok: {sum_pc_rest:,} de {TARGET_PC_REST:,} (exactitud {acc_pc*100:.2f}%).")
+    else:
+        dif = sum_pc_rest - TARGET_PC_REST
+        verbo = "exceden" if dif > 0 else "faltan"
+        st.error(f"⚠ PAGO COMISIÓN (sin CE inicial) {verbo} {abs(dif):,}. Exactitud {acc_pc*100:.2f}% (< 99%).")
+else:
+    st.info("ℹ Comisión restante objetivo es 0; no se valida exactitud.")
+
+# Resumen final
 st.caption(
-    f"🔎 Control — Pago Banco: {df_plan['PAGO BANCO'].sum():,} | "
-    f"Pago Comisión: {df_plan['PAGO COMISION'].sum():,} | "
-    f"Cuotas totales: {len(df_plan):,}"
+    f"🔎 Control — Pago Banco: {edited['PAGO BANCO'].sum():,} | "
+    f"Pago Comisión (total): {edited['PAGO COMISION'].sum():,} | "
+    f"Cuotas totales: {len(edited):,}"
 )
-
 
 
