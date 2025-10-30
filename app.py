@@ -97,8 +97,8 @@ sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 # ---------- 3) cajas editables ----------
 st.markdown("### 3) Valores base (puedes editarlos)")
 
+# Del primer registro tomamos Apartado/Comisión/Saldo/CE; la Deuda se SUMA si hay varias
 fila_primera = sel.iloc[0]
-
 deuda_res_total   = float(sel[col_deu].sum(skipna=True))
 apartado_base     = float(_to_num(fila_primera[col_apar])) if pd.notna(fila_primera[col_apar]) else 0.0
 comision_m_base   = float(_to_num(fila_primera[col_com])) if pd.notna(fila_primera[col_com]) else 0.0
@@ -164,54 +164,6 @@ with col6:
         value=0.0, format="%.0f",
         help="Monto extra aportado al inicio; por defecto 0"
     )
-# --- BLOQUE NUEVO: 4 columnas con Saldo Neto (no editable) ---
-colA, colB, colC, colD = st.columns(4)
-
-with colA:
-    deuda_res_edit = st.number_input("💰 Deuda Resuelve", min_value=0.0, step=1000.0,
-                                     value=deuda_res_total, format="%.0f")
-    apartado_edit  = st.number_input("📆 Apartado Mensual", min_value=0.0, step=1000.0,
-                                     value=apartado_base, format="%.0f")
-
-with colB:
-    comision_m_edit = st.number_input(
-        "🎯 Comisión Mensual",
-        min_value=0.0,
-        step=1000.0,
-        value=comision_m_base,
-        format="%.0f"
-    )
-    saldo_edit = st.number_input(
-        "💼 Saldo (Ahorro)",
-        min_value=0.0,
-        step=1000.0,
-        value=saldo_base,
-        format="%.0f"
-    )
-
-# --- Cálculo del Saldo Neto (solo si Saldo > 0 y no NaN) ---
-if pd.notna(saldo_edit) and saldo_edit > 0:
-    saldo_neto = float(saldo_edit) - (float(saldo_edit) - 25000.0) * 0.004
-    saldo_neto = max(0.0, saldo_neto)
-else:
-    saldo_neto = 0.0  # no se calcula si saldo es 0 o NaN
-
-saldo_neto_disp = float(np.round(saldo_neto, 0))
-
-with colC:
-    st.number_input(
-        "🧾 Saldo Neto",
-        value=saldo_neto_disp,
-        step=1000.0,
-        min_value=0.0,
-        format="%.0f",
-        disabled=True,
-        help="Calculado automáticamente: Saldo − (Saldo − 25.000) × 0.004 (solo si Saldo > 0)"
-    )
-with colD:
-    deposito_edit   = st.number_input("💵 Depósito", min_value=0.0, step=1000.0,
-                                      value=0.0, format="%.0f",
-                                      help="Monto extra aportado al inicio; por defecto 0")
 
 # ---------- 4) Pago banco, descuento, N PaB, comisión éxito, CE inicial ----------
 st.markdown("### 4) PAGO BANCO y parámetros derivados")
@@ -231,9 +183,12 @@ com_exito_default = max(0.0, (deuda_res_edit - pago_banco) * 1.19 * ce_base)
 
 c4, c5 = st.columns(2)
 with c4:
-    comision_exito = st.number_input("🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
-                                     value=float(com_exito_default), format="%.0f",
-                                     help=f"Prefill: (Deuda Resuelve − PAGO BANCO) × 1.19 × CE (CE base del 1er registro = {ce_base:.4f})")
+    comision_exito = st.number_input(
+        "🏁 Comisión de éxito (editable)",
+        min_value=0.0, step=1000.0,
+        value=float(com_exito_default), format="%.0f",
+        help=f"Prefill: (Deuda Resuelve − PAGO BANCO) × 1.19 × CE (CE base del 1er registro = {ce_base:.4f})"
+    )
 with c5:
     ce_inicial_txt = st.text_input("🧪 CE inicial (opcional)", value="", placeholder="Ej. 150000")
     try:
