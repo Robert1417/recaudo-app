@@ -109,13 +109,19 @@ comision_m_base   = float(_to_num(fila_primera[col_com])) if pd.notna(fila_prime
 saldo_base        = float(_to_num(fila_primera[col_saldo])) if pd.notna(fila_primera[col_saldo]) else 0.0
 ce_base           = float(_to_num(fila_primera[col_ce])) if pd.notna(fila_primera[col_ce]) else 0.0
 
-colA, colB = st.columns(2)
+colA, colB, colC = st.columns(3)
 with colA:
     deuda_res_edit = st.number_input("💰 Deuda Resuelve", min_value=0.0, step=1000.0, value=deuda_res_total, format="%.0f")
     apartado_edit  = st.number_input("📆 Apartado Mensual", min_value=0.0, step=1000.0, value=apartado_base, format="%.0f")
 with colB:
     comision_m_edit = st.number_input("🎯 Comisión Mensual", min_value=0.0, step=1000.0, value=comision_m_base, format="%.0f")
     saldo_edit      = st.number_input("💼 Saldo (Ahorro)", min_value=0.0, step=1000.0, value=saldo_base, format="%.0f")
+with colC:
+    deposito_edit   = st.number_input(
+        "💵 Depósito",
+        min_value=0.0, step=1000.0, value=0.0, format="%.0f",
+        help="Monto extra aportado al inicio; por defecto 0"
+    )
 
 # ---------- 4) Pago banco, descuento, N PaB, comisión éxito, CE inicial ----------
 st.markdown("### 4) PAGO BANCO y parámetros derivados")
@@ -139,7 +145,7 @@ with c4:
                                      value=float(com_exito_default), format="%.0f",
                                      help=f"Prefill: (Deuda Resuelve − PAGO BANCO) × 1.19 × CE (CE base del 1er registro = {ce_base:.4f})")
 with c5:
-    ce_inicial_txt = st.text_input("🧪 CE inicial (opcional)", value="", placeholder="Ej. 0.12")
+    ce_inicial_txt = st.text_input("🧪 CE inicial (opcional)", value="", placeholder="Ej. 150000")
     try:
         ce_inicial = float(ce_inicial_txt.replace(",", ".")) if ce_inicial_txt.strip() != "" else None
     except Exception:
