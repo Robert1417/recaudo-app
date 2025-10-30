@@ -3,3 +3,4 @@ pandas
 numpy
 python-dateutil
 openpyxl
+joblib
