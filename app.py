@@ -346,19 +346,38 @@ st.caption(f"🔎 Control: Total PAGO BANCO objetivo = {total_pab:,.0f} | Total 
 
 # =========================
 # 🧮 Recomendación automática de PAGO COMISION
-#   - Respeta: 1) CE inicial va 100% en la primera fila (N=1)
-#              2) Mientras haya PAGO BANCO>0, la comisión ese mes no supera (Apartado - PAGO BANCO)
-#              3) El resto (Comisión de éxito - CE inicial - comisiones usadas durante PAGO BANCO)
-#                 se reparte en el mínimo # de cuotas posibles, tope = Apartado;
-#                 si serían +6 cuotas, tope = 1.5×Apartado
-#   - Si faltan filas para repartir, se agregan automáticamente con PAGO BANCO=0 y fechas mensuales
 # =========================
 
 st.markdown("### 💡 Recomendación de PAGO COMISIÓN")
+
+# --- Corrección global: asegurar tipos antes de cualquier uso ---
+if "pab_table" in st.session_state:
+    df_tmp = st.session_state["pab_table"].copy()
+    if "FECHA" in df_tmp.columns:
+        # Si hay mezcla de tipos (Timestamp, date, NaT, string), convertir de forma segura
+        df_tmp["FECHA"] = pd.to_datetime(df_tmp["FECHA"], errors="coerce")
+        df_tmp["FECHA"] = df_tmp["FECHA"].apply(
+            lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else ""
+        )
+    else:
+        df_tmp["FECHA"] = ""
+
+    # Editor seguro (si lo usas antes del botón)
+    edited = st.data_editor(
+        df_tmp,
+        hide_index=True,
+        use_container_width=True,
+        key="editor_pab"
+    ).copy()
+
+    # Restaurar formato datetime después de editar
+    edited["FECHA"] = pd.to_datetime(edited["FECHA"], errors="coerce")
+    st.session_state["pab_table"] = edited
+
+# --- Cálculo de la recomendación ---
 if st.button("🧮 Calcular recomendación de PAGO COMISIÓN", type="primary"):
     import math
 
-    # Seguridades básicas
     apartado = float(apartado_edit or 0.0)
     ce_ini = float(ce_inicial or 0.0)
     com_exito = float(comision_exito or 0.0)
@@ -367,21 +386,19 @@ if st.button("🧮 Calcular recomendación de PAGO COMISIÓN", type="primary"):
         st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular la recomendación.")
     else:
         df_tab = st.session_state["pab_table"].copy()
-        # Asegurar tipos
         df_tab["PAGO BANCO"] = pd.to_numeric(df_tab["PAGO BANCO"], errors="coerce").fillna(0.0)
         df_tab["PAGO COMISION"] = pd.to_numeric(df_tab["PAGO COMISION"], errors="coerce").fillna(0.0)
         df_tab["FECHA"] = pd.to_datetime(df_tab["FECHA"], errors="coerce")
 
-        # 1) Primera fila: CE inicial sí o sí
+        # 1️⃣ Primera fila: CE inicial
         if not df_tab.empty and 1 in df_tab["N"].values:
             df_tab.loc[df_tab["N"] == 1, "PAGO COMISION"] = ce_ini
         else:
             st.error("No hay fila N=1 en la tabla de pagos.")
             st.stop()
 
-        # 2) Reparto durante meses con PAGO BANCO > 0
+        # 2️⃣ Reparto durante meses con PAGO BANCO > 0
         restante_total = max(0.0, com_exito - ce_ini)
-
         for idx in df_tab.index:
             n_val = int(df_tab.at[idx, "N"])
             if n_val == 1:
@@ -395,7 +412,7 @@ if st.button("🧮 Calcular recomendación de PAGO COMISIÓN", type="primary"):
             else:
                 df_tab.at[idx, "PAGO COMISION"] = 0.0
 
-        # 3) Repartir el resto cuando ya no hay PAGO BANCO
+        # 3️⃣ Repartir el resto (cuando ya no hay PAGO BANCO)
         if restante_total > 0:
             if apartado <= 0:
                 tope = restante_total
@@ -434,29 +451,25 @@ if st.button("🧮 Calcular recomendación de PAGO COMISIÓN", type="primary"):
                 df_tab.at[i, "PAGO COMISION"] = cuota
                 restante_total -= cuota
 
-            # Ajuste final
             suma_actual = float(df_tab["PAGO COMISION"].sum())
             diff_final = com_exito - suma_actual
             if abs(diff_final) >= 0.5:
                 ult_idx = sin_banco_idx[-1] if len(sin_banco_idx) > 0 else df_tab.index[-1]
                 df_tab.at[ult_idx, "PAGO COMISION"] += diff_final
 
-        # Redondeo
+        # ✅ Redondeo y mostrar
         df_tab["PAGO COMISION"] = df_tab["PAGO COMISION"].round(0)
-
-        # Guardar y mostrar
         st.session_state["pab_table"] = df_tab
         st.success("✅ Recomendación de PAGO COMISIÓN aplicada.")
 
-        # ✅ Convertir fechas a string antes de mostrar
+        # Mostrar sin errores
         df_show = df_tab.copy()
         df_show["FECHA"] = df_show["FECHA"].apply(
             lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else ""
         )
-
         st.dataframe(df_show, use_container_width=True)
 
-        # 🎯 Resumen de control
+        # 🎯 Control resumen
         total_com_rec = float(df_tab["PAGO COMISION"].sum())
         st.caption(
             f"🎯 Control comisión: CE inicial = {ce_ini:,.0f} | Comisión de éxito = {com_exito:,.0f} | "
