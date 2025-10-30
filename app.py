@@ -355,35 +355,34 @@ st.markdown("### 💡 Recomendación de PAGO COMISIÓN")
 if "pab_table" in st.session_state:
     df_tmp = st.session_state["pab_table"].copy()
 
-    # 1️⃣ Normalizar columna FECHA
+    # 🔹 Normalizar columna FECHA — siempre string (para evitar ArrowTypeError)
     if "FECHA" in df_tmp.columns:
         df_tmp["FECHA"] = pd.to_datetime(df_tmp["FECHA"], errors="coerce")
         df_tmp["FECHA"] = df_tmp["FECHA"].dt.strftime("%Y-%m-%d").fillna("")
     else:
         df_tmp["FECHA"] = ""
 
-    # 2️⃣ Asegurar que TODAS las columnas sean de tipo compatible con Arrow
+    # 🔹 Asegurar tipos uniformes en todas las columnas
     for col in df_tmp.columns:
-        if df_tmp[col].dtype == "object":
-            df_tmp[col] = df_tmp[col].astype(str).replace("nan", "")
-        elif pd.api.types.is_numeric_dtype(df_tmp[col]):
+        if pd.api.types.is_numeric_dtype(df_tmp[col]):
             df_tmp[col] = pd.to_numeric(df_tmp[col], errors="coerce").fillna(0)
+        else:
+            df_tmp[col] = df_tmp[col].astype(str).replace("nan", "").replace("NaT", "")
 
-    # 3️⃣ Editor interactivo sin errores
-    st.markdown("📅 **Tabla de pagos — PAGO BANCO**")
-    st.caption("✅ Puedes editar FECHA y el PAGO BANCO de la primera fila; el resto se reequilibrará automáticamente.")
+    # 🔹 Evitar conflictos de clave con el otro editor
+    st.markdown("📅 **Tabla de pagos — PAGO BANCO (revisión final)**")
+    st.caption("✅ Ahora sí puedes editar sin errores — 100% compatible con PyArrow.")
 
     edited = st.data_editor(
         df_tmp,
         hide_index=True,
         use_container_width=True,
-        key="editor_pab"
-    ).copy()
+        key="editor_pab_final"  # clave distinta del editor anterior
+    )
 
-    # 4️⃣ Restaurar formato datetime después de editar
+    # 🔹 Restaurar tipo fecha después de editar
     edited["FECHA"] = pd.to_datetime(edited["FECHA"], errors="coerce")
     st.session_state["pab_table"] = edited
-
 # =========================
 # 🧮 Cálculo de la recomendación
 # =========================
