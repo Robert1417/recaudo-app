@@ -190,12 +190,34 @@ with c4:
         help=f"Prefill: (Deuda Resuelve − PAGO BANCO) × 1.19 × CE (CE base del 1er registro = {ce_base:.4f})"
     )
 with c5:
-    ce_inicial_txt = st.text_input("🧪 CE inicial (opcional)", value="", placeholder="Ej. 150000")
+    ce_inicial_txt = st.text_input("🧪 CE inicial", value="", placeholder="Ej. 150000")
     try:
         ce_inicial = float(ce_inicial_txt.replace(",", ".")) if ce_inicial_txt.strip() != "" else None
     except Exception:
         ce_inicial = None
         st.warning("CE inicial inválido; déjalo vacío o usa un número como 0.12")
+
+# --- Barra: CE inicial vs Comisión de éxito ---
+st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
+
+if (ce_inicial is None) or (ce_inicial <= 0):
+    st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
+else:
+    base = float(comision_exito) if comision_exito and comision_exito > 0 else 0.0
+    if base <= 0:
+        st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular el porcentaje.")
+    else:
+        porcentaje = (float(ce_inicial) / base) * 100.0
+        porcentaje_capped = max(0.0, min(porcentaje, 100.0))  # limitar entre 0% y 100%
+
+        # Barra de progreso
+        st.progress(int(round(porcentaje_capped)))
+
+        # Texto con detalle debajo
+        st.caption(
+            f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  "
+            f"**{porcentaje:,.2f}%** de la Comisión de éxito"
+        )
 
 # =========================
 # 🧱 SECCIÓN: Tabla de pagos (PAGO BANCO)
