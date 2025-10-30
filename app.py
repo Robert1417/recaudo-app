@@ -367,74 +367,63 @@ if restante > 0:
 
 
 # ---------------------------
-# 🔧 Editor con modos: Ver / Editar + Guardar/Cancelar
+# 🔧 Editor libre + validación (con Editar/Guardar/Cancelar y estado persistente)
 # ---------------------------
 
-# Tipos consistentes
+# tipos consistentes de la recomendación inicial
 df_plan["PAGO BANCO"]    = df_plan["PAGO BANCO"].round(0).astype(int)
 df_plan["PAGO COMISION"] = df_plan["PAGO COMISION"].round(0).astype(int)
 
-# Objetivos para validación
-TARGET_PB  = int(round(float(pago_banco or 0.0)))
-CE_INI_INT = int(round(ce_inicial_pagada))
+# objetivos para validación
+TARGET_PB   = int(round(float(pago_banco or 0.0)))
+CE_INI_INT  = int(round(ce_inicial_pagada))
 TARGET_PC_REST = int(round(max(0.0, float(comision_exito or 0.0) - CE_INI_INT)))
-EPS = 0.01  # 1% de tolerancia
 
-# Estado persistente
-if "plan_saved" not in st.session_state or aplicar:
-    st.session_state["plan_saved"] = df_plan.copy()
-if "plan_edit" not in st.session_state or aplicar:
-    st.session_state["plan_edit"] = st.session_state["plan_saved"].copy()
-if "edit_mode" not in st.session_state:
-    st.session_state["edit_mode"] = False
+# ====== Estado de sesión ======
+ss = st.session_state
+if "plan_current" not in ss or aplicar:
+    # plan base recomendado (se actualiza solo cuando haces "Aplicar cambios")
+    ss["plan_current"] = df_plan.copy()
 
-# Encabezado y controles
+if "edit_mode" not in ss:
+    ss["edit_mode"] = False
+
+if "plan_draft" not in ss:
+    ss["plan_draft"] = ss["plan_current"].copy()
+
+# ====== Botones de control ======
+cbtn1, cbtn2 = st.columns([1,1])
+
+with cbtn1:
+    if not ss["edit_mode"]:
+        if st.button("✏️ Editar", use_container_width=True):
+            ss["plan_draft"] = ss["plan_current"].copy()  # abrir borrador desde el actual
+            ss["edit_mode"] = True
+            st.rerun()
+    else:
+        if st.button("💾 Guardar", type="primary", use_container_width=True):
+            # al guardar, corregimos por si editaron la primera comisión
+            if len(ss["plan_draft"]) > 0:
+                ss["plan_draft"].loc[ss["plan_draft"].index[0], "PAGO COMISION"] = CE_INI_INT
+            ss["plan_current"] = ss["plan_draft"].copy()
+            ss["edit_mode"] = False
+            st.rerun()
+
+with cbtn2:
+    if ss["edit_mode"]:
+        if st.button("↩️ Cancelar", use_container_width=True):
+            # descartar cambios y volver a ver
+            ss["plan_draft"] = ss["plan_current"].copy()
+            ss["edit_mode"] = False
+            st.rerun()
+
 st.markdown("### 5) 📅 Plan de pagos sugerido (editable)")
 
-c1, c2, c3 = st.columns([1,1,2])
-with c1:
-    if not st.session_state["edit_mode"]:
-        if st.button("✏️ Editar"):
-            st.session_state["plan_edit"] = st.session_state["plan_saved"].copy()
-            st.session_state["edit_mode"] = True
-    else:
-        if st.button("💾 Guardar"):
-            # Fijar CE inicial en la primera fila al guardar
-            if len(st.session_state["plan_edit"]) > 0:
-                st.session_state["plan_edit"].loc[0, "PAGO COMISION"] = CE_INI_INT
-            st.session_state["plan_saved"] = st.session_state["plan_edit"].copy()
-            st.session_state["edit_mode"] = False
-with c2:
-    if st.session_state["edit_mode"]:
-        if st.button("↩️ Cancelar"):
-            st.session_state["plan_edit"] = st.session_state["plan_saved"].copy()
-            st.session_state["edit_mode"] = False
-with c3:
-    if st.session_state["edit_mode"]:
-        if st.button("➕ Agregar fila de pago"):
-            df = st.session_state["plan_edit"]
-            last_date = pd.to_datetime(df["FECHA"].max()).normalize() if len(df) else pd.Timestamp.today().normalize()
-            new_date  = end_of_month(last_date + pd.DateOffset(months=1))
-            new_N     = int(df["N"].max()) + 1 if len(df) else 1
-            df = pd.concat([df, pd.DataFrame([{
-                "N": new_N, "FECHA": new_date, "PAGO BANCO": 0, "PAGO COMISION": 0
-            }])], ignore_index=True)
-            st.session_state["plan_edit"] = df
-
-# Vista según modo
-if not st.session_state["edit_mode"]:
-    # Modo VER (no editable)
-    view_df = st.session_state["plan_saved"].copy()
-    view_df["PAGO BANCO"]    = pd.to_numeric(view_df["PAGO BANCO"], errors="coerce").fillna(0).astype(int)
-    view_df["PAGO COMISION"] = pd.to_numeric(view_df["PAGO COMISION"], errors="coerce").fillna(0).astype(int)
-    if len(view_df) > 0:
-        view_df.loc[0, "PAGO COMISION"] = CE_INI_INT
-    st.dataframe(view_df[["N", "FECHA", "PAGO BANCO", "PAGO COMISION"]], use_container_width=True)
-    current = view_df
-else:
-    # Modo EDITAR (data_editor)
+# ====== Vista según modo ======
+if ss["edit_mode"]:
+    # Editor: el usuario puede cambiar todo excepto que nosotros fijaremos N=1 de PC al vuelo
     edited = st.data_editor(
-        st.session_state["plan_edit"][["N", "FECHA", "PAGO BANCO", "PAGO COMISION"]],
+        ss["plan_draft"][["N", "FECHA", "PAGO BANCO", "PAGO COMISION"]],
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -443,20 +432,35 @@ else:
             "PAGO BANCO": st.column_config.NumberColumn(format="%.0f", step=1000),
             "PAGO COMISION": st.column_config.NumberColumn(
                 format="%.0f", step=1000,
-                help="La primera fila de PAGO COMISION es fija (CE inicial) al guardar."
+                help="La primera fila de PAGO COMISION es fija (CE inicial)."
             ),
         },
-        key="editor_plan_libre",
-    )
-    # Normalizar tipos (solo en memoria de edición)
-    edited = edited.copy()
+        key="editor_plan_draft",
+    ).copy()
+
+    # normalizar y fijar CE inicial en primera fila del borrador
     for c in ["PAGO BANCO", "PAGO COMISION"]:
         edited[c] = pd.to_numeric(edited[c], errors="coerce").fillna(0).astype(int)
-    st.session_state["plan_edit"] = edited
-    current = edited
+    if len(edited) > 0:
+        edited.loc[edited.index[0], "PAGO COMISION"] = CE_INI_INT
 
-# -------- Validaciones (se muestran siempre con la tabla visible) --------
-sum_pb = int(current["PAGO BANCO"].sum())
+    ss["plan_draft"] = edited.copy()
+    df_to_check = ss["plan_draft"]
+
+else:
+    # Modo ver (no editable)
+    st.dataframe(
+        ss["plan_current"][["N", "FECHA", "PAGO BANCO", "PAGO COMISION"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+    df_to_check = ss["plan_current"]
+
+# ====== Validaciones 99% ======
+EPS = 0.01  # 1% de tolerancia
+
+# 1) PAGO BANCO: todas las filas
+sum_pb = int(df_to_check["PAGO BANCO"].sum())
 if TARGET_PB > 0:
     acc_pb = 1.0 - abs(sum_pb - TARGET_PB) / TARGET_PB
     if acc_pb >= (1.0 - EPS):
@@ -468,7 +472,8 @@ if TARGET_PB > 0:
 else:
     st.info("ℹ PAGO BANCO objetivo es 0; no se valida exactitud.")
 
-sum_pc_rest = int(current["PAGO COMISION"].iloc[1:].sum()) if len(current) > 1 else 0
+# 2) PAGO COMISION: sin incluir la primera fila (CE inicial)
+sum_pc_rest = int(df_to_check["PAGO COMISION"].iloc[1:].sum()) if len(df_to_check) > 1 else 0
 if TARGET_PC_REST > 0:
     acc_pc = 1.0 - abs(sum_pc_rest - TARGET_PC_REST) / TARGET_PC_REST
     if acc_pc >= (1.0 - EPS):
@@ -482,8 +487,8 @@ else:
 
 # Resumen final
 st.caption(
-    f"🔎 Control — Pago Banco: {current['PAGO BANCO'].sum():,} | "
-    f"Pago Comisión (total): {current['PAGO COMISION'].sum():,} | "
-    f"Cuotas totales: {len(current):,}"
+    f"🔎 Control — Pago Banco: {df_to_check['PAGO BANCO'].sum():,} | "
+    f"Pago Comisión (total): {df_to_check['PAGO COMISION'].sum():,} | "
+    f"Cuotas totales: {len(df_to_check):,}"
 )
 
