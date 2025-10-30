@@ -249,3 +249,115 @@ with st.form("parametros_base"):
 # Si no se han aplicado cambios, no seguimos (evitamos cálculos/render extra)
 if not aplicar:
     st.stop()
+
+
+# ===============================
+# 5) 📅 Plan de pagos (versión simple solicitada)
+# ===============================
+import math
+
+def end_of_month(ts: pd.Timestamp) -> pd.Timestamp:
+    return (ts + pd.offsets.MonthEnd(0)).normalize()
+
+# --- Fechas base
+today = pd.Timestamp.today().normalize()
+fechas = [today]
+for k in range(1, int(n_pab)):
+    fechas.append(end_of_month(today + pd.DateOffset(months=k)))
+
+# --- PAGO BANCO dividido en N PaB
+pago_total = float(pago_banco or 0.0)
+n_cuotas_banco = int(max(1, n_pab))
+if n_cuotas_banco == 1:
+    pagos_banco = [pago_total]
+else:
+    base = pago_total / n_cuotas_banco
+    pagos_banco = [base] * n_cuotas_banco
+    # redondeo a entero y ajuste para cerrar suma
+    pagos_banco = [round(x) for x in pagos_banco]
+    diff = round(pago_total) - sum(pagos_banco)
+    if diff != 0:
+        pagos_banco[-1] += diff
+
+# --- DataFrame inicial
+df_plan = pd.DataFrame({
+    "N": list(range(1, n_cuotas_banco + 1)),
+    "FECHA": fechas,
+    "PAGO BANCO": pagos_banco,
+    "PAGO COMISION": [0.0] * n_cuotas_banco,
+})
+
+# --- Intentar pagar CE inicial en N=1 si cabe
+ce_ini = float(ce_inicial or 0.0)
+apartado = float(apartado_edit or 0.0)
+com_exito = float(comision_exito or 0.0)
+
+ce_inicial_pagada = 0.0
+if ce_ini > 0 and len(df_plan) > 0:
+    capacidad_mes_1 = max(0.0, apartado - float(df_plan.at[0, "PAGO BANCO"]))
+    if ce_ini <= capacidad_mes_1:
+        df_plan.at[0, "PAGO COMISION"] = ce_ini
+        ce_inicial_pagada = ce_ini
+    # si no cabe, no se paga comisión en N=1 (queda para más adelante)
+
+# --- Comisión restante a repartir en cuotas iguales (cada una ≤ Apartado Mensual)
+restante = max(0.0, com_exito - ce_inicial_pagada)
+
+if restante > 0:
+    # si Apartado ≤ 0, todo en una sola cuota en meses adicionales
+    if apartado <= 0:
+        cuota = restante
+        num_cuotas = 1
+    else:
+        num_cuotas = int(max(1, math.ceil(restante / apartado)))
+        cuota = math.ceil(restante / num_cuotas)  # asegura cuota ≤ Apartado (o muy cerca)
+
+    # colocamos cuotas en meses con capacidad; si no caben, saltamos ese mes
+    i = 0            # índice de cuota colocada
+    fila = 0         # recorre meses existentes
+    while i < num_cuotas:
+        # si agotamos filas existentes, agregamos una nueva (mes siguiente) con PAGO BANCO = 0
+        if fila >= len(df_plan):
+            last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
+            nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
+            df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0.0, 0.0]
+
+        # capacidad del mes actual
+        pb = float(df_plan.at[fila, "PAGO BANCO"])
+        pc = float(df_plan.at[fila, "PAGO COMISION"])
+        capacidad = max(0.0, apartado - (pb + pc))
+
+        # si cabe exactamente la cuota (o más), la colocamos; si no, probamos siguiente mes
+        if capacidad >= cuota and restante >= cuota:
+            df_plan.at[fila, "PAGO COMISION"] = pc + cuota
+            restante -= cuota
+            i += 1
+        # si ya no queda tanto restante (última cuota más pequeña por ajustes de redondeo)
+        elif 0 < restante <= capacidad:
+            df_plan.at[fila, "PAGO COMISION"] = pc + restante
+            restante = 0.0
+            i = num_cuotas  # terminamos
+            break
+        # si no cabe, vamos al siguiente mes
+        fila += 1
+
+    # si por algún ajuste quedara algo, lo ponemos al final en un mes nuevo
+    if restante > 0:
+        last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
+        nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
+        df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0.0, restante]
+        restante = 0.0
+
+# Formato final (enteros bonitos)
+df_plan["PAGO BANCO"] = df_plan["PAGO BANCO"].round(0).astype(int)
+df_plan["PAGO COMISION"] = df_plan["PAGO COMISION"].round(0).astype(int)
+
+st.markdown("### 5) 📅 Plan de pagos sugerido")
+st.dataframe(df_plan, use_container_width=True)
+
+# Totales de control
+st.caption(
+    f"🔎 Control — Pago Banco: {df_plan['PAGO BANCO'].sum():,} | "
+    f"Pago Comisión: {df_plan['PAGO COMISION'].sum():,} | "
+    f"Cuotas totales: {len(df_plan):,}"
+)
