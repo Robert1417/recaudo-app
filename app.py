@@ -38,7 +38,6 @@ def _to_num(x):
 @st.cache_data(ttl=900, show_spinner=False)
 def _read_file(file):
     if file.name.lower().endswith(".csv"):
-        # Si conoces dtypes, pásalos aquí para acelerar aún más
         return pd.read_csv(file)
     return pd.read_excel(file, engine="openpyxl")
 
@@ -46,16 +45,13 @@ def _read_file(file):
 def _normalize_numeric(df, cols):
     df2 = df.copy()
     for c in cols:
-        df2[c] = pd.to_numeric(
-            df2[c].astype(str).str.replace(",", ""),
-            errors="coerce",
-        )
+        df2[c] = pd.to_numeric(df2[c].astype(str).str.replace(",", ""), errors="coerce")
     return df2
 
 @st.cache_data(show_spinner=False)
-def _map_columns(columns_list):
+def _map_columns(columns_list: tuple[str, ...]):
     # evita correr _find_col en cada rerun
-    dummy_df = pd.DataFrame(columns=columns_list)
+    dummy_df = pd.DataFrame(columns=list(columns_list))
     col_ref   = _find_col(dummy_df, ["Referencia"])
     col_id    = _find_col(dummy_df, ["Id deuda","id deuda","id_deuda"])
     col_banco = _find_col(dummy_df, ["Banco"])
@@ -79,8 +75,9 @@ except Exception as e:
     st.error(f"No pude leer el archivo: {e}")
     st.stop()
 
-# mapear columnas (cacheado)
-col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce = _map_columns(df_base.columns)
+# mapear columnas (cacheado) — pasa tuple hashable para evitar UnhashableParamError
+colnames_tuple = tuple(map(str, df_base.columns))
+col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce = _map_columns(colnames_tuple)
 
 needed = {"Referencia": col_ref, "Id deuda": col_id, "Banco": col_banco,
           "Deuda Resuelve": col_deu, "Apartado Mensual": col_apar,
