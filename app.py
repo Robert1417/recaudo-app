@@ -220,126 +220,129 @@ else:
         )
 
 # =========================
-# 5) 📅 Plan de pagos sugerido (solo N, FECHA, PAGO BANCO, PAGO COMISION)
+# 5) 📅 Plan de pagos sugerido (N, FECHA, PAGO BANCO, PAGO COMISION)
 # =========================
 st.markdown("### 5) 📅 Plan de pagos sugerido")
 
-if pago_banco < 0 or n_pab < 1 or comision_exito < 0:
-    st.warning("Revisa: PAGO BANCO (≥0), N PaB (≥1) y Comisión de éxito (≥0).")
-    st.stop()
-
 import math
-from datetime import date
 import pandas as pd
 
-def end_of_month(ts: pd.Timestamp) -> pd.Timestamp:
-    return (ts + pd.offsets.MonthEnd(0)).normalize()
+def _ts(x):
+    """Asegura Timestamp (acepta str/date/Timestamp)."""
+    if pd.isna(x):
+        return pd.Timestamp.today().normalize()
+    return pd.to_datetime(x, errors="coerce") or pd.Timestamp.today().normalize()
 
-def cap_mes(apartado, pago_banco_mes):
-    """Capacidad disponible para comisión en un mes."""
+def _eom(ts: pd.Timestamp) -> pd.Timestamp:
+    return (pd.Timestamp(ts).normalize() + pd.offsets.MonthEnd(0)).normalize()
+
+def _cap_mes(apartado, pago_banco_mes):
+    """Capacidad disponible para comisión en un mes; inf si no hay tope."""
     if apartado is None or apartado <= 0:
         return float("inf")
     return max(0.0, float(apartado) - float(pago_banco_mes))
 
-# ---------- 1) Crear meses base ----------
+# ------- sanity de entradas
+pago_banco_val   = float(pago_banco or 0.0)
+n_pab_val        = int(n_pab or 1)
+apartado_val     = float(apartado_edit or 0.0)
+com_exito_val    = float(comision_exito or 0.0)
+ce_inicial_val   = float(ce_inicial or 0.0)
+
+if n_pab_val < 1:
+    n_pab_val = 1
+if pago_banco_val < 0:
+    pago_banco_val = 0.0
+if com_exito_val < 0:
+    com_exito_val = 0.0
+if ce_inicial_val < 0:
+    ce_inicial_val = 0.0
+
+# ------- 1) Meses base (banco en N PaB iguales)
 hoy = pd.Timestamp.today().normalize()
-fechas = []
-pagos_banco = []
+fechas = [hoy + pd.DateOffset(months=i) for i in range(n_pab_val)]
+pagos_banco = [pago_banco_val / n_pab_val] * n_pab_val
 
-if n_pab == 1:
-    pagos_banco = [float(pago_banco)]
-    fechas = [hoy]
-else:
-    cuota_banco = float(pago_banco) / int(n_pab)
-    pagos_banco = [cuota_banco] * int(n_pab)
-    fechas = [hoy + pd.DateOffset(months=i) for i in range(int(n_pab))]
-
-# Ajuste redondeo
+# Ajuste por redondeo a enteros (estético) cerrando la suma
 pagos_banco = [round(x, 0) for x in pagos_banco]
-dif_bco = float(pago_banco) - sum(pagos_banco)
+dif_bco = pago_banco_val - sum(pagos_banco)
 if abs(dif_bco) >= 0.5:
     pagos_banco[-1] += dif_bco
 
-# ---------- 2) CE inicial como PAGO COMISION en mes 1 ----------
-if len(fechas) == 0:
-    fechas = [hoy]
-    pagos_banco = [0.0]
+# ------- 2) Fila 1: CE inicial como PAGO COMISION (respetando tope mensual)
+cap_f1 = _cap_mes(apartado_val, pagos_banco[0] if len(pagos_banco) else 0.0)
+pago_com_f1 = min(ce_inicial_val, cap_f1)
+restante = max(0.0, com_exito_val - pago_com_f1)
 
-cap_1 = cap_mes(apartado_edit, pagos_banco[0])
-ce_inicial_val = float(ce_inicial or 0.0)
-pago_comision_f1 = min(ce_inicial_val, cap_1)
-
-restante = max(0.0, float(comision_exito) - pago_comision_f1)
-
-# ---------- 3) Calcular capacidades ----------
-def capacidad_del_mes(idx, fechas, pagos_banco):
-    while idx >= len(fechas):
-        fechas.append(fechas[-1] + pd.DateOffset(months=1))
-        pagos_banco.append(0.0)
-    return cap_mes(apartado_edit, pagos_banco[idx])
-
-capacidades = [cap_1]
+# ------- 3) Capacidades de los meses existentes
+capacidades = [cap_f1]
 for i in range(1, len(fechas)):
-    capacidades.append(cap_mes(apartado_edit, pagos_banco[i]))
+    capacidades.append(_cap_mes(apartado_val, pagos_banco[i]))
 
-# ---------- 4) Buscar mínimo número de meses (k) ----------
-k = 0
+# Helper: extender un mes (si hace falta) y devolver capacidad
+def _ensure_mes(i):
+    while i >= len(fechas):
+        ult = _ts(fechas[-1])
+        fechas.append(ult + pd.DateOffset(months=1))
+        pagos_banco.append(0.0)
+        capacidades.append(_cap_mes(apartado_val, 0.0))
+    return capacidades[i]
+
+# ------- 4) Encontrar k mínimo y cuota igual
+k = 0              # nº de meses adicionales con comisión (además de la fila 1)
 cuota_igual = 0.0
 
 if restante > 0:
     k = 1
     while True:
-        while len(capacidades) < (k + 1):
-            capacidades.append(capacidad_del_mes(len(capacidades), fechas, pagos_banco))
+        # Garantizar que existan k meses adicionales
+        for idx in range(1, k + 1):
+            _ensure_mes(idx)
+        # cuota tentativa (todas iguales)
         cuota_tent = math.ceil(restante / k)
-        cabe = all(cuota_tent <= capacidades[m] for m in range(1, k + 1))
-        if cabe:
+        # ¿Cabe en todos los k meses?
+        if all(cuota_tent <= capacidades[idx] for idx in range(1, k + 1)):
             cuota_igual = float(cuota_tent)
             break
         k += 1
 
-# ---------- 5) Construcción final ----------
+# ------- 5) Construcción de la tabla
 N_total = max(len(fechas), 1 + k)
-while len(fechas) < N_total:
-    fechas.append(fechas[-1] + pd.DateOffset(months=1))
-    pagos_banco.append(0.0)
-    capacidades.append(cap_mes(apartado_edit, pagos_banco[-1]))
+for _ in range(len(fechas), N_total):
+    _ensure_mes(len(fechas))
 
 pago_comision = [0.0] * N_total
-pago_comision[0] = round(pago_comision_f1, 0)
+if N_total > 0:
+    pago_comision[0] = round(pago_com_f1, 0)
 
-for m in range(1, 1 + k):
-    pago_comision[m] = cuota_igual
+for i in range(1, 1 + k):
+    pago_comision[i] = cuota_igual
 
-# Ajuste redondeo total
-dif_com = float(comision_exito) - sum(pago_comision)
+# Ajuste para cerrar exactamente el total de comisión
+dif_com = com_exito_val - sum(pago_comision)
 if abs(dif_com) >= 0.5:
-    idxs = [i for i, v in enumerate(pago_comision) if v > 0]
-    if idxs:
-        pago_comision[idxs[-1]] += dif_com
-    else:
-        pago_comision[0] += dif_com
+    # súmalo en la última cuota positiva (o en la primera si no hay)
+    idxs_pos = [i for i, v in enumerate(pago_comision) if v > 0]
+    target = (idxs_pos[-1] if idxs_pos else 0)
+    pago_comision[target] += dif_com
 
-# ---------- 6) Verificación de límite mensual ----------
-if apartado_edit and apartado_edit > 0:
+# ------- 6) Verificación del tope mensual (banco + comisión <= apartado)
+if apartado_val and apartado_val > 0:
     i = 0
     while i < len(pago_comision):
         total_mes = float(pagos_banco[i]) + float(pago_comision[i])
-        if total_mes > float(apartado_edit) + 0.1:
-            exced = total_mes - float(apartado_edit)
+        if total_mes > apartado_val + 0.1:
+            exced = total_mes - apartado_val
             reducible = min(exced, pago_comision[i])
             pago_comision[i] -= reducible
             exced -= reducible
             if exced > 0.1:
-                if i + 1 >= len(pago_comision):
-                    fechas.append(fechas[-1] + pd.DateOffset(months=1))
-                    pagos_banco.append(0.0)
-                    pago_comision.append(0.0)
+                _ensure_mes(i + 1)
                 pago_comision[i + 1] += exced
-                continue
+                continue  # re-evaluar siguiente
         i += 1
 
-# ---------- 7) Crear DataFrame ----------
+# ------- 7) DataFrame recomendado
 df_plan = pd.DataFrame({
     "N": list(range(1, len(fechas) + 1)),
     "FECHA": [pd.to_datetime(f).strftime("%Y-%m-%d") for f in fechas],
@@ -347,16 +350,32 @@ df_plan = pd.DataFrame({
     "PAGO COMISION": [round(x, 0) for x in pago_comision],
 })
 
-st.dataframe(
-    df_plan.style.format({"PAGO BANCO": "{:,.0f}", "PAGO COMISION": "{:,.0f}"}),
-    use_container_width=True
-)
+# ------- 8) Editor MODIFICABLE seguro (FECHA como texto)
+st.caption("Puedes editar la FECHA (YYYY-MM-DD) y montos si deseas ajustar la recomendación inicial.")
+df_view = df_plan.copy()
+edited = st.data_editor(
+    df_view,
+    hide_index=True,
+    use_container_width=True,
+    column_config={
+        "N": st.column_config.NumberColumn(format="%d", step=1, disabled=True),
+        "FECHA": st.column_config.TextColumn(help="Formato: YYYY-MM-DD"),
+        "PAGO BANCO": st.column_config.NumberColumn(format="%.0f", step=1000),
+        "PAGO COMISION": st.column_config.NumberColumn(format="%.0f", step=1000),
+    },
+    key="plan_pagos_editor",
+).copy()
+
+# Totales (sobre lo editado)
+edited["PAGO BANCO"] = pd.to_numeric(edited["PAGO BANCO"], errors="coerce").fillna(0.0)
+edited["PAGO COMISION"] = pd.to_numeric(edited["PAGO COMISION"], errors="coerce").fillna(0.0)
 
 st.markdown(
-    f"**Totales:**  🏦 Banco = `{sum(df_plan['PAGO BANCO']):,.0f}`  •  💼 Comisión = `{sum(df_plan['PAGO COMISION']):,.0f}`  •  📊 Filas = `{len(df_plan):,}`"
+    f"**Totales:**  🏦 Banco = `{edited['PAGO BANCO'].sum():,.0f}`  •  💼 Comisión = `{edited['PAGO COMISION'].sum():,.0f}`  •  📊 Filas = `{len(edited):,}`"
 )
 
-csv = df_plan.to_csv(index=False, encoding="utf-8-sig")
+# Descargar CSV
+csv = edited.to_csv(index=False, encoding="utf-8-sig")
 st.download_button(
     "⬇️ Descargar tabla (CSV)",
     data=csv,
