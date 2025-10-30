@@ -298,55 +298,58 @@ if len(df_plan) > 0 and ce_inicial_pagada > 0:
 
 # --- Comisión restante a repartir en cuotas iguales (cada cuota ≤ Apartado)
 restante = max(0.0, com_exito - ce_inicial_pagada)
+restante = int(round(restante))
 
 if restante > 0:
     if apartado <= 0:
         # Sin tope práctico: todo en un mes nuevo después de los PaB
         last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
         nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
-        df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0.0, round(restante)]
-        restante = 0.0
+        df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, restante]
     else:
-        # Cuotas iguales que no superen el Apartado
-        num_cuotas = int(max(1, math.ceil(restante / apartado)))
-        cuota = math.ceil(restante / num_cuotas)  # asegura cuotas "parejas" y ≤ apartado (o casi)
-        i = 0          # cuotas colocadas
-        fila = 0       # recorre meses
+        # Encontrar el número de cuotas mínimo tal que cada cuota <= apartado
+        num_cuotas = max(1, math.ceil(restante / apartado))
+        # Ajustar para que la cuota base no exceda el Apartado
+        while math.ceil(restante / num_cuotas) > apartado:
+            num_cuotas += 1
 
-        while i < num_cuotas:
+        # Construir cuotas estrictamente iguales (permitiendo ±1 por redondeo)
+        cuota_base = restante // num_cuotas
+        extras = restante - cuota_base * num_cuotas  # primeras 'extras' cuotas serán +1
+        cuotas = [cuota_base + 1] * extras + [cuota_base] * (num_cuotas - extras)
+        # Seguridad: ninguna cuota debe exceder el Apartado
+        cuotas = [min(c, int(apartado)) for c in cuotas]
+
+        i = 0        # índice de cuota a colocar
+        fila = 1     # empezamos desde N=2 (fila index 1), N=1 ya tiene CE inicial sin tope
+
+        while i < len(cuotas):
             # si no hay más filas, agregamos meses extra (PB=0)
             if fila >= len(df_plan):
                 last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
                 nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
-                df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0.0, 0.0]
+                df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, 0]
 
-            pb = float(df_plan.at[fila, "PAGO BANCO"])
-            pc = float(df_plan.at[fila, "PAGO COMISION"])
+            pb = int(df_plan.at[fila, "PAGO BANCO"])
+            pc = int(df_plan.at[fila, "PAGO COMISION"])
+            capacidad = max(0, int(apartado) - (pb + pc))
 
-            # En N=1 ya pusimos CE inicial sin tope; para N>=2 sí aplicamos tope
-            if fila == 0:
-                # saltamos a partir del siguiente mes para cuotas restantes
-                fila += 1
-                continue
+            cuota_obj = int(cuotas[i])
 
-            capacidad = max(0.0, apartado - (pb + pc))
-            if capacidad >= cuota and restante >= cuota:
-                df_plan.at[fila, "PAGO COMISION"] = pc + cuota
-                restante -= cuota
+            if capacidad >= cuota_obj:
+                # Podemos pagar comisión en el mismo mes del banco si cabe
+                df_plan.at[fila, "PAGO COMISION"] = pc + cuota_obj
                 i += 1
-            elif 0 < restante <= capacidad:
-                df_plan.at[fila, "PAGO COMISION"] = pc + restante
-                restante = 0.0
-                i = num_cuotas
-                break
             else:
+                # No cabe aquí; intenta el mes siguiente
                 fila += 1
 
-        if restante > 0:
+        # Si quedó alguna cuota sin colocar (no debería), crea meses al final
+        while i < len(cuotas):
             last_date = df_plan["FECHA"].max() if len(df_plan) > 0 else today
             nueva_f = end_of_month(pd.Timestamp(last_date) + pd.DateOffset(months=1))
-            df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0.0, round(restante)]
-            restante = 0.0
+            df_plan.loc[len(df_plan)] = [len(df_plan) + 1, nueva_f, 0, int(cuotas[i])]
+            i += 1
 
 # Formato final
 df_plan["PAGO BANCO"] = df_plan["PAGO BANCO"].round(0).astype(int)
