@@ -146,20 +146,127 @@ with c5:
         ce_inicial = None
         st.warning("CE inicial inválido; déjalo vacío o usa un número como 0.12")
 
-# Resumen
-st.markdown("#### Resumen actual")
-st.write({
-    "Ids seleccionados": ids_sel,
-    "Deuda Resuelve": deuda_res_edit,
-    "Apartado Mensual (1er registro)": apartado_edit,
-    "Comisión Mensual (1er registro)": comision_m_edit,
-    "Saldo (Ahorro) (1er registro)": saldo_edit,
-    "PAGO BANCO": pago_banco,
-    "DESCUENTO (%)": None if descuento is None else round(descuento, 2),
-    "N PaB": n_pab,
-    "CE (1er registro)": ce_base,
-    "Comisión de éxito": comision_exito,
-    "CE inicial (opcional)": ce_inicial
-})
+# =========================
+# 🧱 SECCIÓN: Tabla de pagos (PAGO BANCO)
+# - Crea un DataFrame editable con columnas: N, FECHA, PAGO BANCO, PAGO COMISION
+# - Reparte PAGO BANCO en N PaB
+# - Si el usuario cambia el PAGO BANCO de la fila 1, las demás filas se reequilibran
+# =========================
 
-st.info("✅ Listo este bloque. Ahora podemos añadir la **tabla de pagos** y, con estos valores, calcular `% primer pago`, `PRI-ULT` y `C/A`.")
+import pandas as pd
+
+st.markdown("---")
+st.header("📅 Tabla de pagos — PAGO BANCO")
+
+# Utilidad: último día del mes para un timestamp dado
+def end_of_month(ts: pd.Timestamp) -> pd.Timestamp:
+    return (ts + pd.offsets.MonthEnd(0)).normalize()
+
+# Construir fechas por defecto:
+#  - Fila 1: hoy
+#  - Filas 2..N: último día de los meses siguientes
+today_ts = pd.Timestamp.today().normalize()
+
+def default_fechas(n: int) -> list:
+    if n <= 0:
+        return []
+    fechas = [today_ts.date()]
+    for k in range(1, n):
+        ts_k = (today_ts + pd.DateOffset(months=k))
+        fechas.append(end_of_month(ts_k).date())
+    return fechas
+
+# Inicializar/Resetear tabla cuando cambian PAGO BANCO o N PaB
+if "pab_table" not in st.session_state:
+    st.session_state["pab_table"] = None
+if "pab_last_total" not in st.session_state:
+    st.session_state["pab_last_total"] = None
+if "pab_last_n" not in st.session_state:
+    st.session_state["pab_last_n"] = None
+
+total_pab = float(pago_banco or 0.0)
+n_rows = int(n_pab or 1)
+
+def build_table(total: float, n: int) -> pd.DataFrame:
+    if n < 1:
+        n = 1
+    base = 0.0 if n == 0 else (total / n)
+    df0 = pd.DataFrame({
+        "N": list(range(1, n + 1)),
+        "FECHA": default_fechas(n),
+        "PAGO BANCO": [base for _ in range(n)],
+        "PAGO COMISION": [0.0 for _ in range(n)]  # la completaremos en otro paso
+    })
+    # Redondeo estético
+    df0["PAGO BANCO"] = df0["PAGO BANCO"].round(0)
+    df0["PAGO COMISION"] = df0["PAGO COMISION"].round(0)
+    return df0
+
+# Reset cuando cambian los parámetros
+if (st.session_state["pab_table"] is None or
+    st.session_state["pab_last_total"] != total_pab or
+    st.session_state["pab_last_n"] != n_rows):
+    st.session_state["pab_table"] = build_table(total_pab, n_rows)
+    st.session_state["pab_last_total"] = total_pab
+    st.session_state["pab_last_n"] = n_rows
+
+# Editor
+st.caption("✅ Puedes editar **FECHA** y el **PAGO BANCO de la primera fila**; el resto se reequilibrará automáticamente.")
+edited = st.data_editor(
+    st.session_state["pab_table"],
+    num_rows="fixed",  # número de filas fijado por N PaB
+    use_container_width=True,
+    column_config={
+        "N": st.column_config.NumberColumn(format="%d", step=1, disabled=True),
+        "FECHA": st.column_config.DateColumn(format="YYYY-MM-DD"),
+        # Permitimos editar PAGO BANCO libremente, pero reequilibramos según regla de negocio
+        "PAGO BANCO": st.column_config.NumberColumn(format="%.0f", step=1000),
+        "PAGO COMISION": st.column_config.NumberColumn(format="%.0f", step=1000),
+    },
+    key="editor_pab"
+).copy()
+
+# --- Reglas de reequilibrio:
+# Si el usuario cambia el PAGO BANCO de la fila 1, las demás filas se ajustan iguales
+# para mantener la suma total = total_pab. (No tocamos PAGO COMISION aún)
+if not edited.empty:
+    # Asegurar tipos
+    edited["PAGO BANCO"] = pd.to_numeric(edited["PAGO BANCO"], errors="coerce").fillna(0.0)
+    edited["PAGO COMISION"] = pd.to_numeric(edited["PAGO COMISION"], errors="coerce").fillna(0.0)
+
+    # Total deseado
+    T = total_pab
+
+    # Valor de la fila 1 (editable por el usuario)
+    v1 = float(edited.loc[edited["N"] == 1, "PAGO BANCO"].iloc[0] if 1 in edited["N"].values else 0.0)
+
+    if n_rows == 1:
+        # Caso trivial: una única fila debe llevar todo el total
+        edited.loc[edited["N"] == 1, "PAGO BANCO"] = T
+    else:
+        # Reparto del remanente en filas 2..N
+        rem = max(0.0, T - v1)
+        per = rem / (n_rows - 1)
+
+        # Aplicar a filas 2..N
+        mask_rest = edited["N"] >= 2
+        edited.loc[mask_rest, "PAGO BANCO"] = per
+
+        # Corrección por redondeo para que la suma cierre exactamente en T
+        suma = float(edited["PAGO BANCO"].sum())
+        diff = T - suma
+        if abs(diff) >= 0.5:  # si hay diferencia relevante, ajústala en la última fila
+            edited.loc[edited["N"] == n_rows, "PAGO BANCO"] += diff
+
+    # Guardar de nuevo en sesión
+    st.session_state["pab_table"] = edited
+
+# Mostrar tabla resultante
+st.markdown("**Tabla resultante (balanceada):**")
+st.dataframe(st.session_state["pab_table"], use_container_width=True)
+
+# Resumen de control
+sum_pab = float(st.session_state["pab_table"]["PAGO BANCO"].sum()) if not st.session_state["pab_table"].empty else 0.0
+st.caption(f"🔎 Control: Total PAGO BANCO objetivo = {total_pab:,.0f} | Total en tabla = {sum_pab:,.0f}")
+
+# Nota: Si cambias PAGO BANCO o N PaB arriba, la tabla se reinicia con el nuevo reparto.
