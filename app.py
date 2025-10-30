@@ -111,11 +111,11 @@ ce_base           = float(_to_num(fila_primera[col_ce])) if pd.notna(fila_primer
 
 colA, colB = st.columns(2)
 with colA:
-    deuda_res_edit = st.number_input("💰 Deuda Resuelve (suma de seleccionadas)", min_value=0.0, step=1000.0, value=deuda_res_total, format="%.0f")
-    apartado_edit  = st.number_input("📆 Apartado Mensual (del 1er registro)", min_value=0.0, step=1000.0, value=apartado_base, format="%.0f")
+    deuda_res_edit = st.number_input("💰 Deuda Resuelve", min_value=0.0, step=1000.0, value=deuda_res_total, format="%.0f")
+    apartado_edit  = st.number_input("📆 Apartado Mensual", min_value=0.0, step=1000.0, value=apartado_base, format="%.0f")
 with colB:
-    comision_m_edit = st.number_input("🎯 Comisión Mensual (del 1er registro)", min_value=0.0, step=1000.0, value=comision_m_base, format="%.0f")
-    saldo_edit      = st.number_input("💼 Saldo (Ahorro) (del 1er registro)", min_value=0.0, step=1000.0, value=saldo_base, format="%.0f")
+    comision_m_edit = st.number_input("🎯 Comisión Mensual", min_value=0.0, step=1000.0, value=comision_m_base, format="%.0f")
+    saldo_edit      = st.number_input("💼 Saldo (Ahorro)", min_value=0.0, step=1000.0, value=saldo_base, format="%.0f")
 
 # ---------- 4) Pago banco, descuento, N PaB, comisión éxito, CE inicial ----------
 st.markdown("### 4) PAGO BANCO y parámetros derivados")
