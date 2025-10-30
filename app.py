@@ -1,18 +1,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date, timedelta
-from joblib import load
+from datetime import date
+# from joblib import load  # lo usaremos cuando activemos el modelo
 
 st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
 st.title("💸 Calculadora de Recaudo")
 
 st.caption(
     "1) Carga tu base `cartera_asignada_filtrada` • "
-    "2) Busca la **Referencia** y elige el **Id deuda** • "
-    "3) Escribe **COMISIÓN TOTAL** y arma la **tabla de pagos** • "
-    "4) La app calcula **% primer pago (Ratio_PP)**, **PRI-ULT** y **C/A** • "
-    "5) (Opcional) Carga el modelo `.pkl` para predecir `recaudo_real`."
+    "2) Escribe la **Referencia** y selecciona **uno o varios Id deuda** • "
+    "3) Ajusta valores editables (Deuda, Apartado, Comisión, Saldo) • "
+    "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO** y la **Comisión de éxito**.\n\n"
+    "La tabla de pagos la agregamos en el siguiente paso."
 )
 
 # -------------------------------
@@ -31,7 +31,7 @@ def _find_col(df: pd.DataFrame, candidates):
     return None
 
 def _to_num(x):
-    # convierte strings con comas/puntos a float
+    # convierte strings con separadores a float
     if isinstance(x, str):
         x = x.replace(",", "")
     return pd.to_numeric(x, errors="coerce")
@@ -46,7 +46,6 @@ if not up:
     st.info("Sube un archivo para continuar.")
     st.stop()
 
-# Leer archivo
 try:
     if up.name.lower().endswith(".csv"):
         df_base = pd.read_csv(up)
@@ -60,169 +59,124 @@ st.success("✅ Base cargada")
 st.dataframe(df_base.head(), use_container_width=True)
 
 # Mapear nombres (tolerante a tildes/mayúsculas)
-col_referencia = _find_col(df_base, ["Referencia"])
-col_id_deuda   = _find_col(df_base, ["Id deuda","id_deuda","id deuda"])
-col_banco      = _find_col(df_base, ["Banco"])
-col_deuda_res  = _find_col(df_base, ["Deuda Resuelve","deuda resuelve"])
-col_apartado   = _find_col(df_base, ["Apartado Mensual","apartado mensual"])
-col_comision_m = _find_col(df_base, ["Comisión Mensual","comision mensual"])
+col_ref   = _find_col(df_base, ["Referencia"])
+col_id    = _find_col(df_base, ["Id deuda","id deuda","id_deuda"])
+col_banco = _find_col(df_base, ["Banco"])
+col_deu   = _find_col(df_base, ["Deuda Resuelve","deuda resuelve"])
+col_apar  = _find_col(df_base, ["Apartado Mensual","apartado mensual"])
+col_com   = _find_col(df_base, ["Comisión Mensual","comision mensual","comisión mensual"])
+col_saldo = _find_col(df_base, ["Saldo","Ahorro"])  # NUEVA
+col_ce    = _find_col(df_base, ["CE"])              # para Comisión de éxito
 
-needed = {
-    "Referencia": col_referencia, "Id deuda": col_id_deuda, "Banco": col_banco,
-    "Deuda Resuelve": col_deuda_res, "Apartado Mensual": col_apartado, "Comisión Mensual": col_comision_m
-}
-faltantes = [k for k,v in needed.items() if v is None]
-if faltantes:
-    st.error(f"En tu archivo faltan columnas requeridas: {', '.join(faltantes)}.")
+needed = {"Referencia": col_ref, "Id deuda": col_id, "Banco": col_banco,
+          "Deuda Resuelve": col_deu, "Apartado Mensual": col_apar,
+          "Comisión Mensual": col_com, "Saldo": col_saldo, "CE": col_ce}
+faltan = [k for k,v in needed.items() if v is None]
+if faltan:
+    st.error("Faltan columnas requeridas en tu base: " + ", ".join(faltan))
     st.stop()
 
-# Sanitizar numéricos de la base
-for c in [col_deuda_res, col_apartado, col_comision_m]:
+# Normalizar numéricos
+for c in [col_deu, col_apar, col_com, col_saldo, col_ce]:
     df_base[c] = df_base[c].apply(_to_num)
 
 # -------------------------------
-# 2) Buscar referencia y elegir Id deuda
+# 2) Buscar referencia y elegir uno o varios Id deuda
 # -------------------------------
-st.markdown("### 2) Buscar referencia y elegir **Id deuda**")
-
+st.markdown("### 2) Referencia → seleccionar **Id deuda** (uno o varios)")
 ref_input = st.text_input("🔎 Escribe la **Referencia** (exacta como aparece en la base)")
 
 if not ref_input:
     st.stop()
 
-df_ref = df_base[df_base[col_referencia].astype(str) == str(ref_input)]
+df_ref = df_base[df_base[col_ref].astype(str) == str(ref_input)]
 if df_ref.empty:
     st.warning("No encontramos esa referencia en la base.")
     st.stop()
 
 st.subheader("Resultados de la referencia")
-st.dataframe(df_ref[[col_referencia, col_id_deuda, col_banco, col_deuda_res, col_apartado, col_comision_m]], use_container_width=True)
-
-ids = df_ref[col_id_deuda].astype(str).tolist()
-id_sel = st.selectbox("Seleccione el **Id deuda** a analizar", ids)
-
-fila = df_ref[df_ref[col_id_deuda].astype(str) == id_sel].iloc[0]
-banco = fila[col_banco]
-deuda_resuelve = _to_num(fila[col_deuda_res])
-apartado_mensual = _to_num(fila[col_apartado])
-comision_mensual = _to_num(fila[col_comision_m])
-
-st.markdown("#### Detalle de la deuda seleccionada")
-colA, colB = st.columns(2)
-with colA:
-    st.write(f"**🏦 Banco:** {banco}")
-    st.write(f"**💰 Deuda Resuelve:** {deuda_resuelve:,.2f}" if pd.notna(deuda_resuelve) else "—")
-with colB:
-    st.write(f"**📆 Apartado Mensual:** {apartado_mensual:,.2f}" if pd.notna(apartado_mensual) else "—")
-    st.write(f"**🎯 Comisión Mensual:** {comision_mensual:,.2f}" if pd.notna(comision_mensual) else "—")
-
-# -------------------------------
-# 3) COMISIÓN TOTAL (AMOUNT_TOTAL)
-# -------------------------------
-st.markdown("### 3) Ingrese **COMISIÓN TOTAL** (AMOUNT_TOTAL)")
-comision_total = st.number_input("COMISIÓN TOTAL", min_value=0.0, step=1000.0, value=0.0, format="%.0f")
-
-# -------------------------------
-# 4) Tabla de pagos editable (Excel-like)
-# -------------------------------
-st.markdown("### 4) Armar tabla de pagos")
-st.caption("Agrega o borra filas. **N** es el orden (1,2,3,…). **FECHA DE PAGO** en formato fecha. **PAGO A BANCO** y **PAGO COMISION** en valores totales.")
-
-# Plantilla inicial
-plantilla = pd.DataFrame({
-    "N": [1, 2, 3],
-    "FECHA DE PAGO": [date.today(), None, None],
-    "PAGO A BANCO": [apartado_mensual or 0.0, 0.0, 0.0],
-    "PAGO COMISION": [comision_mensual or 0.0, 0.0, 0.0],
-})
-
-tabla = st.data_editor(
-    plantilla,
-    num_rows="dynamic",
-    use_container_width=True,
-    column_config={
-        "N": st.column_config.NumberColumn(format="%d", step=1),
-        "FECHA DE PAGO": st.column_config.DateColumn(format="YYYY-MM-DD"),
-        "PAGO A BANCO": st.column_config.NumberColumn(format="%.0f", step=1000),
-        "PAGO COMISION": st.column_config.NumberColumn(format="%.0f", step=1000),
-    },
-    key="tabla_pagos"
+st.dataframe(
+    df_ref[[col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce]],
+    use_container_width=True
 )
 
-# Limpieza
-df_pagos = tabla.copy()
-df_pagos["N"] = pd.to_numeric(df_pagos["N"], errors="coerce").fillna(0).astype(int)
-df_pagos = df_pagos[df_pagos["N"] > 0].sort_values("N")
-df_pagos["FECHA DE PAGO"] = pd.to_datetime(df_pagos["FECHA DE PAGO"], errors="coerce")
-for c in ["PAGO A BANCO","PAGO COMISION"]:
-    df_pagos[c] = df_pagos[c].apply(_to_num).fillna(0.0)
+ids_opciones = df_ref[col_id].astype(str).tolist()
+ids_sel = st.multiselect("Seleccione **uno o varios** Id deuda", ids_opciones, default=ids_opciones[:1])
+if not ids_sel:
+    st.info("Selecciona al menos un Id deuda para continuar.")
+    st.stop()
 
-st.markdown("**Tabla limpia:**")
-st.dataframe(df_pagos, use_container_width=True)
+sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 
 # -------------------------------
-# 5) Cálculos: % primer pago (Ratio_PP), PRI-ULT, C/A
+# 3) Cajas editables (prellenadas pero modificables)
+#    - Deuda Resuelve (si hay varias → suma)
+#    - Apartado Mensual (suma por defecto)
+#    - Comisión Mensual (suma por defecto)
+#    - Saldo (suma por defecto)
 # -------------------------------
-st.markdown("### 5) Cálculos automáticos")
+st.markdown("### 3) Valores base (puedes editarlos)")
 
-# % primer pago (Ratio_PP)
-if comision_total and comision_total > 0 and (df_pagos["N"] == 1).any():
-    pago_com_n1 = float(df_pagos.loc[df_pagos["N"] == 1, "PAGO COMISION"].sum())
-    ratio_pp = float(np.clip(pago_com_n1 / comision_total, 0, 1))
-else:
-    ratio_pp = np.nan
+deuda_res_total   = float(sel[col_deu].sum(skipna=True))
+apartado_total    = float(sel[col_apar].sum(skipna=True))
+comision_m_total  = float(sel[col_com].sum(skipna=True))
+saldo_total       = float(sel[col_saldo].sum(skipna=True))
 
-# PRI-ULT (meses entre primera y última FECHA DE PAGO, mínimo 1)
-if df_pagos["FECHA DE PAGO"].notna().sum() >= 2:
-    fmin = df_pagos["FECHA DE PAGO"].min()
-    fmax = df_pagos["FECHA DE PAGO"].max()
-    meses = (fmax - fmin).days / 30.4375
-    pri_ult = float(max(1.0, meses))
-else:
-    pri_ult = np.nan
+colA, colB = st.columns(2)
+with colA:
+    deuda_res_edit = st.number_input("💰 Deuda Resuelve (total seleccionado)", min_value=0.0, step=1000.0, value=deuda_res_total, format="%.0f")
+    apartado_edit  = st.number_input("📆 Apartado Mensual (suma)", min_value=0.0, step=1000.0, value=apartado_total, format="%.0f")
+with colB:
+    comision_m_edit = st.number_input("🎯 Comisión Mensual (suma)", min_value=0.0, step=1000.0, value=comision_m_total, format="%.0f")
+    saldo_edit      = st.number_input("💼 Saldo (Ahorro) (suma)", min_value=0.0, step=1000.0, value=saldo_total, format="%.0f")
 
-# C/A = ((COMISIÓN TOTAL − Σ PAGO A BANCO − Σ PAGO COMISION + Comisión Mensual) / (max(N) − 1)) / Apartado Mensual
-if not df_pagos.empty:
-    sum_banco = float(df_pagos["PAGO A BANCO"].sum())
-    sum_comis = float(df_pagos["PAGO COMISION"].sum())
-    nmax = int(df_pagos["N"].max())
-    den_n = max(1, nmax - 1)  # evita división por 0
-    numerador = (comision_total or 0.0) - sum_banco - sum_comis + (comision_mensual or 0.0)
-    c_a = np.nan if (apartado_mensual is None or apartado_mensual <= 0) else float((numerador / den_n) / apartado_mensual)
-else:
-    c_a = np.nan
+# -------------------------------
+# 4) PAGO BANCO → DESCUENTO, N PaB, Comisión de éxito y CE inicial
+# -------------------------------
+st.markdown("### 4) PAGO BANCO y parámetros derivados")
 
-res = pd.DataFrame({
-    "Variable": ["% primer pago (Ratio_PP)", "PRI-ULT (meses)", "C/A"],
-    "Valor": [ratio_pp, pri_ult, c_a]
+col1, col2, col3 = st.columns([1,1,1])
+with col1:
+    pago_banco = st.number_input("🏦 PAGO BANCO", min_value=0.0, step=1000.0, value=0.0, format="%.0f")
+with col2:
+    # DESCUENTO = 1 - (PAGO BANCO / Deuda Resuelve) * 100  (mostrado, no editable)
+    descuento = None
+    if deuda_res_edit and deuda_res_edit > 0:
+        descuento = max(0.0, 1.0 - (pago_banco / deuda_res_edit)) * 100.0
+    st.text_input("📉 DESCUENTO (%)", value=(f"{descuento:.2f} %" if descuento is not None else ""), disabled=True)
+with col3:
+    n_pab = st.number_input("🧮 N PaB", min_value=1, step=1, value=1)
+
+# CE para la referencia (si hay varias filas, usamos promedio)
+ce_ref = float(sel[col_ce].mean(skipna=True)) if sel[col_ce].notna().any() else 0.0
+com_exito_default = max(0.0, (deuda_res_edit - pago_banco) * 1.19 * ce_ref)
+
+col4, col5 = st.columns(2)
+with col4:
+    comision_exito = st.number_input("🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0, value=float(com_exito_default), format="%.0f",
+                                     help=f"Se prellena con: (Deuda Resuelve − PAGO BANCO) × 1.19 × CE (CE promedio = {ce_ref:.4f})")
+with col5:
+    ce_inicial_txt = st.text_input("🧪 CE inicial (opcional)", value="", placeholder="Ej. 0.12")
+    try:
+        ce_inicial = float(ce_inicial_txt.replace(",", ".")) if ce_inicial_txt.strip() != "" else None
+    except Exception:
+        ce_inicial = None
+        st.warning("CE inicial inválido; déjalo vacío o usa un número como 0.12")
+
+# Resumen rápido
+st.markdown("#### Resumen actual")
+st.write({
+    "Ids seleccionados": ids_sel,
+    "Deuda Resuelve": deuda_res_edit,
+    "Apartado Mensual": apartado_edit,
+    "Comisión Mensual": comision_m_edit,
+    "Saldo (Ahorro)": saldo_edit,
+    "PAGO BANCO": pago_banco,
+    "DESCUENTO (%)": None if descuento is None else round(descuento, 2),
+    "N PaB": n_pab,
+    "CE promedio (base)": ce_ref,
+    "Comisión de éxito": comision_exito,
+    "CE inicial (opcional)": ce_inicial
 })
-st.dataframe(res, use_container_width=True)
 
-# -------------------------------
-# 6) (Opcional) Predicción con modelo .pkl
-# -------------------------------
-st.markdown("### 6) (Opcional) Cargar modelo `.pkl` para predecir `recaudo_real`")
-mdl_file = st.file_uploader("Sube el pipeline entrenado (`.pkl` de joblib`)", type=["pkl"], key="mdl")
-
-pipe = None
-if mdl_file is not None:
-    try:
-        pipe = load(mdl_file)
-        st.success("✅ Modelo cargado.")
-    except Exception as e:
-        st.error(f"No pude cargar el modelo: {e}")
-
-if pipe is not None and st.button("Predecir `recaudo_real`"):
-    # Si tu pipeline es el MLP robusto que armamos, espera columnas:
-    # ["PRI-ULT","Ratio_PP","C/A_log","AMOUNT_TOTAL_log"]
-    X_pred = pd.DataFrame([{
-        "PRI-ULT": pri_ult,
-        "Ratio_PP": ratio_pp,
-        "C/A_log": np.log1p(c_a) if pd.notna(c_a) else np.nan,
-        "AMOUNT_TOTAL_log": np.log1p(comision_total) if comision_total and comision_total > 0 else np.nan
-    }])
-    try:
-        yhat = float(np.clip(pipe.predict(X_pred)[0], 0, 1))
-        st.metric("🔮 `recaudo_real` (estimado)", f"{yhat:.3f}")
-    except Exception as e:
-        st.error(f"Error al predecir: {e}\nVerifica que tu pipeline espere estas 4 columnas transformadas.")
+st.info("✅ Hasta aquí está listo. En el siguiente paso agregamos la **tabla de pagos** y los cálculos de % primer pago, PRI-ULT y C/A con este nuevo flujo.")
