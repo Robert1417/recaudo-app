@@ -533,6 +533,83 @@ df_final.reset_index(drop=True, inplace=True)
 df_final["N"] = range(len(df_final))
 st.session_state.tabla_pagos = df_final
 
+# ---------- 6) Validación y KPIs (no editables) ----------
+st.markdown("### 6) Validación y KPIs")
+
+# Totales objetivo
+target_pab = float(st.session_state.get("pago_banco", 0.0) or 0.0)                # PAGO BANCO (input)
+target_ce  = float(st.session_state.get("comision_exito", 0.0) or 0.0)            # Comisión de éxito (input)
+
+# Totales de la tabla
+df_calc   = st.session_state.tabla_pagos.copy(deep=True)
+suma_pab  = pd.to_numeric(df_calc["Pago(s) a banco"], errors="coerce").fillna(0).sum()
+suma_ce   = pd.to_numeric(df_calc["Pagos de CE"], errors="coerce").fillna(0).sum()
+
+# Función tolerancia 98%
+def _within_tol(x, y, tol=0.02):
+    denom = max(1.0, abs(y))
+    return abs(float(x) - float(y)) / denom <= tol
+
+ok_pab = _within_tol(suma_pab, target_pab)
+ok_ce  = _within_tol(suma_ce, target_ce)
+
+if not (ok_pab and ok_ce):
+    st.error("Las sumas no cuadran (≥98% requerido). Ajusta la tabla o los parámetros.")
+    colA, colB = st.columns(2)
+    with colA:
+        st.write("**PAGO BANCO**")
+        st.write(f"- Objetivo: {target_pab:,.0f}")
+        st.write(f"- Suma tabla: {suma_pab:,.0f}")
+        st.write(f"- Diferencia: {target_pab - suma_pab:,.0f}")
+    with colB:
+        st.write("**Comisión de éxito (CE)**")
+        st.write(f"- Objetivo: {target_ce:,.0f}")
+        st.write(f"- Suma tabla: {suma_ce:,.0f}")
+        st.write(f"- Diferencia: {target_ce - suma_ce:,.0f}")
+else:
+    # -------- KPIs requeridos (bloqueados) --------
+    # 1) % Primer Pago = CE inicial / Comisión de éxito
+    ce_inicial = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
+    pct_primer_pago = (ce_inicial / target_ce) if target_ce > 0 else np.nan
+
+    # 2) PLAZO = número de filas hasta la última donde (Pago banco != 0) o (Pagos CE != 0)
+    mask_valid = (pd.to_numeric(df_calc["Pago(s) a banco"], errors="coerce").fillna(0) != 0) | \
+                 (pd.to_numeric(df_calc["Pagos de CE"], errors="coerce").fillna(0) != 0)
+    if mask_valid.any():
+        last_idx = int(np.where(mask_valid.values)[0][-1])  # índice (0-based)
+        plazo = last_idx + 1                                 # cantidad de filas válidas
+    else:
+        plazo = 0
+
+    # 3) Comisión de éxito total = target_ce
+    comision_total = target_ce
+
+    # 4) Cuota/Apartado
+    #    ((CE + PAGO BANCO - primera_fila_PagoBanco - primera_fila_PagosCE + Comisión Mensual) / (PLAZO - 1)) / Apartado Mensual
+    first_pb = float(pd.to_numeric(df_calc.loc[0, "Pago(s) a banco"], errors="coerce") if len(df_calc) > 0 else 0.0)
+    first_ce = float(pd.to_numeric(df_calc.loc[0, "Pagos de CE"], errors="coerce") if len(df_calc) > 0 else 0.0)
+    comision_mensual  = float(st.session_state.get("comision_m_edit", 0.0) or 0.0)
+    apartado_mensual  = float(st.session_state.get("apartado_edit", 0.0) or 0.0)
+
+    numerador = (comision_total + target_pab - first_pb - first_ce + comision_mensual)
+    if (plazo - 1) > 0 and apartado_mensual > 0:
+        cuota_apartado = (numerador / (plazo - 1)) / apartado_mensual
+    else:
+        cuota_apartado = np.nan
+
+    # ---- Mostrar en casillas no editables ----
+    st.success("Listo: los totales cuadran (≥98%).")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.number_input("🏁 Comisión de éxito total", value=float(comision_total), step=0.0, format="%.0f", disabled=True)
+    with c2:
+        st.number_input("📅 PLAZO (meses)", value=float(plazo), step=1.0, format="%.0f", disabled=True)
+    with c3:
+        # Muestra estilo 0.50; si prefieres 50% usa: f"{pct_primer_pago*100:.2f}%"
+        st.text_input("% Primer Pago (CE inicial / CE)", value=("—" if np.isnan(pct_primer_pago) else f"{pct_primer_pago:.2f}"), disabled=True)
+    with c4:
+        st.text_input("Cuota/Apartado", value=("—" if np.isnan(cuota_apartado) else f"{cuota_apartado:.4f}"), disabled=True)
+
 st.caption(
     "🗓️ Fechas automáticas; 💼 PAGO BANCO se reparte en N PaB (última ajusta). "
     "🏁 Pagos de CE: fila 0 = CE inicial y el resto se balancea automáticamente para que cada fila cumpla el Apartado Mensual; "
