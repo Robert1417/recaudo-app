@@ -459,8 +459,7 @@ if st.session_state._last_pab != st.session_state.pago_banco or st.session_state
     com_ex_prefill = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
     if not st.session_state.get("comision_exito_overridden", False):
         st.session_state.comision_exito = com_ex_prefill
-    _balancear_ce_vs_apartado()
-    st.rerun()
+    # 👈 sin balanceo aquí; lo hace la Sección 5 con guard de override
 
 # Comisión de éxito (editable) y CE inicial
 c4, c5 = st.columns(2)
@@ -499,14 +498,29 @@ else:
 # ------------------ 5) Cronograma de pagos (tabla editable c/fechas) ------------------
 st.markdown("### 5) Cronograma de pagos (tabla editable con fechas automáticas)")
 
-# Si cambió algún driver, recalculamos y balanceamos antes de pintar (mantiene consistencia)
-ce_tuple_now = (int(round(st.session_state.comision_exito)),
-                int(round(st.session_state.ce_inicial_val)),
-                int(round(st.session_state.apartado_edit)),
-                len(st.session_state.tabla_pagos))
+# Helper para detectar cambios de drivers SIN disparar recálculo si hay override de CE
+def _drivers_ce_tuple():
+    """Tupla que dispara el recálculo de CE solo cuando corresponde.
+    Si hay override, congelamos 'comision_exito' en la tupla (lo marcamos como -1)
+    para no gatillar redistribuciones por cambios irrelevantes."""
+    ce_over = bool(st.session_state.get("comision_exito_overridden", False))
+    ce_val  = int(round(st.session_state.get("comision_exito", 0) or 0))
+    ce_key  = -1 if ce_over else ce_val  # si hay override, congelamos CE en la tupla
+    return (
+        ce_key,
+        int(round(st.session_state.get("ce_inicial_val", 0) or 0)),
+        int(round(st.session_state.get("apartado_edit", 0) or 0)),
+        int(len(st.session_state.get("tabla_pagos", []))),
+        int(round(st.session_state.get("pago_banco", 0) or 0)),
+        int(round(st.session_state.get("n_pab", 1) or 1)),
+    )
+
+# Si cambió algún driver, recalculamos y balanceamos ANTES de pintar, pero solo si NO hay override de CE
+ce_tuple_now = _drivers_ce_tuple()
 if ce_tuple_now != st.session_state.get("_last_ce_tuple"):
-    _distribuir_ce_restante_en_cuotas_iguales()
-    _balancear_ce_vs_apartado()
+    if not st.session_state.get("comision_exito_overridden", False):
+        _distribuir_ce_restante_en_cuotas_iguales()
+        _balancear_ce_vs_apartado()
     st.session_state._last_ce_tuple = ce_tuple_now
 
 df_view = _completar_fechas(st.session_state.tabla_pagos.copy(deep=True))
