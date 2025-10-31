@@ -249,3 +249,91 @@ with st.form("parametros_base"):
 # Si no se han aplicado cambios, no seguimos (evitamos cálculos/render extra)
 if not aplicar:
     st.stop()
+
+
+# ---------- 5) Tabla editable: N, FECHA, Pago(s) a banco, Pagos de CE ----------
+st.markdown("### 5) Cronograma de pagos (tabla 100% editable)")
+st.caption("Edita los valores. Al guardar, se valida que **N** esté en orden consecutivo (0,1,2,...)")
+
+# Inicialización en sesión (primera carga)
+if "tabla_pagos" not in st.session_state:
+    n_vals = list(range(0, 101))  # 0..100
+    fechas = [date.today()] + [pd.NaT] * 100  # primera = hoy, demás vacías
+    st.session_state.tabla_pagos = pd.DataFrame({
+        "N": n_vals,
+        "FECHA": fechas,
+        "Pago(s) a banco": [np.nan] * 101,
+        "Pagos de CE": [np.nan] * 101,
+    })
+
+def _validar_consecutivo(col_n: pd.Series) -> tuple[bool, str]:
+    """Valida que N sea entero entre 0 y 100 y esté en orden consecutivo desde 0."""
+    # Permitir NaN temporal mientras editan, pero al guardar exigimos consistencia.
+    if col_n.isna().any():
+        return False, "Hay valores vacíos en la columna N."
+
+    # Deben ser enteros 0..100
+    try:
+        n_int = col_n.astype(int)
+    except Exception:
+        return False, "La columna N debe contener solo números enteros entre 0 y 100."
+
+    if (n_int < 0).any() or (n_int > 100).any():
+        return False, "Los valores de N deben estar entre 0 y 100."
+
+    # Debe empezar en 0 y aumentar de 1 en 1
+    esperado = pd.Series(range(len(n_int)))
+    if not n_int.reset_index(drop=True).equals(esperado):
+        return False, "La columna N debe ir en orden consecutivo: 0,1,2,3,... sin saltos ni desorden."
+
+    return True, ""
+
+with st.form("form_tabla_pagos"):
+    edited_df = st.data_editor(
+        st.session_state.tabla_pagos,
+        use_container_width=True,
+        num_rows="dynamic",  # permite agregar/eliminar filas si lo deseas
+        column_config={
+            "N": st.column_config.NumberColumn(
+                "N", min_value=0, max_value=100, step=1,
+                help="Debe ir en orden consecutivo: 0,1,2,..."
+            ),
+            "FECHA": st.column_config.DateColumn(
+                "FECHA", format="YYYY-MM-DD",
+                help="La primera fila inicia en hoy; el resto puedes escoger la fecha exacta."
+            ),
+            "Pago(s) a banco": st.column_config.NumberColumn(
+                "Pago(s) a banco", step=1000, format="%,.0f",
+                help="Escribe el valor en pesos (puedes no usar separador de miles)."
+            ),
+            "Pagos de CE": st.column_config.NumberColumn(
+                "Pagos de CE", step=1000, format="%,.0f",
+                help="Escribe el valor en pesos (puedes no usar separador de miles)."
+            ),
+        },
+        key="editor_tabla_pagos",
+    )
+
+    guardar_tabla = st.form_submit_button("Guardar tabla")
+
+if guardar_tabla:
+    # Coerciones suaves para mantener tipos
+    df_tmp = edited_df.copy()
+    # FECHA: permitir NaT excepto primera fila que debe quedar en hoy si está vacía
+    if pd.isna(df_tmp.loc[0, "FECHA"]):
+        df_tmp.loc[0, "FECHA"] = date.today()
+
+    # Validación N consecutivo
+    ok, msg = _validar_consecutivo(df_tmp["N"])
+    if not ok:
+        st.error(f"No se pudo guardar: {msg}")
+    else:
+        # Asegurar tipos numéricos en columnas de dinero
+        for col_money in ["Pago(s) a banco", "Pagos de CE"]:
+            df_tmp[col_money] = pd.to_numeric(df_tmp[col_money], errors="coerce")
+
+        # Guardar en sesión y confirmar
+        st.session_state.tabla_pagos = df_tmp
+        st.success("✅ Tabla guardada correctamente.")
+        # Vista rápida (opcional)
+        st.dataframe(df_tmp.head(10), use_container_width=True)
