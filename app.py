@@ -140,7 +140,8 @@ if st.session_state.get("sig_sel") != sig_sel:
     st.session_state.n_pab           = 1
     st.session_state.comision_exito_overridden = False
     st.session_state.comision_exito  = max(0.0, (deuda_res_total_def - 0.0) * 1.19 * ce_base_def)
-    st.session_state.ce_inicial_txt  = ""
+    # CE inicial numérico y persistente
+    st.session_state.ce_inicial_val  = 0.0
     # Tabla base 0..4
     n_init = list(range(0, 5))
     fechas_init = [date.today()] + [pd.NaT] * (len(n_init) - 1)
@@ -237,7 +238,7 @@ if st.session_state._last_pab != st.session_state.pago_banco or st.session_state
     if not st.session_state.get("comision_exito_overridden", False):
         st.session_state.comision_exito = com_exito_prefill
 
-    st.rerun()  # ← refleja el cambio inmediatamente (sin “escribir dos veces”)
+    st.rerun()  # ← refleja el cambio inmediatamente
 
 # Comisión de éxito editable / override
 c4, c5 = st.columns(2)
@@ -251,24 +252,25 @@ with c4:
     st.session_state.comision_exito_overridden = (abs(new_val - com_exito_prefill_now) > 1e-6)
 
 with c5:
-    st.text_input("🧪 CE inicial", value=st.session_state.get("ce_inicial_txt", ""), key="ce_inicial_txt",
-                  placeholder="Ej. 150000")
-    try:
-        ce_inicial = float(st.session_state.ce_inicial_txt.replace(",", ".")) if st.session_state.ce_inicial_txt.strip() != "" else None
-    except Exception:
-        ce_inicial = None
-        st.warning("CE inicial inválido; déjalo vacío o usa un número como 0.12")
+    # CE inicial numérico y persistente
+    st.number_input(
+        "🧪 CE inicial",
+        min_value=0.0, step=1000.0,
+        value=float(st.session_state.get("ce_inicial_val", 0.0)),
+        format="%.0f", key="ce_inicial_val"
+    )
+    ce_inicial = float(st.session_state.ce_inicial_val or 0.0)
 
 # Avance CE inicial vs Comisión de éxito
 st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
-if (ce_inicial is None) or (ce_inicial <= 0):
+if ce_inicial <= 0:
     st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
 else:
     base = float(st.session_state.comision_exito) if st.session_state.comision_exito and st.session_state.comision_exito > 0 else 0.0
     if base <= 0:
         st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular el porcentaje.")
     else:
-        porcentaje = (float(ce_inicial) / base) * 100.0
+        porcentaje = (ce_inicial / base) * 100.0
         porcentaje_capped = max(0.0, min(porcentaje, 100.0))
         st.progress(int(round(porcentaje_capped)))
         st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
@@ -306,13 +308,12 @@ edited_df = st.data_editor(
 df_final = edited_df.copy(deep=True)
 
 if len(df_final) > 0:
-    # 1) Asegurar FECHA en la primera fila si está vacía
+    # 1) FECHA de la primera fila si está vacía
     if pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == "":
         df_final.loc[0, "FECHA"] = date.today()
 
-    # 2) Sincronizar SIEMPRE Pagos de CE (fila 0) con CE inicial, si es válido
-    #    (no tocamos las demás filas; solo la primera)
-    if ('ce_inicial' in locals()) and (ce_inicial is not None) and (ce_inicial > 0):
+    # 2) La primera celda de "Pagos de CE" SIEMPRE = CE inicial (>0)
+    if ce_inicial > 0:
         df_final.loc[0, "Pagos de CE"] = float(ce_inicial)
 
 # 3) Recalcular N = 0..n-1 si hiciera falta
