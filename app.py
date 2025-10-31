@@ -311,7 +311,7 @@ df_final["N"] = range(len(df_final))
 
 # Asegurar tipos numéricos tras la edición (nuevas filas suelen venir como None)
 for col_money in ["Pago(s) a banco", "Pagos de CE"]:
-    df_final[col_money] = pd.to_numeric(df_final[col_money"], errors="coerce").fillna(0.0)
+    df_final[col_money] = pd.to_numeric(df_final[col_money], errors="coerce").fillna(0.0)
 
 # Guardar inmediatamente en sesión (sin botón de guardar)
 st.session_state.tabla_pagos = df_final
