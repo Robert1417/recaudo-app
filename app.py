@@ -253,61 +253,64 @@ if not aplicar:
 # ---------- 5) Cronograma de pagos (sin botón de guardar) ----------
 st.markdown("### 5) Cronograma de pagos (tabla editable)")
 
-# Inicialización en sesión: 5 filas iniciales con N = 0..4
+# Inicialización persistente
 if "tabla_pagos" not in st.session_state:
     n_init = list(range(0, 5))  # 0..4
     fechas_init = [date.today()] + [pd.NaT] * (len(n_init) - 1)
     st.session_state.tabla_pagos = pd.DataFrame({
         "N": n_init,
         "FECHA": fechas_init,
-        "Pago(s) a banco": [np.nan] * len(n_init),
-        "Pagos de CE": [np.nan] * len(n_init),
+        "Pago(s) a banco": [0.0] * len(n_init),
+        "Pagos de CE": [0.0] * len(n_init),
     })
 
-# Editor sin form ni submit: los cambios se aplican de inmediato
+# Forzamos tipo numérico y de fecha correcto
+df_tmp = st.session_state.tabla_pagos.copy()
+df_tmp["N"] = pd.to_numeric(df_tmp["N"], errors="coerce").fillna(0).astype(int)
+df_tmp["Pago(s) a banco"] = pd.to_numeric(df_tmp["Pago(s) a banco"], errors="coerce").fillna(0.0)
+df_tmp["Pagos de CE"] = pd.to_numeric(df_tmp["Pagos de CE"], errors="coerce").fillna(0.0)
+df_tmp["FECHA"] = pd.to_datetime(df_tmp["FECHA"], errors="coerce")
+
+# Editor interactivo (sin botón de guardar)
 edited_df = st.data_editor(
-    st.session_state.tabla_pagos,
+    df_tmp,
     use_container_width=True,
-    num_rows="dynamic",  # permite agregar/eliminar filas
+    num_rows="dynamic",  # permite agregar filas
     column_config={
         "N": st.column_config.NumberColumn(
             "N", min_value=0, max_value=100, step=1,
-            help="Autonumérico consecutivo desde 0. Si agregas/eliminás filas, se reordena solo.",
-            disabled=True  # bloqueamos edición; se recalcula solo.
+            help="Autonumérico consecutivo desde 0",
+            disabled=True
         ),
         "FECHA": st.column_config.DateColumn(
             "FECHA", format="YYYY-MM-DD",
-            help="La primera fila se fija en hoy si queda vacía; las demás, elige la fecha exacta."
+            help="La primera fila se fija en hoy si queda vacía."
         ),
         "Pago(s) a banco": st.column_config.NumberColumn(
             "Pago(s) a banco", step=1000, format="%,.0f",
-            help="Escribe en pesos (puedes no usar separador de miles)."
+            help="Escribe en pesos colombianos (sin signo ni separador de miles)."
         ),
         "Pagos de CE": st.column_config.NumberColumn(
             "Pagos de CE", step=1000, format="%,.0f",
-            help="Escribe en pesos (puedes no usar separador de miles)."
+            help="Escribe en pesos colombianos (sin signo ni separador de miles)."
         ),
     },
     key="editor_tabla_pagos",
 )
 
-# Post-procesamiento suave en cada rerun:
-df_tmp = edited_df.copy()
+# Post-procesamiento: mantener consistencia
+df_final = edited_df.copy()
 
-# Asegurar que la primera FECHA sea hoy si el usuario la deja en blanco
-if len(df_tmp) > 0 and pd.isna(df_tmp.loc[df_tmp.index.min(), "FECHA"]):
-    df_tmp.loc[df_tmp.index.min(), "FECHA"] = date.today()
+# Autocompletar primera fecha si falta
+if len(df_final) > 0 and pd.isna(df_final.loc[0, "FECHA"]):
+    df_final.loc[0, "FECHA"] = date.today()
 
-# Recalcular N como consecutivo 0..(n-1) para mantener el orden automáticamente
-df_tmp = df_tmp.reset_index(drop=True)
-df_tmp["N"] = range(len(df_tmp))
+# Recalcular consecutivo N
+df_final = df_final.reset_index(drop=True)
+df_final["N"] = range(len(df_final))
 
-# Coerción numérica para que queden como números (evita que "no se queden")
-for col_money in ["Pago(s) a banco", "Pagos de CE"]:
-    df_tmp[col_money] = pd.to_numeric(df_tmp[col_money], errors="coerce")
+# Guardar inmediatamente al estado de sesión
+st.session_state.tabla_pagos = df_final
 
-# Guardar inmediatamente al estado de sesión (sin botón de guardar)
-st.session_state.tabla_pagos = df_tmp
-
-# Vista rápida opcional
-st.caption("Tip: puedes agregar filas y escribir valores; se guardan al instante y N se reenumera solo.")
+# Nota al usuario
+st.caption("Tip: puedes escribir montos libremente y agregar filas. Los cambios se guardan al instante.")
