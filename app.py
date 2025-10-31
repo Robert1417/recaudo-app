@@ -258,28 +258,23 @@ else:
 # ---------- 5) Cronograma de pagos (tabla editable, sin formato de miles) ----------
 st.markdown("### 5) Cronograma de pagos (tabla editable)")
 
-# 1) Inicialización en sesión: 5 filas (N=0..4)
+# 1) Inicialización en sesión una sola vez
 if "tabla_pagos" not in st.session_state:
     n_init = list(range(0, 5))  # 0..4
     fechas_init = [date.today()] + [pd.NaT] * (len(n_init) - 1)
     st.session_state.tabla_pagos = pd.DataFrame({
         "N": n_init,
         "FECHA": fechas_init,
-        # usa 0.0 inicial para asegurar dtype float estable (evita perder ediciones)
         "Pago(s) a banco": [0.0] * len(n_init),
         "Pagos de CE": [0.0] * len(n_init),
     })
+    st.session_state._tabla_first_date_set = True  # ya pusimos hoy en la primera fila
 
-# 2) Tipos estables antes de editar
-df_src = st.session_state.tabla_pagos.copy()
-df_src["N"] = pd.to_numeric(df_src["N"], errors="coerce").fillna(0).astype(int)
-df_src["Pago(s) a banco"] = pd.to_numeric(df_src["Pago(s) a banco"], errors="coerce")
-df_src["Pagos de CE"] = pd.to_numeric(df_src["Pagos de CE"], errors="coerce")
-df_src["FECHA"] = pd.to_datetime(df_src["FECHA"], errors="coerce")
+df_view = st.session_state.tabla_pagos  # NO lo copiamos ni lo transformamos antes de editar
 
-# 3) Editor en vivo (sin botón de guardar, sin formato especial)
+# 2) Editor en vivo (sin form ni submit)
 edited_df = st.data_editor(
-    df_src,
+    df_view,
     use_container_width=True,
     num_rows="dynamic",  # puedes agregar/eliminar filas
     column_config={
@@ -290,38 +285,41 @@ edited_df = st.data_editor(
         ),
         "FECHA": st.column_config.DateColumn(
             "FECHA", format="YYYY-MM-DD",
-            help="La primera fila queda en hoy si está vacía; las demás, elígelo."
+            help="La primera fila queda en hoy si está vacía."
         ),
         "Pago(s) a banco": st.column_config.NumberColumn(
-            "Pago(s) a banco",
-            step=1,  # sin miles, se escribe tal cual
+            "Pago(s) a banco", step=1,
             help="Escribe el valor en pesos (sin signo ni separador)."
         ),
         "Pagos de CE": st.column_config.NumberColumn(
-            "Pagos de CE",
-            step=1,  # sin miles, se escribe tal cual
+            "Pagos de CE", step=1,
             help="Escribe el valor en pesos (sin signo ni separador)."
         ),
     },
     key="editor_tabla_pagos",
 )
 
-# 4) Post-procesado en cada rerun para persistir lo editado y mantener consistencia
-df_final = edited_df.copy()
+# 3) Sólo si el DF cambió, actualizamos el estado (evita sobrescribir la 1ª tecleada)
+#    Usamos comparación por forma y por contenido básico para no hacer .equals costoso en DFs grandes
+has_shape_change = edited_df.shape != st.session_state.tabla_pagos.shape
+has_cols_change  = list(edited_df.columns) != list(st.session_state.tabla_pagos.columns)
+if has_shape_change or has_cols_change or not edited_df.equals(st.session_state.tabla_pagos):
+    st.session_state.tabla_pagos = edited_df
 
-# Completar primera fecha si quedó vacía
-if len(df_final) > 0 and (pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == ""):
-    df_final.loc[0, "FECHA"] = date.today()
+# 4) Post-procesado mínimo y sólo cuando haga falta (no en cada tecla)
+df_final = st.session_state.tabla_pagos
 
-# Recalcular N como 0..(n-1) para mantener el orden tras agregar/eliminar filas
-df_final = df_final.reset_index(drop=True)
-df_final["N"] = range(len(df_final))
+# 4.1 Primera FECHA = hoy si está vacía y aún no la fijamos
+if len(df_final) > 0:
+    if (not st.session_state.get("_tabla_first_date_set")) and (pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == ""):
+        df_final.loc[0, "FECHA"] = date.today()
+        st.session_state._tabla_first_date_set = True
 
-# Asegurar tipo numérico (permitimos NaN si dejas celdas vacías)
-for col_money in ["Pago(s) a banco", "Pagos de CE"]:
-    df_final[col_money] = pd.to_numeric(df_final[col_money], errors="coerce")
-
-# Guardar inmediatamente en sesión
-st.session_state.tabla_pagos = df_final
+# 4.2 Recalcular N sólo si la longitud cambió o N no coincide con 0..n-1
+n_expected = list(range(len(df_final)))
+if "N" not in df_final.columns or not df_final["N"].tolist() == n_expected:
+    df_final.reset_index(drop=True, inplace=True)
+    df_final["N"] = range(len(df_final))
+    st.session_state.tabla_pagos = df_final  # guardamos una sola vez
 
 st.caption("Escribe números tal cual (sin $ ni puntos). Puedes agregar filas; N se reenumera solo.")
