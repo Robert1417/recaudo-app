@@ -124,20 +124,17 @@ def _distribuir_ce_restante_en_cuotas_iguales():
     apartado_cap = int(round(float(st.session_state.get("apartado_edit", 0.0) or 0.0)))
 
     restante = max(0, com_ex - ce_ini)
-    # Fila 0 siempre = CE inicial (si >0)
     if len(df) == 0:
         df = pd.DataFrame({"N":[0], "FECHA":[date.today()], "Pago(s) a banco":[0.0], "Pagos de CE":[0.0]})
     df.loc[0, "Pagos de CE"] = float(max(0, ce_ini))
 
     if restante == 0:
-        # Poner 0 en el resto para no arrastrar valores viejos
         if len(df) > 1:
             df.loc[1:, "Pagos de CE"] = 0.0
         st.session_state.tabla_pagos = df.reset_index(drop=True)
         st.session_state.tabla_pagos["N"] = range(len(st.session_state.tabla_pagos))
         return
 
-    # Si no hay tope (apartado 0), no puedo repartir → dejo todo en la 1ª extra
     if apartado_cap <= 0:
         need_rows = 2
         if len(df) < need_rows:
@@ -157,13 +154,10 @@ def _distribuir_ce_restante_en_cuotas_iguales():
         st.session_state.tabla_pagos["N"] = range(len(st.session_state.tabla_pagos))
         return
 
-    # n mínimo por tope
     n_min = int(np.ceil(restante / apartado_cap))
     n_found = None
     cuota_found = None
 
-    # Buscamos n tal que (round(restante/n) * n == restante) y cuota<=cap
-    # (probamos hasta +120 cuotas por si acaso)
     for n in range(n_min, n_min + 121):
         cuota = int(round(restante / n))
         if cuota <= 0:
@@ -172,11 +166,9 @@ def _distribuir_ce_restante_en_cuotas_iguales():
             n_found, cuota_found = n, cuota
             break
 
-    # Si no encontramos exacto, fallback: n=n_min, cuotas iguales redondeadas y última ajusta
     if n_found is None:
         n_found = n_min
         cuotas = _distribuir_en_n_pagos(restante, n_found)
-        # capear por apartado (si alguna excede, incrementamos n y volvemos a repartir)
         while max(cuotas) > apartado_cap and n_found < n_min + 121:
             n_found += 1
             cuotas = _distribuir_en_n_pagos(restante, n_found)
@@ -184,7 +176,6 @@ def _distribuir_ce_restante_en_cuotas_iguales():
     else:
         cuotas_ce = [float(cuota_found)] * n_found
 
-    # Asegurar filas suficientes: 1 (fila 0) + n_found
     need_rows = 1 + n_found
     if len(df) < need_rows:
         faltan = need_rows - len(df)
@@ -197,14 +188,82 @@ def _distribuir_ce_restante_en_cuotas_iguales():
         df = pd.concat([df.reset_index(drop=True), extra], ignore_index=True)
         df = _completar_fechas(df)
 
-    # Escribir cuotas en filas 1..n_found
     df.loc[1:, "Pagos de CE"] = 0.0
     for i in range(n_found):
         df.loc[1 + i, "Pagos de CE"] = float(cuotas_ce[i])
 
-    # Cero en el resto si sobran filas
     if len(df) > need_rows:
         df.loc[need_rows:, "Pagos de CE"] = 0.0
+
+    df.reset_index(drop=True, inplace=True)
+    df["N"] = range(len(df))
+    st.session_state.tabla_pagos = df
+
+def _balancear_ce_vs_apartado():
+    """
+    Nueva regla:
+    En filas i>=1, si (Pago(s) a banco + Pagos de CE) > Apartado Mensual,
+    el exceso de CE se mueve a las filas siguientes (creándolas si hace falta).
+    La fila 0 NO se toca (CE inicial queda tal cual).
+    """
+    _ensure_table_exists()
+    df = st.session_state.tabla_pagos.copy(deep=True)
+    df = _completar_fechas(df)
+
+    cap = int(round(float(st.session_state.get("apartado_edit", 0.0) or 0.0)))
+    if cap <= 0:
+        # Sin tope efectivo → no balanceamos (se respeta lo calculado previamente)
+        st.session_state.tabla_pagos = df.reset_index(drop=True)
+        st.session_state.tabla_pagos["N"] = range(len(st.session_state.tabla_pagos))
+        return
+
+    # Total objetivo de CE = Comisión de éxito
+    objetivo_ce = float(st.session_state.get("comision_exito", 0.0) or 0.0)
+
+    # Asegurar que existe al menos una fila (0)
+    if len(df) == 0:
+        df = pd.DataFrame({"N":[0], "FECHA":[date.today()], "Pago(s) a banco":[0.0], "Pagos de CE":[0.0]})
+
+    # Empuje hacia adelante del exceso por fila (i >= 1)
+    i = 1
+    while i < len(df):
+        pago_i = float(df.loc[i, "Pago(s) a banco"] or 0.0)
+        ce_i = float(df.loc[i, "Pagos de CE"] or 0.0)
+        permitido = max(0.0, cap - pago_i)
+        if ce_i > permitido + 1e-6:
+            overflow = ce_i - permitido
+            df.loc[i, "Pagos de CE"] = permitido
+
+            # Mover overflow adelante
+            j = i + 1
+            while overflow > 1e-6:
+                if j >= len(df):
+                    # crear nueva fila
+                    next_fecha = _ultimo_dia_mes_siguiente(df.loc[j-1, "FECHA"])
+                    new_row = {"N": j, "FECHA": next_fecha, "Pago(s) a banco": 0.0, "Pagos de CE": 0.0}
+                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+                pago_j = float(df.loc[j, "Pago(s) a banco"] or 0.0)
+                permitido_j = max(0.0, cap - pago_j)
+                ce_j = float(df.loc[j, "Pagos de CE"] or 0.0)
+                espacio = max(0.0, permitido_j - ce_j)
+                tomar = min(espacio, overflow)
+                df.loc[j, "Pagos de CE"] = ce_j + tomar
+                overflow -= tomar
+                j += 1
+        i += 1
+
+    # Si después del balanceo la suma de CE es menor al objetivo (por falta de espacio),
+    # creamos filas nuevas hasta alcanzar el objetivo.
+    suma_ce = float(pd.to_numeric(df["Pagos de CE"], errors="coerce").fillna(0).sum())
+    faltante = max(0.0, objetivo_ce - suma_ce)
+    while faltante > 1e-6:
+        idx = len(df)
+        next_fecha = _ultimo_dia_mes_siguiente(df.loc[idx-1, "FECHA"])
+        poner = min(cap, faltante)  # en nuevas filas PAGO BANCO=0 → permitido=cap
+        new_row = {"N": idx, "FECHA": next_fecha, "Pago(s) a banco": 0.0, "Pagos de CE": poner}
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        faltante -= poner
 
     df.reset_index(drop=True, inplace=True)
     df["N"] = range(len(df))
@@ -327,12 +386,10 @@ if st.session_state.get("sig_sel") != sig_sel:
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
 
-    # memo para CE
     st.session_state._last_ce_tuple = (int(round(st.session_state.comision_exito)),
                                        int(round(st.session_state.ce_inicial_val)),
                                        int(round(st.session_state.apartado_edit)),
                                        len(st.session_state.tabla_pagos))
-
     st.rerun()
 
 col1, col2, col3, col4 = st.columns(4)
@@ -345,7 +402,7 @@ with col2:
 with col3:
     st.number_input("📆 Apartado Mensual", min_value=0.0, step=1000.0,
                     value=float(st.session_state.apartado_edit), format="%.0f", key="apartado_edit",
-                    on_change=_distribuir_ce_restante_en_cuotas_iguales)
+                    on_change=lambda: (_distribuir_ce_restante_en_cuotas_iguales(), _balancear_ce_vs_apartado()))
 with col4:
     st.number_input("💼 Saldo (Ahorro)", min_value=0.0, step=1000.0,
                     value=float(st.session_state.saldo_edit), format="%.0f", key="saldo_edit")
@@ -387,10 +444,10 @@ if st.session_state._last_pab != st.session_state.pago_banco or st.session_state
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
     _repartir_pagos_banco()
-    # Prefill de Comisión de éxito si no override
     com_ex_prefill = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
     if not st.session_state.get("comision_exito_overridden", False):
         st.session_state.comision_exito = com_ex_prefill
+    _balancear_ce_vs_apartado()
     st.rerun()
 
 # Comisión de éxito (editable) y CE inicial
@@ -402,14 +459,14 @@ with c4:
     prev = float(st.session_state.comision_exito)
     new_val = st.number_input("🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
                               value=prev, format="%.0f", key="comision_exito",
-                              on_change=_distribuir_ce_restante_en_cuotas_iguales)
+                              on_change=lambda: (_distribuir_ce_restante_en_cuotas_iguales(), _balancear_ce_vs_apartado()))
     st.session_state.comision_exito_overridden = (abs(new_val - com_ex_prefill_now) > 1e-6)
 
 with c5:
     st.number_input("🧪 CE inicial", min_value=0.0, step=1000.0,
                     value=float(st.session_state.get("ce_inicial_val", 0.0)),
                     format="%.0f", key="ce_inicial_val",
-                    on_change=_distribuir_ce_restante_en_cuotas_iguales)
+                    on_change=lambda: (_distribuir_ce_restante_en_cuotas_iguales(), _balancear_ce_vs_apartado()))
     _sync_ce_inicial_to_table()  # asegura que la fila 0 siempre coincida visualmente
 
 # Avance CE inicial vs Comisión de éxito
@@ -430,13 +487,14 @@ else:
 # ------------------ 5) Cronograma de pagos (tabla editable c/fechas) ------------------
 st.markdown("### 5) Cronograma de pagos (tabla editable con fechas automáticas)")
 
-# Antes de pintar, si cambió algún driver de CE, recalculamos (evita pisar ediciones fuera de esos cambios)
+# Si cambió algún driver, recalculamos y balanceamos antes de pintar (mantiene consistencia)
 ce_tuple_now = (int(round(st.session_state.comision_exito)),
                 int(round(st.session_state.ce_inicial_val)),
                 int(round(st.session_state.apartado_edit)),
                 len(st.session_state.tabla_pagos))
 if ce_tuple_now != st.session_state.get("_last_ce_tuple"):
     _distribuir_ce_restante_en_cuotas_iguales()
+    _balancear_ce_vs_apartado()
     st.session_state._last_ce_tuple = ce_tuple_now
 
 df_view = _completar_fechas(st.session_state.tabla_pagos.copy(deep=True))
@@ -453,7 +511,7 @@ edited_df = st.data_editor(
         "Pago(s) a banco": st.column_config.NumberColumn("Pago(s) a banco", step=1,
                                                          help="Puedes editarlo; el reparto se rehace al cambiar PAGO BANCO/N PaB."),
         "Pagos de CE": st.column_config.NumberColumn("Pagos de CE", step=1,
-                                                     help="Sugerido automáticamente: CE inicial en fila 0 y cuotas iguales ≤ Apartado."),
+                                                     help="Sugerido: CE inicial (fila 0) y resto balanceado ≤ Apartado."),
     },
     key="editor_tabla_pagos",
 )
@@ -465,5 +523,6 @@ st.session_state.tabla_pagos = df_final
 
 st.caption(
     "🗓️ Fechas automáticas; 💼 PAGO BANCO se reparte en N PaB (última ajusta). "
-    "🏁 Pagos de CE: fila 0 = CE inicial y el restante en cuotas IGUALES sin superar el Apartado Mensual."
+    "🏁 Pagos de CE: fila 0 = CE inicial y el resto se balancea automáticamente para que cada fila cumpla el Apartado Mensual; "
+    "si no alcanza, se crean filas nuevas. Todo sigue editable."
 )
