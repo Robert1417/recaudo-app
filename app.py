@@ -69,6 +69,21 @@ def _completar_fechas(df: pd.DataFrame) -> pd.DataFrame:
                 df.loc[i, "FECHA"] = _ultimo_dia_mes_siguiente(df.loc[i - 1, "FECHA"])
     return df
 
+def _ensure_rows(df: pd.DataFrame, need_rows: int) -> pd.DataFrame:
+    """Asegura al menos `need_rows` filas; rellena con NaT/0.0 y numera N; completa fechas."""
+    if len(df) < need_rows:
+        faltan = need_rows - len(df)
+        extra = pd.DataFrame({
+            "N": list(range(len(df), len(df) + faltan)),
+            "FECHA": [pd.NaT] * faltan,
+            "Pago(s) a banco": [0.0] * faltan,
+            "Pagos de CE": [0.0] * faltan,
+        })
+        df = pd.concat([df.reset_index(drop=True), extra], ignore_index=True)
+    df = df.reset_index(drop=True)
+    df["N"] = range(len(df))
+    return _completar_fechas(df)
+
 def _sync_ce_inicial_to_table():
     """Forzar que la fila 0 de 'Pagos de CE' refleje CE inicial (sin tocar resto)."""
     _ensure_table_exists()
@@ -112,8 +127,8 @@ def _repartir_pagos_banco():
 
 def _distribuir_ce_restante_en_cuotas_iguales():
     """
-    Reparte el CE restante (= comision_exito - ce_inicial) en cuotas IGUALES,
-    sin superar 'Apartado Mensual'. Extiende filas si hace falta. No pisa la fila 0.
+    Define cuotas IGUALES para el CE restante (= comision_exito - ce_inicial), sin superar Apartado.
+    No pisa la fila 0 (CE inicial). Guarda 'q' y 'n' en session_state para el balanceo posterior.
     """
     _ensure_table_exists()
     df = st.session_state.tabla_pagos.copy(deep=True)
@@ -121,151 +136,148 @@ def _distribuir_ce_restante_en_cuotas_iguales():
 
     com_ex = int(round(float(st.session_state.get("comision_exito", 0.0) or 0.0)))
     ce_ini = int(round(float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)))
-    apartado_cap = int(round(float(st.session_state.get("apartado_edit", 0.0) or 0.0)))
+    cap    = int(round(float(st.session_state.get("apartado_edit", 0.0) or 0.0)))
 
-    restante = max(0, com_ex - ce_ini)
     if len(df) == 0:
         df = pd.DataFrame({"N":[0], "FECHA":[date.today()], "Pago(s) a banco":[0.0], "Pagos de CE":[0.0]})
-    df.loc[0, "Pagos de CE"] = float(max(0, ce_ini))
 
+    # Fila 0 = CE inicial (sin tope)
+    df.loc[0, "Pagos de CE"] = float(max(0, ce_ini))
+    restante = max(0, com_ex - ce_ini)
+
+    # Si no hay restante, limpiar filas >0 y registrar q/n = 0
     if restante == 0:
         if len(df) > 1:
             df.loc[1:, "Pagos de CE"] = 0.0
+        st.session_state._ce_cuota_val = 0
+        st.session_state._ce_num_cuotas = 0
         st.session_state.tabla_pagos = df.reset_index(drop=True)
         st.session_state.tabla_pagos["N"] = range(len(st.session_state.tabla_pagos))
         return
 
-    if apartado_cap <= 0:
-        need_rows = 2
-        if len(df) < need_rows:
-            faltan = need_rows - len(df)
-            extra = pd.DataFrame({
-                "N": list(range(len(df), len(df)+faltan)),
-                "FECHA": [pd.NaT]*faltan,
-                "Pago(s) a banco": [0.0]*faltan,
-                "Pagos de CE": [0.0]*faltan,
-            })
-            df = pd.concat([df.reset_index(drop=True), extra], ignore_index=True)
-            df = _completar_fechas(df)
+    # Si no hay tope efectivo, toda una sola cuota en la fila 1
+    if cap <= 0:
+        df = _ensure_rows(df, 2)
+        df.loc[1:, "Pagos de CE"] = 0.0
         df.loc[1, "Pagos de CE"] = float(restante)
-        if len(df) > 2:
-            df.loc[2:, "Pagos de CE"] = 0.0
+        st.session_state._ce_cuota_val = restante
+        st.session_state._ce_num_cuotas = 1
         st.session_state.tabla_pagos = df.reset_index(drop=True)
         st.session_state.tabla_pagos["N"] = range(len(st.session_state.tabla_pagos))
         return
 
-    n_min = int(np.ceil(restante / apartado_cap))
-    n_found = None
-    cuota_found = None
+    # Buscar n y cuota q iguales que EXACTAMENTE sumen 'restante' y q<=cap
+    n_min = int(np.ceil(restante / cap))
+    n_found, q_found = None, None
 
-    for n in range(n_min, n_min + 121):
-        cuota = int(round(restante / n))
-        if cuota <= 0:
-            cuota = 1
-        if cuota <= apartado_cap and cuota * n == restante:
-            n_found, cuota_found = n, cuota
+    for n in range(n_min, n_min + 241):  # margen amplio
+        q = restante // n
+        if q <= 0:
+            q = 1
+        if (q * n == restante) and (q <= cap):
+            n_found, q_found = n, int(q)
             break
 
     if n_found is None:
-        n_found = n_min
-        cuotas = _distribuir_en_n_pagos(restante, n_found)
-        while max(cuotas) > apartado_cap and n_found < n_min + 121:
-            n_found += 1
-            cuotas = _distribuir_en_n_pagos(restante, n_found)
-        cuotas_ce = cuotas
-    else:
-        cuotas_ce = [float(cuota_found)] * n_found
+        # fallback: incrementar n hasta que 'restante' sea múltiplo de n y q<=cap
+        n = n_min
+        while (restante % n != 0 or (restante // n) > cap) and n < n_min + 241:
+            n += 1
+        if (restante % n == 0) and (restante // n) <= cap:
+            n_found, q_found = n, int(restante // n)
+        else:
+            # último recurso: forzar q <= cap y ajustar n para que q*n == restante
+            q_found = int(min(cap, max(1, restante // n_min)))
+            n_found = int(np.ceil(restante / q_found))
+            while restante % n_found != 0 and n_found < n_min + 241:
+                n_found += 1
+            q_found = int(restante // n_found)
 
-    need_rows = 1 + n_found
-    if len(df) < need_rows:
-        faltan = need_rows - len(df)
-        extra = pd.DataFrame({
-            "N": list(range(len(df), len(df)+faltan)),
-            "FECHA": [pd.NaT]*faltan,
-            "Pago(s) a banco": [0.0]*faltan,
-            "Pagos de CE": [0.0]*faltan,
-        })
-        df = pd.concat([df.reset_index(drop=True), extra], ignore_index=True)
-        df = _completar_fechas(df)
+    # Registrar en sesión para el balanceo
+    st.session_state._ce_cuota_val = int(q_found)
+    st.session_state._ce_num_cuotas = int(n_found)
 
+    # Prefill (opcional) 1..n con q, solo como sugerencia base antes del balanceo
+    need = 1 + n_found
+    df = _ensure_rows(df, need)
     df.loc[1:, "Pagos de CE"] = 0.0
     for i in range(n_found):
-        df.loc[1 + i, "Pagos de CE"] = float(cuotas_ce[i])
+        df.loc[1 + i, "Pagos de CE"] = float(q_found)
 
-    if len(df) > need_rows:
-        df.loc[need_rows:, "Pagos de CE"] = 0.0
-
-    df.reset_index(drop=True, inplace=True)
-    df["N"] = range(len(df))
-    st.session_state.tabla_pagos = df
+    st.session_state.tabla_pagos = df.reset_index(drop=True)
+    st.session_state.tabla_pagos["N"] = range(len(st.session_state.tabla_pagos))
 
 def _balancear_ce_vs_apartado():
     """
-    Nueva regla:
-    En filas i>=1, si (Pago(s) a banco + Pagos de CE) > Apartado Mensual,
-    el exceso de CE se mueve a las filas siguientes (creándolas si hace falta).
-    La fila 0 NO se toca (CE inicial queda tal cual).
+    Coloca EXACTAMENTE n cuotas IGUALES de CE (valor q) después de la fila 0.
+    No divide cuotas: si en una fila no cabe q (por PagoBanco alto), la salta y usa la siguiente.
+    Crea filas nuevas (con fecha) si hace falta. La fila 0 conserva CE inicial intacta.
     """
     _ensure_table_exists()
     df = st.session_state.tabla_pagos.copy(deep=True)
     df = _completar_fechas(df)
 
-    cap = int(round(float(st.session_state.get("apartado_edit", 0.0) or 0.0)))
+    cap  = int(round(float(st.session_state.get("apartado_edit", 0.0) or 0.0)))
+    q    = int(st.session_state.get("_ce_cuota_val", 0))
+    n    = int(st.session_state.get("_ce_num_cuotas", 0))
+    objetivo_ce = float(st.session_state.get("comision_exito", 0.0) or 0.0)
+
+    if len(df) == 0:
+        df = pd.DataFrame({"N":[0], "FECHA":[date.today()], "Pago(s) a banco":[0.0], "Pagos de CE":[0.0]})
+    df = _ensure_rows(df, 1)  # al menos fila 0
+
+    # limpiar CE de filas >=1; fila 0 queda como está (CE inicial)
+    if len(df) > 1:
+        df.loc[1:, "Pagos de CE"] = 0.0
+
+    # Si no hay tope efectivo, poner todas las cuotas (que serían una sola en este caso) seguidas
     if cap <= 0:
-        # Sin tope efectivo → no balanceamos (se respeta lo calculado previamente)
+        for k in range(n):
+            idx = len(df)
+            df = _ensure_rows(df, idx + 1)
+            df.loc[idx, "Pagos de CE"] = float(q)
         st.session_state.tabla_pagos = df.reset_index(drop=True)
         st.session_state.tabla_pagos["N"] = range(len(st.session_state.tabla_pagos))
         return
 
-    # Total objetivo de CE = Comisión de éxito
-    objetivo_ce = float(st.session_state.get("comision_exito", 0.0) or 0.0)
+    # Colocar n cuotas de valor q saltando filas que no tengan capacidad
+    placed = 0
+    i_row = 1
+    while placed < n:
+        if i_row >= len(df):
+            df = _ensure_rows(df, i_row + 1)
 
-    # Asegurar que existe al menos una fila (0)
-    if len(df) == 0:
-        df = pd.DataFrame({"N":[0], "FECHA":[date.today()], "Pago(s) a banco":[0.0], "Pagos de CE":[0.0]})
+        pago_i = float(df.loc[i_row, "Pago(s) a banco"] or 0.0)
+        permitido = max(0, cap - int(round(pago_i)))
 
-    # Empuje hacia adelante del exceso por fila (i >= 1)
-    i = 1
-    while i < len(df):
-        pago_i = float(df.loc[i, "Pago(s) a banco"] or 0.0)
-        ce_i = float(df.loc[i, "Pagos de CE"] or 0.0)
-        permitido = max(0.0, cap - pago_i)
-        if ce_i > permitido + 1e-6:
-            overflow = ce_i - permitido
-            df.loc[i, "Pagos de CE"] = permitido
+        if permitido >= q:
+            # cabe la cuota completa aquí
+            df.loc[i_row, "Pagos de CE"] = float(q)
+            placed += 1
+            i_row += 1
+        else:
+            # no cabe q → saltar
+            i_row += 1
 
-            # Mover overflow adelante
-            j = i + 1
-            while overflow > 1e-6:
-                if j >= len(df):
-                    # crear nueva fila
-                    next_fecha = _ultimo_dia_mes_siguiente(df.loc[j-1, "FECHA"])
-                    new_row = {"N": j, "FECHA": next_fecha, "Pago(s) a banco": 0.0, "Pagos de CE": 0.0}
-                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-
-                pago_j = float(df.loc[j, "Pago(s) a banco"] or 0.0)
-                permitido_j = max(0.0, cap - pago_j)
-                ce_j = float(df.loc[j, "Pagos de CE"] or 0.0)
-                espacio = max(0.0, permitido_j - ce_j)
-                tomar = min(espacio, overflow)
-                df.loc[j, "Pagos de CE"] = ce_j + tomar
-                overflow -= tomar
-                j += 1
-        i += 1
-
-    # Si después del balanceo la suma de CE es menor al objetivo (por falta de espacio),
-    # creamos filas nuevas hasta alcanzar el objetivo.
+    # Garantizar suma total de CE = Comisión de éxito (por si fila 0 cambió)
     suma_ce = float(pd.to_numeric(df["Pagos de CE"], errors="coerce").fillna(0).sum())
-    faltante = max(0.0, objetivo_ce - suma_ce)
-    while faltante > 1e-6:
-        idx = len(df)
-        next_fecha = _ultimo_dia_mes_siguiente(df.loc[idx-1, "FECHA"])
-        poner = min(cap, faltante)  # en nuevas filas PAGO BANCO=0 → permitido=cap
-        new_row = {"N": idx, "FECHA": next_fecha, "Pago(s) a banco": 0.0, "Pagos de CE": poner}
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        faltante -= poner
+    if suma_ce < objetivo_ce - 1e-6:
+        # todavía falta (ej: fila 0 era menor); añadir cuotas extra completas si es posible
+        faltante = int(round(objetivo_ce - suma_ce))
+        extra_n = int(np.ceil(faltante / max(1, q)))
+        for _ in range(extra_n):
+            idx = len(df)
+            df = _ensure_rows(df, idx + 1)
+            pago = float(df.loc[idx, "Pago(s) a banco"] or 0.0)
+            cap_idx = max(0, cap - int(round(pago)))
+            if cap_idx >= q:
+                poner = q
+            else:
+                # si ni siquiera cabe q aquí, saltamos y creamos otra fila
+                continue
+            df.loc[idx, "Pagos de CE"] = float(poner)
 
-    df.reset_index(drop=True, inplace=True)
+    df = df.reset_index(drop=True)
     df["N"] = range(len(df))
     st.session_state.tabla_pagos = df
 
