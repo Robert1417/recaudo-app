@@ -282,35 +282,49 @@ edited_df = st.data_editor(
     use_container_width=True,
     num_rows="dynamic",
     column_config={
-        "N": st.column_config.NumberColumn("N", min_value=0, max_value=100, step=1, disabled=True,
-                                           help="Consecutivo automático desde 0."),
-        "FECHA": st.column_config.DateColumn("FECHA", format="YYYY-MM-DD",
-                                             help="La primera fila queda en hoy si está vacía."),
-        "Pago(s) a banco": st.column_config.NumberColumn("Pago(s) a banco", step=1,
-                                                         help="Escribe el valor en pesos (sin signo ni separador)."),
-        "Pagos de CE": st.column_config.NumberColumn("Pagos de CE", step=1,
-                                                     help="Escribe el valor en pesos (sin signo ni separador)."),
+        "N": st.column_config.NumberColumn(
+            "N", min_value=0, max_value=100, step=1, disabled=True,
+            help="Consecutivo automático desde 0."
+        ),
+        "FECHA": st.column_config.DateColumn(
+            "FECHA", format="YYYY-MM-DD",
+            help="La primera fila queda en hoy si está vacía."
+        ),
+        "Pago(s) a banco": st.column_config.NumberColumn(
+            "Pago(s) a banco", step=1,
+            help="Escribe el valor en pesos (sin signo ni separador)."
+        ),
+        "Pagos de CE": st.column_config.NumberColumn(
+            "Pagos de CE", step=1,
+            help="Escribe el valor en pesos (sin signo ni separador)."
+        ),
     },
     key="editor_tabla_pagos",
 )
 
-# Guardar al instante
-st.session_state.tabla_pagos = edited_df.copy(deep=True)
+# --- Persistir lo editado y sincronizar primera fila con CE inicial ---
+df_final = edited_df.copy(deep=True)
 
-# Completar primera FECHA = hoy si está vacía
-df_final = st.session_state.tabla_pagos
-if len(df_final) > 0 and (pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == ""):
-    df_final.loc[0, "FECHA"] = date.today()
+if len(df_final) > 0:
+    # 1) Asegurar FECHA en la primera fila si está vacía
+    if pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == "":
+        df_final.loc[0, "FECHA"] = date.today()
 
-# Recalcular N = 0..n-1 si hace falta
+    # 2) Sincronizar SIEMPRE Pagos de CE (fila 0) con CE inicial, si es válido
+    #    (no tocamos las demás filas; solo la primera)
+    if ('ce_inicial' in locals()) and (ce_inicial is not None) and (ce_inicial > 0):
+        df_final.loc[0, "Pagos de CE"] = float(ce_inicial)
+
+# 3) Recalcular N = 0..n-1 si hiciera falta
 n_expected = list(range(len(df_final)))
 if "N" not in df_final.columns or df_final["N"].tolist() != n_expected:
     df_final.reset_index(drop=True, inplace=True)
     df_final["N"] = range(len(df_final))
 
+# 4) Guardar en sesión
 st.session_state.tabla_pagos = df_final
 
 st.caption(
     "Sin dobles tecleos: cualquier cambio en PAGO BANCO o N PaB reparte al instante (la última cuota ajusta) y el resto queda en 0. "
-    "Todo sigue editable. Al cambiar de Referencia/Id, todo se reinicia limpio."
+    "La primera fila de 'Pagos de CE' siempre refleja el CE inicial. Al cambiar de Referencia/Id, todo se reinicia limpio."
 )
