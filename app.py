@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import calendar
 from datetime import date
 
-# ------------------ Ajustes de rendimiento globales ------------------
+# ------------------ Ajustes globales ------------------
 pd.set_option("mode.copy_on_write", True)
-
 st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
 st.title("💸 Calculadora de Recaudo")
 
@@ -13,10 +13,10 @@ st.caption(
     "1) Carga tu base `cartera_asignada_filtrada` • "
     "2) Escribe la **Referencia** y selecciona **uno o varios Id deuda** • "
     "3) Ajusta valores editables (Deuda, Apartado, Comisión, Saldo) • "
-    "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO** y la **Comisión de éxito**."
+    "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO**, **Comisión de éxito** y **Pagos de CE**."
 )
 
-# ---------- utilidades ----------
+# ------------------ utilidades ------------------
 def _norm(s: str) -> str:
     s = str(s).strip().lower()
     rep = str.maketrans("áéíóúü", "aeiouu")
@@ -30,7 +30,7 @@ def _find_col(df: pd.DataFrame, candidates):
     return None
 
 def _distribuir_en_n_pagos(total: float, n: int) -> list[float]:
-    """Reparte 'total' en 'n' cuotas enteras; la última ajusta para que la suma sea exacta."""
+    """Reparte 'total' en 'n' cuotas enteras; la última ajusta para sumar exacto."""
     n = max(1, int(n))
     total_int = int(round(float(total or 0.0)))
     base = total_int // n
@@ -40,7 +40,6 @@ def _distribuir_en_n_pagos(total: float, n: int) -> list[float]:
     return cuotas
 
 def _ensure_table_exists():
-    """Crea tabla_pagos mínima si no existe."""
     if "tabla_pagos" not in st.session_state or not isinstance(st.session_state.tabla_pagos, pd.DataFrame):
         st.session_state.tabla_pagos = pd.DataFrame({
             "N": [0, 1, 2, 3, 4],
@@ -49,40 +48,47 @@ def _ensure_table_exists():
             "Pagos de CE": [0.0]*5,
         })
 
+def _ultimo_dia_mes_siguiente(fecha_base):
+    if pd.isna(fecha_base) or str(fecha_base).strip() == "":
+        fecha_base = date.today()
+    y = fecha_base.year
+    m = fecha_base.month + 1
+    if m > 12:
+        m = 1
+        y += 1
+    ultimo = calendar.monthrange(y, m)[1]
+    return date(y, m, ultimo)
+
+def _completar_fechas(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if len(df) > 0:
+        if pd.isna(df.loc[0, "FECHA"]) or str(df.loc[0, "FECHA"]).strip() == "":
+            df.loc[0, "FECHA"] = date.today()
+        for i in range(1, len(df)):
+            if pd.isna(df.loc[i, "FECHA"]) or str(df.loc[i, "FECHA"]).strip() == "":
+                df.loc[i, "FECHA"] = _ultimo_dia_mes_siguiente(df.loc[i - 1, "FECHA"])
+    return df
+
 def _sync_ce_inicial_to_table():
-    """Refleja CE inicial en la primera fila de 'Pagos de CE' inmediatamente."""
+    """Forzar que la fila 0 de 'Pagos de CE' refleje CE inicial (sin tocar resto)."""
     _ensure_table_exists()
     df = st.session_state.tabla_pagos.copy(deep=True)
-    ce = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
-
+    ce = int(round(float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)))
     if len(df) == 0:
-        df = pd.DataFrame({
-            "N": [0],
-            "FECHA": [date.today()],
-            "Pago(s) a banco": [0.0],
-            "Pagos de CE": [0.0],
-        })
-
-    # Asegurar FECHA 0
-    if pd.isna(df.loc[0, "FECHA"]) or str(df.loc[0, "FECHA"]).strip() == "":
-        df.loc[0, "FECHA"] = date.today()
-
-    # Sincronizar primera celda de CE
-    df.loc[0, "Pagos de CE"] = float(ce) if ce > 0 else 0.0
-
-    # Recalcular N por si acaso
-    df = df.reset_index(drop=True)
+        df = pd.DataFrame({"N":[0], "FECHA":[date.today()], "Pago(s) a banco":[0.0], "Pagos de CE":[0.0]})
+    df = _completar_fechas(df)
+    df.loc[0, "Pagos de CE"] = float(max(0, ce))
+    df.reset_index(drop=True, inplace=True)
     df["N"] = range(len(df))
     st.session_state.tabla_pagos = df
 
 def _repartir_pagos_banco():
-    """Reparte PAGO BANCO según N PaB y actualiza tabla (sin tocar otras columnas)."""
+    """Reparte PAGO BANCO en N PaB sobre la columna 'Pago(s) a banco'."""
     _ensure_table_exists()
     df = st.session_state.tabla_pagos.copy(deep=True)
     n = int(max(1, st.session_state.get("n_pab", 1)))
     total = float(st.session_state.get("pago_banco", 0.0) or 0.0)
 
-    # Asegurar filas suficientes
     if len(df) < n:
         faltan = n - len(df)
         extra = pd.DataFrame({
@@ -93,15 +99,115 @@ def _repartir_pagos_banco():
         })
         df = pd.concat([df.reset_index(drop=True), extra], ignore_index=True)
 
-    df = df.reset_index(drop=True)
+    df.reset_index(drop=True, inplace=True)
     df["N"] = range(len(df))
+    df = _completar_fechas(df)
 
-    # Reparto: llenar 0..n-1, y desde n en adelante poner 0
     cuotas = _distribuir_en_n_pagos(total, n) if total > 0 else [0.0]*n
     df.loc[:, "Pago(s) a banco"] = 0.0
     for i in range(n):
         df.loc[i, "Pago(s) a banco"] = float(cuotas[i])
 
+    st.session_state.tabla_pagos = df
+
+def _distribuir_ce_restante_en_cuotas_iguales():
+    """
+    Reparte el CE restante (= comision_exito - ce_inicial) en cuotas IGUALES,
+    sin superar 'Apartado Mensual'. Extiende filas si hace falta. No pisa la fila 0.
+    """
+    _ensure_table_exists()
+    df = st.session_state.tabla_pagos.copy(deep=True)
+    df = _completar_fechas(df)
+
+    com_ex = int(round(float(st.session_state.get("comision_exito", 0.0) or 0.0)))
+    ce_ini = int(round(float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)))
+    apartado_cap = int(round(float(st.session_state.get("apartado_edit", 0.0) or 0.0)))
+
+    restante = max(0, com_ex - ce_ini)
+    # Fila 0 siempre = CE inicial (si >0)
+    if len(df) == 0:
+        df = pd.DataFrame({"N":[0], "FECHA":[date.today()], "Pago(s) a banco":[0.0], "Pagos de CE":[0.0]})
+    df.loc[0, "Pagos de CE"] = float(max(0, ce_ini))
+
+    if restante == 0:
+        # Poner 0 en el resto para no arrastrar valores viejos
+        if len(df) > 1:
+            df.loc[1:, "Pagos de CE"] = 0.0
+        st.session_state.tabla_pagos = df.reset_index(drop=True)
+        st.session_state.tabla_pagos["N"] = range(len(st.session_state.tabla_pagos))
+        return
+
+    # Si no hay tope (apartado 0), no puedo repartir → dejo todo en la 1ª extra
+    if apartado_cap <= 0:
+        need_rows = 2
+        if len(df) < need_rows:
+            faltan = need_rows - len(df)
+            extra = pd.DataFrame({
+                "N": list(range(len(df), len(df)+faltan)),
+                "FECHA": [pd.NaT]*faltan,
+                "Pago(s) a banco": [0.0]*faltan,
+                "Pagos de CE": [0.0]*faltan,
+            })
+            df = pd.concat([df.reset_index(drop=True), extra], ignore_index=True)
+            df = _completar_fechas(df)
+        df.loc[1, "Pagos de CE"] = float(restante)
+        if len(df) > 2:
+            df.loc[2:, "Pagos de CE"] = 0.0
+        st.session_state.tabla_pagos = df.reset_index(drop=True)
+        st.session_state.tabla_pagos["N"] = range(len(st.session_state.tabla_pagos))
+        return
+
+    # n mínimo por tope
+    n_min = int(np.ceil(restante / apartado_cap))
+    n_found = None
+    cuota_found = None
+
+    # Buscamos n tal que (round(restante/n) * n == restante) y cuota<=cap
+    # (probamos hasta +120 cuotas por si acaso)
+    for n in range(n_min, n_min + 121):
+        cuota = int(round(restante / n))
+        if cuota <= 0:
+            cuota = 1
+        if cuota <= apartado_cap and cuota * n == restante:
+            n_found, cuota_found = n, cuota
+            break
+
+    # Si no encontramos exacto, fallback: n=n_min, cuotas iguales redondeadas y última ajusta
+    if n_found is None:
+        n_found = n_min
+        cuotas = _distribuir_en_n_pagos(restante, n_found)
+        # capear por apartado (si alguna excede, incrementamos n y volvemos a repartir)
+        while max(cuotas) > apartado_cap and n_found < n_min + 121:
+            n_found += 1
+            cuotas = _distribuir_en_n_pagos(restante, n_found)
+        cuotas_ce = cuotas
+    else:
+        cuotas_ce = [float(cuota_found)] * n_found
+
+    # Asegurar filas suficientes: 1 (fila 0) + n_found
+    need_rows = 1 + n_found
+    if len(df) < need_rows:
+        faltan = need_rows - len(df)
+        extra = pd.DataFrame({
+            "N": list(range(len(df), len(df)+faltan)),
+            "FECHA": [pd.NaT]*faltan,
+            "Pago(s) a banco": [0.0]*faltan,
+            "Pagos de CE": [0.0]*faltan,
+        })
+        df = pd.concat([df.reset_index(drop=True), extra], ignore_index=True)
+        df = _completar_fechas(df)
+
+    # Escribir cuotas en filas 1..n_found
+    df.loc[1:, "Pagos de CE"] = 0.0
+    for i in range(n_found):
+        df.loc[1 + i, "Pagos de CE"] = float(cuotas_ce[i])
+
+    # Cero en el resto si sobran filas
+    if len(df) > need_rows:
+        df.loc[need_rows:, "Pagos de CE"] = 0.0
+
+    df.reset_index(drop=True, inplace=True)
+    df["N"] = range(len(df))
     st.session_state.tabla_pagos = df
 
 # ------------------ cache lectura/normalización ------------------
@@ -181,7 +287,7 @@ if not ids_sel:
 
 sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 
-# ------------------ 3) Valores base (reactivo, sin “doble tecleo”) ------------------
+# ------------------ 3) Valores base (reactivo) ------------------
 st.markdown("### 3) Valores base (puedes editarlos)")
 
 fila_primera = sel.iloc[0]
@@ -193,26 +299,24 @@ ce_base_def         = float(fila_primera[col_ce]) if pd.notna(fila_primera[col_c
 
 sig_sel = (str(ref_input), tuple(sorted(map(str, ids_sel))))
 if st.session_state.get("sig_sel") != sig_sel:
-    st.session_state.clear()  # limpiar estados previos
+    st.session_state.clear()
     st.session_state.sig_sel = sig_sel
 
-    # Inits de inputs
+    # Inits
     st.session_state.deuda_res_edit = deuda_res_total_def
     st.session_state.comision_m_edit = comision_m_base_def
     st.session_state.apartado_edit   = apartado_base_def
     st.session_state.saldo_edit      = saldo_base_def
     st.session_state.ce_base         = ce_base_def
+
     st.session_state.pago_banco      = 0.0
     st.session_state.n_pab           = 1
 
-    # Comisión de éxito (no editada aún)
     st.session_state.comision_exito_overridden = False
     st.session_state.comision_exito  = max(0.0, (deuda_res_total_def - 0.0) * 1.19 * ce_base_def)
 
-    # CE inicial numérico
     st.session_state.ce_inicial_val  = 0.0
 
-    # Tabla base 0..4
     st.session_state.tabla_pagos = pd.DataFrame({
         "N": [0, 1, 2, 3, 4],
         "FECHA": [date.today(), pd.NaT, pd.NaT, pd.NaT, pd.NaT],
@@ -220,9 +324,15 @@ if st.session_state.get("sig_sel") != sig_sel:
         "Pagos de CE": [0.0]*5,
     })
 
-    # memorias para detectar cambio y repartir
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
+
+    # memo para CE
+    st.session_state._last_ce_tuple = (int(round(st.session_state.comision_exito)),
+                                       int(round(st.session_state.ce_inicial_val)),
+                                       int(round(st.session_state.apartado_edit)),
+                                       len(st.session_state.tabla_pagos))
+
     st.rerun()
 
 col1, col2, col3, col4 = st.columns(4)
@@ -234,7 +344,8 @@ with col2:
                     value=float(st.session_state.comision_m_edit), format="%.0f", key="comision_m_edit")
 with col3:
     st.number_input("📆 Apartado Mensual", min_value=0.0, step=1000.0,
-                    value=float(st.session_state.apartado_edit), format="%.0f", key="apartado_edit")
+                    value=float(st.session_state.apartado_edit), format="%.0f", key="apartado_edit",
+                    on_change=_distribuir_ce_restante_en_cuotas_iguales)
 with col4:
     st.number_input("💼 Saldo (Ahorro)", min_value=0.0, step=1000.0,
                     value=float(st.session_state.saldo_edit), format="%.0f", key="saldo_edit")
@@ -272,45 +383,38 @@ with c3:
     st.number_input("🧮 N PaB", min_value=1, step=1,
                     value=int(st.session_state.n_pab), key="n_pab")
 
-# Si cambian PAGO BANCO o N PaB → repartir y rerun inmediato
 if st.session_state._last_pab != st.session_state.pago_banco or st.session_state._last_n != st.session_state.n_pab:
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
-
     _repartir_pagos_banco()
-
-    # Prefill de Comisión de éxito si no está override
-    com_exito_prefill = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
+    # Prefill de Comisión de éxito si no override
+    com_ex_prefill = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
     if not st.session_state.get("comision_exito_overridden", False):
-        st.session_state.comision_exito = com_exito_prefill
-
+        st.session_state.comision_exito = com_ex_prefill
     st.rerun()
 
-# Comisión de éxito editable / override
+# Comisión de éxito (editable) y CE inicial
 c4, c5 = st.columns(2)
 with c4:
-    com_exito_prefill_now = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
+    com_ex_prefill_now = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
     if not st.session_state.get("comision_exito_overridden", False):
-        st.session_state.comision_exito = com_exito_prefill_now
-    val_prev = float(st.session_state.comision_exito)
+        st.session_state.comision_exito = com_ex_prefill_now
+    prev = float(st.session_state.comision_exito)
     new_val = st.number_input("🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
-                              value=val_prev, format="%.0f", key="comision_exito")
-    st.session_state.comision_exito_overridden = (abs(new_val - com_exito_prefill_now) > 1e-6)
+                              value=prev, format="%.0f", key="comision_exito",
+                              on_change=_distribuir_ce_restante_en_cuotas_iguales)
+    st.session_state.comision_exito_overridden = (abs(new_val - com_ex_prefill_now) > 1e-6)
 
 with c5:
-    # CE inicial numérico y sincronización inmediata de la tabla al cambiar
-    st.number_input(
-        "🧪 CE inicial",
-        min_value=0.0, step=1000.0,
-        value=float(st.session_state.get("ce_inicial_val", 0.0)),
-        format="%.0f",
-        key="ce_inicial_val",
-        on_change=_sync_ce_inicial_to_table,   # << sincroniza en el mismo ciclo
-    )
-    ce_inicial = float(st.session_state.ce_inicial_val or 0.0)
+    st.number_input("🧪 CE inicial", min_value=0.0, step=1000.0,
+                    value=float(st.session_state.get("ce_inicial_val", 0.0)),
+                    format="%.0f", key="ce_inicial_val",
+                    on_change=_distribuir_ce_restante_en_cuotas_iguales)
+    _sync_ce_inicial_to_table()  # asegura que la fila 0 siempre coincida visualmente
 
 # Avance CE inicial vs Comisión de éxito
 st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
+ce_inicial = float(st.session_state.ce_inicial_val or 0.0)
 if ce_inicial <= 0:
     st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
 else:
@@ -322,89 +426,44 @@ else:
         porcentaje_capped = max(0.0, min(porcentaje, 100.0))
         st.progress(int(round(porcentaje_capped)))
         st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
-        
-# ------------------ 5) Cronograma de pagos (tabla editable con fechas automáticas) ------------------
-import calendar
-from datetime import timedelta
 
+# ------------------ 5) Cronograma de pagos (tabla editable c/fechas) ------------------
 st.markdown("### 5) Cronograma de pagos (tabla editable con fechas automáticas)")
 
-df_view = st.session_state.tabla_pagos.copy(deep=True)
+# Antes de pintar, si cambió algún driver de CE, recalculamos (evita pisar ediciones fuera de esos cambios)
+ce_tuple_now = (int(round(st.session_state.comision_exito)),
+                int(round(st.session_state.ce_inicial_val)),
+                int(round(st.session_state.apartado_edit)),
+                len(st.session_state.tabla_pagos))
+if ce_tuple_now != st.session_state.get("_last_ce_tuple"):
+    _distribuir_ce_restante_en_cuotas_iguales()
+    st.session_state._last_ce_tuple = ce_tuple_now
 
-# --- Función auxiliar para obtener el último día del mes siguiente ---
-def ultimo_dia_mes_siguiente(fecha_base):
-    if pd.isna(fecha_base):
-        fecha_base = date.today()
-    mes = fecha_base.month + 1
-    año = fecha_base.year
-    if mes > 12:
-        mes = 1
-        año += 1
-    ultimo_dia = calendar.monthrange(año, mes)[1]
-    return date(año, mes, ultimo_dia)
+df_view = _completar_fechas(st.session_state.tabla_pagos.copy(deep=True))
 
-# --- Completar fechas faltantes ---
-if len(df_view) > 0:
-    # primera fecha = hoy
-    if pd.isna(df_view.loc[0, "FECHA"]) or str(df_view.loc[0, "FECHA"]).strip() == "":
-        df_view.loc[0, "FECHA"] = date.today()
-
-    # fechas siguientes = último día del mes siguiente a la anterior
-    for i in range(1, len(df_view)):
-        if pd.isna(df_view.loc[i, "FECHA"]) or str(df_view.loc[i, "FECHA"]).strip() == "":
-            df_view.loc[i, "FECHA"] = ultimo_dia_mes_siguiente(df_view.loc[i - 1, "FECHA"])
-
-# --- Sincronizar CE inicial en la primera fila ---
-ce_inicial = float(st.session_state.ce_inicial_val or 0.0)
-if len(df_view) > 0 and ce_inicial > 0:
-    df_view.loc[0, "Pagos de CE"] = float(ce_inicial)
-
-# --- Editor interactivo ---
 edited_df = st.data_editor(
     df_view,
     use_container_width=True,
     num_rows="dynamic",
     column_config={
-        "N": st.column_config.NumberColumn(
-            "N", min_value=0, max_value=100, step=1, disabled=True,
-            help="Consecutivo automático desde 0."
-        ),
-        "FECHA": st.column_config.DateColumn(
-            "FECHA", format="YYYY-MM-DD",
-            help="La primera fila es hoy; las siguientes son el último día del mes siguiente."
-        ),
-        "Pago(s) a banco": st.column_config.NumberColumn(
-            "Pago(s) a banco", step=1,
-            help="Escribe el valor en pesos (sin signo ni separador)."
-        ),
-        "Pagos de CE": st.column_config.NumberColumn(
-            "Pagos de CE", step=1,
-            help="La primera fila refleja el CE inicial."
-        ),
+        "N": st.column_config.NumberColumn("N", min_value=0, max_value=200, step=1, disabled=True,
+                                           help="Consecutivo automático desde 0."),
+        "FECHA": st.column_config.DateColumn("FECHA", format="YYYY-MM-DD",
+                                             help="La primera es hoy; las demás, el último día del mes siguiente."),
+        "Pago(s) a banco": st.column_config.NumberColumn("Pago(s) a banco", step=1,
+                                                         help="Puedes editarlo; el reparto se rehace al cambiar PAGO BANCO/N PaB."),
+        "Pagos de CE": st.column_config.NumberColumn("Pagos de CE", step=1,
+                                                     help="Sugerido automáticamente: CE inicial en fila 0 y cuotas iguales ≤ Apartado."),
     },
     key="editor_tabla_pagos",
 )
 
-# --- Detectar nuevas filas y asignar fecha y N automáticamente ---
 df_final = edited_df.copy(deep=True)
-if len(df_final) > len(st.session_state.tabla_pagos):
-    filas_nuevas = len(df_final) - len(st.session_state.tabla_pagos)
-    for _ in range(filas_nuevas):
-        last_index = len(df_final) - filas_nuevas
-        last_fecha = df_final.loc[last_index - 1, "FECHA"] if last_index > 0 else date.today()
-        next_fecha = ultimo_dia_mes_siguiente(last_fecha)
-        next_n = last_index
-        df_final.loc[last_index, "FECHA"] = next_fecha
-        df_final.loc[last_index, "N"] = next_n
-
-# --- Recalcular N secuencial si hiciera falta ---
 df_final.reset_index(drop=True, inplace=True)
 df_final["N"] = range(len(df_final))
-
-# --- Guardar persistente ---
 st.session_state.tabla_pagos = df_final
 
 st.caption(
-    "🗓️ Las fechas se completan automáticamente: la primera es hoy y las siguientes son el último día del mes siguiente. "
-    "Si agregas nuevas filas, se rellenan con la fecha y número consecutivo automáticamente."
+    "🗓️ Fechas automáticas; 💼 PAGO BANCO se reparte en N PaB (última ajusta). "
+    "🏁 Pagos de CE: fila 0 = CE inicial y el restante en cuotas IGUALES sin superar el Apartado Mensual."
 )
