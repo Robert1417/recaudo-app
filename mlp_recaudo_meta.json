@@ -1,0 +1,10 @@
+{
+  "feature_order_raw": [
+    "PRI-ULT",
+    "Ratio_PP",
+    "C/A",
+    "AMOUNT_TOTAL"
+  ],
+  "target": "recaudo_real",
+  "notes": "Pipeline incluye Log1p(C/A, AMOUNT_TOTAL) + winsor(p=0.5%) + imputaci\u00f3n mediana + RobustScaler + MLP."
+}
