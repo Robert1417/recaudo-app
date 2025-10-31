@@ -23,7 +23,7 @@ def _norm(s: str) -> str:
     return s.translate(rep).replace("  ", " ").replace("\xa0", " ")
 
 def _find_col(df: pd.DataFrame, candidates):
-    cols = { _norm(c): c for c in df.columns }
+    cols = {_norm(c): c for c in df.columns}
     for cand in candidates:
         if _norm(cand) in cols:
             return cols[_norm(cand)]
@@ -50,7 +50,6 @@ def _normalize_numeric(df, cols):
 
 @st.cache_data(show_spinner=False)
 def _map_columns(columns_list: tuple[str, ...]):
-    # evita correr _find_col en cada rerun
     dummy_df = pd.DataFrame(columns=list(columns_list))
     col_ref   = _find_col(dummy_df, ["Referencia"])
     col_id    = _find_col(dummy_df, ["Id deuda","id deuda","id_deuda"])
@@ -70,26 +69,23 @@ if not up:
     st.stop()
 
 try:
-    df_base = _read_file(up)  # <-- cacheado
+    df_base = _read_file(up)
 except Exception as e:
     st.error(f"No pude leer el archivo: {e}")
     st.stop()
 
-# mapear columnas (cacheado) — pasa tuple hashable para evitar UnhashableParamError
 colnames_tuple = tuple(map(str, df_base.columns))
 col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce = _map_columns(colnames_tuple)
 
 needed = {"Referencia": col_ref, "Id deuda": col_id, "Banco": col_banco,
           "Deuda Resuelve": col_deu, "Apartado Mensual": col_apar,
           "Comisión Mensual": col_com, "Saldo/Ahorro": col_saldo, "CE": col_ce}
-faltan = [k for k,v in needed.items() if v is None]
+faltan = [k for k, v in needed.items() if v is None]
 if faltan:
     st.error("Faltan columnas requeridas: " + ", ".join(faltan))
     st.stop()
 
-# normalizar numéricos (cacheado)
 df_base = _normalize_numeric(df_base, [col_deu, col_apar, col_com, col_saldo, col_ce])
-
 st.success("✅ Base cargada")
 
 # ---------- 2) referencia → seleccionar id(s) ----------
@@ -103,9 +99,8 @@ if df_ref.empty:
     st.warning("No encontramos esa referencia en la base.")
     st.stop()
 
-# Mostrar SOLO Id deuda y Banco (ocultando otras columnas) — limitar filas pesadas
 st.subheader("Resultados (elige Id deuda)")
-df_preview = df_ref[[col_id, col_banco]].head(500)  # <- evita renderizar miles de filas
+df_preview = df_ref[[col_id, col_banco]].head(500)
 st.dataframe(df_preview.reset_index(drop=True), use_container_width=True)
 
 ids_opciones = df_ref[col_id].astype(str).tolist()
@@ -119,7 +114,6 @@ sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 # ---------- 3) Valores base (reactivo, sin form ni botón) ----------
 st.markdown("### 3) Valores base (puedes editarlos)")
 
-# 3.1 Defaults desde la selección actual
 fila_primera = sel.iloc[0]
 deuda_res_total_def = float(sel[col_deu].sum(skipna=True))
 apartado_base_def   = float(fila_primera[col_apar]) if pd.notna(fila_primera[col_apar]) else 0.0
@@ -127,7 +121,7 @@ comision_m_base_def = float(fila_primera[col_com]) if pd.notna(fila_primera[col_
 saldo_base_def      = float(fila_primera[col_saldo]) if pd.notna(fila_primera[col_saldo]) else 0.0
 ce_base_def         = float(fila_primera[col_ce]) if pd.notna(fila_primera[col_ce]) else 0.0
 
-# 3.2 Inicializar/actualizar estado cuando cambie la selección
+# Señal de selección para resetear estados al cambiar referencia/ids
 sig_sel = (str(ref_input), tuple(sorted(map(str, ids_sel))))
 if st.session_state.get("sig_sel") != sig_sel:
     st.session_state.sig_sel = sig_sel
@@ -136,13 +130,14 @@ if st.session_state.get("sig_sel") != sig_sel:
     st.session_state.apartado_edit   = apartado_base_def
     st.session_state.saldo_edit      = saldo_base_def
     st.session_state.ce_base         = ce_base_def
-    # También reiniciamos campos derivados/editables
+    # Derivados
     st.session_state.pago_banco      = 0.0
     st.session_state.n_pab           = 1
+    st.session_state.comision_exito_overridden = False
     st.session_state.comision_exito  = max(0.0, (deuda_res_total_def - 0.0) * 1.19 * ce_base_def)
     st.session_state.ce_inicial_txt  = ""
+    # Reset tabla (sección 5 la volverá a crear)
 
-# 3.3 Inputs principales (reactivos)
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.session_state.deuda_res_edit = st.number_input(
@@ -192,7 +187,7 @@ with col6:
         value=0.0, format="%.0f", help="Monto extra aportado al inicio; por defecto 0"
     )
 
-# ---------- 4) PAGO BANCO y parámetros derivados (reactivo) ----------
+# ---------- 4) PAGO BANCO y parámetros derivados ----------
 st.markdown("### 4) PAGO BANCO y parámetros derivados")
 
 c1, c2, c3 = st.columns([1,1,1])
@@ -215,18 +210,17 @@ with c3:
     )
     st.session_state.n_pab = st.session_state.n_pab_input
 
-# Comisión de éxito editable (prefill dinámico si cambia deuda o pago)
+# Comisión de éxito (recalcula salvo edición manual)
 com_exito_prefill = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
 c4, c5 = st.columns(2)
 with c4:
-    # Si el usuario no ha tocado manualmente, usamos el prefill
-    if "comision_exito_overridden" not in st.session_state:
+    if not st.session_state.get("comision_exito_overridden", False):
         st.session_state.comision_exito = com_exito_prefill
+
     com_input = st.number_input(
         "🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
         value=float(st.session_state.comision_exito), format="%.0f", key="comision_exito_input"
     )
-    # Si difiere del prefill, marcamos que fue editado por el usuario
     st.session_state.comision_exito_overridden = (abs(com_input - com_exito_prefill) > 1e-6)
     st.session_state.comision_exito = com_input
 
@@ -238,7 +232,6 @@ with c5:
         ce_inicial = None
         st.warning("CE inicial inválido; déjalo vacío o usa un número como 0.12")
 
-# Barra de avance
 st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
 if (ce_inicial is None) or (ce_inicial <= 0):
     st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
@@ -255,11 +248,12 @@ else:
             f"**{porcentaje:,.2f}%** de la Comisión de éxito"
         )
 
-# ---------- 5) Cronograma de pagos (tabla editable, sin formato de miles) ----------
+# ---------- 5) Cronograma de pagos (tabla editable) ----------
 st.markdown("### 5) Cronograma de pagos (tabla editable)")
 
-# 1) Inicialización en sesión una sola vez
-if "tabla_pagos" not in st.session_state:
+# Reiniciar tabla si cambió la selección (referencia/ids)
+if st.session_state.get("sig_sel") != st.session_state.get("_tabla_sig_sel"):
+    st.session_state._tabla_sig_sel = st.session_state.sig_sel
     n_init = list(range(0, 5))  # 0..4
     fechas_init = [date.today()] + [pd.NaT] * (len(n_init) - 1)
     st.session_state.tabla_pagos = pd.DataFrame({
@@ -268,58 +262,37 @@ if "tabla_pagos" not in st.session_state:
         "Pago(s) a banco": [0.0] * len(n_init),
         "Pagos de CE": [0.0] * len(n_init),
     })
-    st.session_state._tabla_first_date_set = True  # ya pusimos hoy en la primera fila
 
-df_view = st.session_state.tabla_pagos  # NO lo copiamos ni lo transformamos antes de editar
+# Pasamos deep copy al editor para evitar “doble tecleo”
+df_view = st.session_state.tabla_pagos.copy(deep=True)
 
-# 2) Editor en vivo (sin form ni submit)
 edited_df = st.data_editor(
     df_view,
     use_container_width=True,
-    num_rows="dynamic",  # puedes agregar/eliminar filas
+    num_rows="dynamic",
     column_config={
-        "N": st.column_config.NumberColumn(
-            "N", min_value=0, max_value=100, step=1,
-            help="Consecutivo automático desde 0.",
-            disabled=True
-        ),
-        "FECHA": st.column_config.DateColumn(
-            "FECHA", format="YYYY-MM-DD",
-            help="La primera fila queda en hoy si está vacía."
-        ),
-        "Pago(s) a banco": st.column_config.NumberColumn(
-            "Pago(s) a banco", step=1,
-            help="Escribe el valor en pesos (sin signo ni separador)."
-        ),
-        "Pagos de CE": st.column_config.NumberColumn(
-            "Pagos de CE", step=1,
-            help="Escribe el valor en pesos (sin signo ni separador)."
-        ),
+        "N": st.column_config.NumberColumn("N", min_value=0, max_value=100, step=1, disabled=True,
+                                           help="Consecutivo automático desde 0."),
+        "FECHA": st.column_config.DateColumn("FECHA", format="YYYY-MM-DD",
+                                             help="La primera fila queda en hoy si está vacía."),
+        "Pago(s) a banco": st.column_config.NumberColumn("Pago(s) a banco", step=1,
+                                                         help="Escribe el valor en pesos (sin signo ni separador)."),
+        "Pagos de CE": st.column_config.NumberColumn("Pagos de CE", step=1,
+                                                     help="Escribe el valor en pesos (sin signo ni separador)."),
     },
     key="editor_tabla_pagos",
 )
 
-# 3) Sólo si el DF cambió, actualizamos el estado (evita sobrescribir la 1ª tecleada)
-#    Usamos comparación por forma y por contenido básico para no hacer .equals costoso en DFs grandes
-has_shape_change = edited_df.shape != st.session_state.tabla_pagos.shape
-has_cols_change  = list(edited_df.columns) != list(st.session_state.tabla_pagos.columns)
-if has_shape_change or has_cols_change or not edited_df.equals(st.session_state.tabla_pagos):
-    st.session_state.tabla_pagos = edited_df
+# Guardamos inmediatamente lo editado (deep copy) — evita que se pierda la 1ª edición
+st.session_state.tabla_pagos = edited_df.copy(deep=True)
 
-# 4) Post-procesado mínimo y sólo cuando haga falta (no en cada tecla)
+# Completar primera FECHA = hoy si quedó vacía
 df_final = st.session_state.tabla_pagos
+if len(df_final) > 0 and (pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == ""):
+    df_final.loc[0, "FECHA"] = date.today()
 
-# 4.1 Primera FECHA = hoy si está vacía y aún no la fijamos
-if len(df_final) > 0:
-    if (not st.session_state.get("_tabla_first_date_set")) and (pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == ""):
-        df_final.loc[0, "FECHA"] = date.today()
-        st.session_state._tabla_first_date_set = True
-
-# 4.2 Recalcular N sólo si la longitud cambió o N no coincide con 0..n-1
+# Recalcular N si no coincide con 0..n-1
 n_expected = list(range(len(df_final)))
-if "N" not in df_final.columns or not df_final["N"].tolist() == n_expected:
+if "N" not in df_final.columns or df_final["N"].tolist() != n_expected:
     df_final.reset_index(drop=True, inplace=True)
     df_final["N"] = range(len(df_final))
-    st.session_state.tabla_pagos = df_final  # guardamos una sola vez
-
-st.caption("Escribe números tal cual (sin $ ni puntos). Puedes agregar filas; N se reenumera solo.")
