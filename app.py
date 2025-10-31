@@ -29,28 +29,17 @@ def _find_col(df: pd.DataFrame, candidates):
             return cols[_norm(cand)]
     return None
 
-def _to_num(x):
-    if isinstance(x, str):
-        x = x.replace(",", "")
-    return pd.to_numeric(x, errors="coerce")
-
 def _distribuir_en_n_pagos(total: float, n: int) -> list[float]:
-    """
-    Reparte 'total' en 'n' cuotas en pesos enteros:
-    - Todas iguales redondeadas
-    - La última ajusta para que la suma sea exactamente 'total'
-    """
+    """Reparte 'total' en 'n' cuotas enteras; la última ajusta para que la suma sea exacta."""
     n = max(1, int(n))
-    total_int = int(round(float(total)))
+    total_int = int(round(float(total or 0.0)))
     base = total_int // n
     resto = total_int - base * n
     cuotas = [float(base)] * n
-    # agregamos el resto (positivo o cero) a la última
-    if n > 0:
-        cuotas[-1] = float(base + resto)
+    cuotas[-1] = float(base + resto)
     return cuotas
 
-# ------------------ Funciones cacheadas (perf) ------------------
+# ------------------ cache lectura/normalización ------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def _read_file(file):
     if file.name.lower().endswith(".csv"):
@@ -77,7 +66,7 @@ def _map_columns(columns_list: tuple[str, ...]):
     col_ce    = _find_col(dummy_df, ["CE"])
     return col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce
 
-# ---------- 1) cargar base ----------
+# ------------------ 1) cargar base ------------------
 st.markdown("### 1) Cargar base (CSV o Excel)")
 up = st.file_uploader("📂 Sube `cartera_asignada_filtrada`", type=["csv", "xlsx"])
 if not up:
@@ -104,7 +93,7 @@ if faltan:
 df_base = _normalize_numeric(df_base, [col_deu, col_apar, col_com, col_saldo, col_ce])
 st.success("✅ Base cargada")
 
-# ---------- 2) referencia → seleccionar id(s) ----------
+# ------------------ 2) referencia → seleccionar id(s) ------------------
 st.markdown("### 2) Referencia → seleccionar **Id deuda** (uno o varios)")
 ref_input = st.text_input("🔎 Escribe la **Referencia** (exacta como aparece en la base)")
 if not ref_input:
@@ -127,7 +116,7 @@ if not ids_sel:
 
 sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 
-# ---------- 3) Valores base (reactivo) ----------
+# ------------------ 3) Valores base (reactivo, sin “doble tecleo”) ------------------
 st.markdown("### 3) Valores base (puedes editarlos)")
 
 fila_primera = sel.iloc[0]
@@ -137,63 +126,47 @@ comision_m_base_def = float(fila_primera[col_com]) if pd.notna(fila_primera[col_
 saldo_base_def      = float(fila_primera[col_saldo]) if pd.notna(fila_primera[col_saldo]) else 0.0
 ce_base_def         = float(fila_primera[col_ce]) if pd.notna(fila_primera[col_ce]) else 0.0
 
-# Señal de selección para resetear estados al cambiar referencia/ids
 sig_sel = (str(ref_input), tuple(sorted(map(str, ids_sel))))
 if st.session_state.get("sig_sel") != sig_sel:
+    st.session_state.clear()  # limpia todo para evitar estados “fantasma”
     st.session_state.sig_sel = sig_sel
+    # Inits
     st.session_state.deuda_res_edit = deuda_res_total_def
     st.session_state.comision_m_edit = comision_m_base_def
     st.session_state.apartado_edit   = apartado_base_def
     st.session_state.saldo_edit      = saldo_base_def
     st.session_state.ce_base         = ce_base_def
-    # Derivados
     st.session_state.pago_banco      = 0.0
     st.session_state.n_pab           = 1
     st.session_state.comision_exito_overridden = False
     st.session_state.comision_exito  = max(0.0, (deuda_res_total_def - 0.0) * 1.19 * ce_base_def)
     st.session_state.ce_inicial_txt  = ""
-    # Reset detectores para el prellenado
-    st.session_state._last_pab = st.session_state.pago_banco
-    st.session_state._last_n   = st.session_state.n_pab
-    st.session_state._tabla_needs_repartition = True  # primer render
-    # Reinicio tabla de pagos
-    n_init = list(range(0, 5))  # 0..4
+    # Tabla base 0..4
+    n_init = list(range(0, 5))
     fechas_init = [date.today()] + [pd.NaT] * (len(n_init) - 1)
     st.session_state.tabla_pagos = pd.DataFrame({
-        "N": n_init,
-        "FECHA": fechas_init,
+        "N": n_init, "FECHA": fechas_init,
         "Pago(s) a banco": [0.0] * len(n_init),
         "Pagos de CE": [0.0] * len(n_init),
     })
+    # mem para detectar cambios
+    st.session_state._last_pab = st.session_state.pago_banco
+    st.session_state._last_n   = st.session_state.n_pab
+    st.rerun()
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.session_state.deuda_res_edit = st.number_input(
-        "💰 Deuda Resuelve", min_value=0.0, step=1000.0,
-        value=float(st.session_state.deuda_res_edit), format="%.0f", key="deuda_res_edit_input"
-    )
-    st.session_state.deuda_res_edit = st.session_state.deuda_res_edit_input
-
+    st.number_input("💰 Deuda Resuelve", min_value=0.0, step=1000.0,
+                    value=float(st.session_state.deuda_res_edit), format="%.0f", key="deuda_res_edit")
 with col2:
-    st.session_state.comision_m_edit = st.number_input(
-        "🎯 Comisión Mensual", min_value=0.0, step=1000.0,
-        value=float(st.session_state.comision_m_edit), format="%.0f", key="comision_m_edit_input"
-    )
-    st.session_state.comision_m_edit = st.session_state.comision_m_edit_input
-
+    st.number_input("🎯 Comisión Mensual", min_value=0.0, step=1000.0,
+                    value=float(st.session_state.comision_m_edit), format="%.0f", key="comision_m_edit")
 with col3:
-    st.session_state.apartado_edit = st.number_input(
-        "📆 Apartado Mensual", min_value=0.0, step=1000.0,
-        value=float(st.session_state.apartado_edit), format="%.0f", key="apartado_edit_input"
-    )
-    st.session_state.apartado_edit = st.session_state.apartado_edit_input
-
+    st.number_input("📆 Apartado Mensual", min_value=0.0, step=1000.0,
+                    value=float(st.session_state.apartado_edit), format="%.0f", key="apartado_edit")
 with col4:
-    st.session_state.saldo_edit = st.number_input(
-        "💼 Saldo (Ahorro)", min_value=0.0, step=1000.0,
-        value=float(st.session_state.saldo_edit), format="%.0f", key="saldo_edit_input"
-    )
-    st.session_state.saldo_edit = st.session_state.saldo_edit_input
+    st.number_input("💼 Saldo (Ahorro)", min_value=0.0, step=1000.0,
+                    value=float(st.session_state.saldo_edit), format="%.0f", key="saldo_edit")
 
 # 3.4 Saldo Neto y Depósito
 saldo_neto = 0.0
@@ -204,71 +177,89 @@ saldo_neto_disp = float(np.round(saldo_neto, 0))
 
 col5, col6 = st.columns(2)
 with col5:
-    st.number_input(
-        "🧾 Saldo Neto", value=saldo_neto_disp, step=1000.0, min_value=0.0,
-        format="%.0f", disabled=True,
-        help="Saldo − (Saldo − 25.000) × 0.004 (solo si Saldo > 0)"
-    )
+    st.number_input("🧾 Saldo Neto", value=saldo_neto_disp, step=1000.0, min_value=0.0,
+                    format="%.0f", disabled=True,
+                    help="Saldo − (Saldo − 25.000) × 0.004 (solo si Saldo > 0)")
 with col6:
-    deposito_edit = st.number_input(
-        "💵 Depósito", min_value=0.0, step=1000.0,
-        value=0.0, format="%.0f", help="Monto extra aportado al inicio; por defecto 0"
-    )
+    st.number_input("💵 Depósito", min_value=0.0, step=1000.0,
+                    value=0.0, format="%.0f", key="deposito_edit",
+                    help="Monto extra aportado al inicio; por defecto 0")
 
-# ---------- 4) PAGO BANCO y parámetros derivados ----------
+# ------------------ 4) PAGO BANCO y derivados ------------------
 st.markdown("### 4) PAGO BANCO y parámetros derivados")
 
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
-    st.session_state.pago_banco = st.number_input(
-        "🏦 PAGO BANCO", min_value=0.0, step=1000.0,
-        value=float(st.session_state.pago_banco), format="%.0f", key="pago_banco_input"
-    )
-    st.session_state.pago_banco = st.session_state.pago_banco_input
-
+    st.number_input("🏦 PAGO BANCO", min_value=0.0, step=1000.0,
+                    value=float(st.session_state.pago_banco), format="%.0f", key="pago_banco")
 with c2:
     descuento = None
     if st.session_state.deuda_res_edit and st.session_state.deuda_res_edit > 0:
         descuento = max(0.0, 1.0 - (st.session_state.pago_banco / st.session_state.deuda_res_edit)) * 100.0
     st.text_input("📉 DESCUENTO (%)", value=(f"{descuento:.2f} %" if descuento is not None else ""), disabled=True)
-
 with c3:
-    st.session_state.n_pab = st.number_input(
-        "🧮 N PaB", min_value=1, step=1, value=int(st.session_state.n_pab), key="n_pab_input"
-    )
-    st.session_state.n_pab = st.session_state.n_pab_input
+    st.number_input("🧮 N PaB", min_value=1, step=1,
+                    value=int(st.session_state.n_pab), key="n_pab")
 
-# Detectar cambios en PAGO BANCO o N PaB → disparar repartición total
-if st.session_state.get("_last_pab") != st.session_state.pago_banco or st.session_state.get("_last_n") != st.session_state.n_pab:
+# Si cambian PAGO BANCO o N PaB → repartir y rerun inmediato
+if st.session_state._last_pab != st.session_state.pago_banco or st.session_state._last_n != st.session_state.n_pab:
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
-    st.session_state._tabla_needs_repartition = True
-else:
-    st.session_state._tabla_needs_repartition = st.session_state.get("_tabla_needs_repartition", False)
+    # Reparto limpio previo al render
+    df = st.session_state.tabla_pagos.copy(deep=True)
+    n = int(max(1, st.session_state.n_pab))
+    total = float(st.session_state.pago_banco or 0.0)
 
-# Comisión de éxito (recalcula salvo edición manual)
-com_exito_prefill = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
-c4, c5 = st.columns(2)
-with c4:
+    # asegurar al menos n filas
+    if len(df) < n:
+        faltan = n - len(df)
+        extra = pd.DataFrame({
+            "N": list(range(len(df), len(df) + faltan)),
+            "FECHA": [pd.NaT] * faltan,
+            "Pago(s) a banco": [0.0] * faltan,
+            "Pagos de CE": [0.0] * faltan,
+        })
+        df = pd.concat([df.reset_index(drop=True), extra], ignore_index=True)
+
+    df.reset_index(drop=True, inplace=True)
+    df["N"] = range(len(df))
+
+    # Reparto exacto en 0..n-1 y 0 desde n en adelante
+    cuotas = _distribuir_en_n_pagos(total, n) if total > 0 else [0.0] * n
+    df.loc[:, "Pago(s) a banco"] = 0.0
+    for i in range(n):
+        df.loc[i, "Pago(s) a banco"] = float(cuotas[i])
+
+    st.session_state.tabla_pagos = df
+
+    # Recalcular Comisión de éxito si no está override
+    com_exito_prefill = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
     if not st.session_state.get("comision_exito_overridden", False):
         st.session_state.comision_exito = com_exito_prefill
 
-    com_input = st.number_input(
-        "🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
-        value=float(st.session_state.comision_exito), format="%.0f", key="comision_exito_input"
-    )
-    st.session_state.comision_exito_overridden = (abs(com_input - com_exito_prefill) > 1e-6)
-    st.session_state.comision_exito = com_input
+    st.rerun()  # ← refleja el cambio inmediatamente (sin “escribir dos veces”)
+
+# Comisión de éxito editable / override
+c4, c5 = st.columns(2)
+with c4:
+    com_exito_prefill_now = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
+    if not st.session_state.get("comision_exito_overridden", False):
+        st.session_state.comision_exito = com_exito_prefill_now
+    val_prev = float(st.session_state.comision_exito)
+    new_val = st.number_input("🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
+                              value=val_prev, format="%.0f", key="comision_exito")
+    st.session_state.comision_exito_overridden = (abs(new_val - com_exito_prefill_now) > 1e-6)
 
 with c5:
-    st.session_state.ce_inicial_txt = st.text_input("🧪 CE inicial", value=st.session_state.ce_inicial_txt, placeholder="Ej. 150000")
+    st.text_input("🧪 CE inicial", value=st.session_state.get("ce_inicial_txt", ""), key="ce_inicial_txt",
+                  placeholder="Ej. 150000")
     try:
         ce_inicial = float(st.session_state.ce_inicial_txt.replace(",", ".")) if st.session_state.ce_inicial_txt.strip() != "" else None
     except Exception:
         ce_inicial = None
         st.warning("CE inicial inválido; déjalo vacío o usa un número como 0.12")
 
-# Avance de CE inicial sobre Comisión de éxito (con valores vigentes)
+# Avance CE inicial vs Comisión de éxito
 st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
 if (ce_inicial is None) or (ce_inicial <= 0):
     st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
@@ -280,48 +271,11 @@ else:
         porcentaje = (float(ce_inicial) / base) * 100.0
         porcentaje_capped = max(0.0, min(porcentaje, 100.0))
         st.progress(int(round(porcentaje_capped)))
-        st.caption(
-            f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  "
-            f"**{porcentaje:,.2f}%** de la Comisión de éxito"
-        )
+        st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
 
-# ---------- 5) Cronograma de pagos (tabla editable + prellenado REACTIVO) ----------
+# ------------------ 5) Cronograma de pagos (editable) ------------------
 st.markdown("### 5) Cronograma de pagos (tabla editable)")
 
-# 5.1 Repartición ANTES de mostrar el editor (si cambió PAGO BANCO o N PaB)
-if st.session_state.get("_tabla_needs_repartition", False):
-    df_final = st.session_state.tabla_pagos.copy(deep=True)
-    n = int(max(1, st.session_state.get("n_pab", 1)))
-    total = float(st.session_state.get("pago_banco", 0.0) or 0.0)
-
-    # Asegurar que haya al menos n filas
-    if len(df_final) < n:
-        faltan = n - len(df_final)
-        extra = pd.DataFrame({
-            "N": list(range(len(df_final), len(df_final) + faltan)),
-            "FECHA": [pd.NaT] * faltan,
-            "Pago(s) a banco": [0.0] * faltan,
-            "Pagos de CE": [0.0] * faltan,
-        })
-        df_final = pd.concat([df_final.reset_index(drop=True), extra], ignore_index=True)
-
-    # Recalcular N
-    df_final.reset_index(drop=True, inplace=True)
-    df_final["N"] = range(len(df_final))
-
-    # Reparto limpio: poner 0.0 desde N en adelante y distribuir en 0..N-1
-    cuotas = _distribuir_en_n_pagos(total, n) if total > 0 else [0.0] * n
-    # Primero, limpiar toda la columna
-    df_final["Pago(s) a banco"] = df_final["Pago(s) a banco"].astype(float)
-    df_final.loc[:, "Pago(s) a banco"] = 0.0
-    # Luego, escribir exactamente las primeras n cuotas
-    for i in range(n):
-        df_final.loc[i, "Pago(s) a banco"] = float(cuotas[i])
-
-    st.session_state.tabla_pagos = df_final
-    st.session_state._tabla_needs_repartition = False
-
-# 5.2 Mostrar editor
 df_view = st.session_state.tabla_pagos.copy(deep=True)
 edited_df = st.data_editor(
     df_view,
@@ -340,25 +294,23 @@ edited_df = st.data_editor(
     key="editor_tabla_pagos",
 )
 
-# 5.3 Guardar lo editado inmediatamente
+# Guardar al instante
 st.session_state.tabla_pagos = edited_df.copy(deep=True)
 
-# 5.4 Completar primera FECHA = hoy si quedó vacía
+# Completar primera FECHA = hoy si está vacía
 df_final = st.session_state.tabla_pagos
 if len(df_final) > 0 and (pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == ""):
     df_final.loc[0, "FECHA"] = date.today()
 
-# 5.5 Recalcular N si no coincide con 0..n-1
+# Recalcular N = 0..n-1 si hace falta
 n_expected = list(range(len(df_final)))
 if "N" not in df_final.columns or df_final["N"].tolist() != n_expected:
     df_final.reset_index(drop=True, inplace=True)
     df_final["N"] = range(len(df_final))
 
-# Persistir
 st.session_state.tabla_pagos = df_final
 
 st.caption(
-    "La tabla se recalcula automáticamente al cambiar PAGO BANCO o N PaB: "
-    "las primeras N filas se rellenan con PAGO BANCO/N (la última ajusta), y el resto queda en 0. "
-    "Todo sigue editable. Puedes agregar filas; N se reenumera solo."
+    "Sin dobles tecleos: cualquier cambio en PAGO BANCO o N PaB reparte al instante (la última cuota ajusta) y el resto queda en 0. "
+    "Todo sigue editable. Al cambiar de Referencia/Id, todo se reinicia limpio."
 )
