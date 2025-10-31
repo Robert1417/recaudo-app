@@ -250,28 +250,29 @@ with st.form("parametros_base"):
 if not aplicar:
     st.stop()
 
-# ---------- 5) Cronograma de pagos (tabla editable, sin botón de guardar) ----------
+# ---------- 5) Cronograma de pagos (tabla editable, sin formato de miles) ----------
 st.markdown("### 5) Cronograma de pagos (tabla editable)")
 
-# 1) Inicialización en sesión: 5 filas (N=0..4), números en 0.0 para evitar None/object
+# 1) Inicialización en sesión: 5 filas (N=0..4)
 if "tabla_pagos" not in st.session_state:
     n_init = list(range(0, 5))  # 0..4
     fechas_init = [date.today()] + [pd.NaT] * (len(n_init) - 1)
     st.session_state.tabla_pagos = pd.DataFrame({
         "N": n_init,
         "FECHA": fechas_init,
+        # usa 0.0 inicial para asegurar dtype float estable (evita perder ediciones)
         "Pago(s) a banco": [0.0] * len(n_init),
         "Pagos de CE": [0.0] * len(n_init),
     })
 
-# 2) Garantizar tipos antes de editar (evita que Streamlit “pierda” lo escrito)
+# 2) Tipos estables antes de editar
 df_src = st.session_state.tabla_pagos.copy()
 df_src["N"] = pd.to_numeric(df_src["N"], errors="coerce").fillna(0).astype(int)
-df_src["Pago(s) a banco"] = pd.to_numeric(df_src["Pago(s) a banco"], errors="coerce").fillna(0.0)
-df_src["Pagos de CE"] = pd.to_numeric(df_src["Pagos de CE"], errors="coerce").fillna(0.0)
+df_src["Pago(s) a banco"] = pd.to_numeric(df_src["Pago(s) a banco"], errors="coerce")
+df_src["Pagos de CE"] = pd.to_numeric(df_src["Pagos de CE"], errors="coerce")
 df_src["FECHA"] = pd.to_datetime(df_src["FECHA"], errors="coerce")
 
-# 3) Editor en vivo (sin form ni submit)
+# 3) Editor en vivo (sin botón de guardar, sin formato especial)
 edited_df = st.data_editor(
     df_src,
     use_container_width=True,
@@ -287,12 +288,14 @@ edited_df = st.data_editor(
             help="La primera fila queda en hoy si está vacía; las demás, elígelo."
         ),
         "Pago(s) a banco": st.column_config.NumberColumn(
-            "Pago(s) a banco", step=1000, format="%,.0f",
-            help="Escribe en pesos (sin signo ni separador). Se muestra con separador."
+            "Pago(s) a banco",
+            step=1,  # sin miles, se escribe tal cual
+            help="Escribe el valor en pesos (sin signo ni separador)."
         ),
         "Pagos de CE": st.column_config.NumberColumn(
-            "Pagos de CE", step=1000, format="%,.0f",
-            help="Escribe en pesos (sin signo ni separador). Se muestra con separador."
+            "Pagos de CE",
+            step=1,  # sin miles, se escribe tal cual
+            help="Escribe el valor en pesos (sin signo ni separador)."
         ),
     },
     key="editor_tabla_pagos",
@@ -309,11 +312,11 @@ if len(df_final) > 0 and (pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[
 df_final = df_final.reset_index(drop=True)
 df_final["N"] = range(len(df_final))
 
-# Asegurar tipos numéricos tras la edición (nuevas filas suelen venir como None)
+# Asegurar tipo numérico (permitimos NaN si dejas celdas vacías)
 for col_money in ["Pago(s) a banco", "Pagos de CE"]:
-    df_final[col_money] = pd.to_numeric(df_final[col_money], errors="coerce").fillna(0.0)
+    df_final[col_money] = pd.to_numeric(df_final[col_money], errors="coerce")
 
-# Guardar inmediatamente en sesión (sin botón de guardar)
+# Guardar inmediatamente en sesión
 st.session_state.tabla_pagos = df_final
 
-st.caption("Puedes escribir montos libremente y agregar filas. Los cambios quedan guardados al instante.")
+st.caption("Escribe números tal cual (sin $ ni puntos). Puedes agregar filas; N se reenumera solo.")
