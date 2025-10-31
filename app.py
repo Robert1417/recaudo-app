@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import calendar
 from datetime import date
 
 # ------------------ Ajustes globales ------------------
@@ -55,6 +54,19 @@ def _map_columns(columns_list: tuple[str, ...]):
     col_saldo = _find_col(dummy_df, ["Saldo","Ahorro"])
     col_ce    = _find_col(dummy_df, ["CE"])
     return col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce
+
+# -------- helpers de CE (para evitar que se "devuelva") --------
+def _prefill_ce():
+    """Setea CE con la fórmula solo si el usuario NO la ha modificado (override=False)."""
+    if not st.session_state.get("comision_exito_overridden", False):
+        deuda_res = float(st.session_state.get("deuda_res_edit", 0.0) or 0.0)
+        pago_bco  = float(st.session_state.get("pago_banco", 0.0) or 0.0)
+        ce_base   = float(st.session_state.get("ce_base", 0.0) or 0.0)
+        st.session_state.comision_exito = max(0.0, (deuda_res - pago_bco) * 1.19 * ce_base)
+
+def _mark_override_ce():
+    """Marca CE como fijada por el usuario (no volver a prellenar)."""
+    st.session_state.comision_exito_overridden = True
 
 # ------------------ 1) cargar base ------------------
 st.markdown("### 1) Cargar base (CSV o Excel)")
@@ -136,7 +148,7 @@ if st.session_state.get("sig_sel") != sig_sel:
 
     st.session_state.ce_inicial_val  = 0.0
 
-    # Para detectar cambios de PAGO BANCO / N PaB
+    # Track de cambios de PaB / N PaB
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
 
@@ -189,25 +201,19 @@ with c3:
     st.number_input("🧮 N PaB", min_value=1, step=1,
                     value=int(st.session_state.n_pab), key="n_pab")
 
-# Actualizar CE prefijada automáticamente si NO hay override
+# Si cambia PAGO BANCO o N PaB: solo prellenar CE si NO hay override
 if (st.session_state._last_pab != st.session_state.pago_banco) or (st.session_state._last_n != st.session_state.n_pab):
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
-    com_ex_prefill = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
-    if not st.session_state.get("comision_exito_overridden", False):
-        st.session_state.comision_exito = com_ex_prefill
+    _prefill_ce()  # respeta override
 
 # Comisión de éxito (editable) y CE inicial
 c4, c5 = st.columns(2)
 with c4:
-    com_ex_prefill_now = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
-    if not st.session_state.get("comision_exito_overridden", False):
-        st.session_state.comision_exito = com_ex_prefill_now
-    prev = float(st.session_state.comision_exito)
-    new_val = st.number_input("🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
-                              value=prev, format="%.0f", key="comision_exito")
-    st.session_state.comision_exito_overridden = (abs(new_val - com_ex_prefill_now) > 1e-6)
-
+    # Mostrar el valor actual (sea auto o manual). El 'value' se ignora si key existe (persistencia de estado).
+    st.number_input("🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
+                    value=float(st.session_state.get("comision_exito", 0.0)),
+                    format="%.0f", key="comision_exito", on_change=_mark_override_ce)
 with c5:
     st.number_input("🧪 CE inicial", min_value=0.0, step=1000.0,
                     value=float(st.session_state.get("ce_inicial_val", 0.0)),
@@ -216,17 +222,16 @@ with c5:
 # Avance CE inicial vs Comisión de éxito
 st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
 ce_inicial = float(st.session_state.ce_inicial_val or 0.0)
+base = float(st.session_state.comision_exito or 0.0)
 if ce_inicial <= 0:
     st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
+elif base <= 0:
+    st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular el porcentaje.")
 else:
-    base = float(st.session_state.comision_exito) if st.session_state.comision_exito and st.session_state.comision_exito > 0 else 0.0
-    if base <= 0:
-        st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular el porcentaje.")
-    else:
-        porcentaje = (ce_inicial / base) * 100.0
-        porcentaje_capped = max(0.0, min(porcentaje, 100.0))
-        st.progress(int(round(porcentaje_capped)))
-        st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
+    porcentaje = (ce_inicial / base) * 100.0
+    porcentaje_capped = max(0.0, min(porcentaje, 100.0))
+    st.progress(int(round(porcentaje_capped)))
+    st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
 
 # ------------------ 6) Validación y KPIs (sin tabla) ------------------
 st.markdown("### 6) Validación y KPIs")
