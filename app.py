@@ -111,7 +111,7 @@ if not ids_sel:
 
 sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 
-# ---------- 3) Valores base (reactivo, sin form ni botón) ----------
+# ---------- 3) Valores base (reactivo) ----------
 st.markdown("### 3) Valores base (puedes editarlos)")
 
 fila_primera = sel.iloc[0]
@@ -136,7 +136,7 @@ if st.session_state.get("sig_sel") != sig_sel:
     st.session_state.comision_exito_overridden = False
     st.session_state.comision_exito  = max(0.0, (deuda_res_total_def - 0.0) * 1.19 * ce_base_def)
     st.session_state.ce_inicial_txt  = ""
-    # Reset tabla (sección 5 la volverá a crear)
+    # La sección 5 reiniciará la tabla
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -248,7 +248,7 @@ else:
             f"**{porcentaje:,.2f}%** de la Comisión de éxito"
         )
 
-# ---------- 5) Cronograma de pagos (tabla editable con prellenado por N PaB) ----------
+# ---------- 5) Cronograma de pagos (tabla editable + prellenado) ----------
 st.markdown("### 5) Cronograma de pagos (tabla editable)")
 
 # Reiniciar tabla si cambió la selección (referencia/ids)
@@ -263,12 +263,11 @@ if st.session_state.get("sig_sel") != st.session_state.get("_tabla_sig_sel"):
         "Pagos de CE": [0.0] * len(n_init),
     })
 
-# 1) Asegurar que haya al menos N PaB filas ANTES de mostrar el editor
+# Asegurar que haya al menos N PaB filas ANTES de mostrar el editor
 n_pab = int(max(1, st.session_state.get("n_pab", 1)))
 df_work = st.session_state.tabla_pagos.copy(deep=True)
 
 if len(df_work) < n_pab:
-    # Agregar filas hasta cubrir N PaB (respetando FECHA vacía y montos 0)
     faltan = n_pab - len(df_work)
     extra = pd.DataFrame({
         "N": list(range(len(df_work), len(df_work) + faltan)),
@@ -278,11 +277,10 @@ if len(df_work) < n_pab:
     })
     df_work = pd.concat([df_work.reset_index(drop=True), extra], ignore_index=True)
 
-# Recalcular N (0..n-1) por si agregamos filas
 df_work.reset_index(drop=True, inplace=True)
 df_work["N"] = range(len(df_work))
 
-# 2) Mostrar editor (deep copy para evitar “doble tecleo”)
+# Editor (deep copy) para evitar "doble tecleo"
 edited_df = st.data_editor(
     df_work.copy(deep=True),
     use_container_width=True,
@@ -300,10 +298,10 @@ edited_df = st.data_editor(
     key="editor_tabla_pagos",
 )
 
-# 3) Guardar lo editado inmediatamente (deep copy)
+# Guardar lo editado inmediatamente
 st.session_state.tabla_pagos = edited_df.copy(deep=True)
 
-# 4) Post-procesado: primera FECHA = hoy si quedó vacía
+# Completar primera FECHA = hoy si quedó vacía
 df_final = st.session_state.tabla_pagos
 if len(df_final) > 0 and (pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == ""):
     df_final.loc[0, "FECHA"] = date.today()
@@ -314,11 +312,11 @@ if "N" not in df_final.columns or df_final["N"].tolist() != n_expected:
     df_final.reset_index(drop=True, inplace=True)
     df_final["N"] = range(len(df_final))
 
-# 5) **P R E L L E N A R** "Pago(s) a banco" con cuotas iguales (sin pisar ediciones del usuario)
+# ---- PRELLENADO: Pago(s) a banco = PAGO BANCO / N PaB en las primeras N filas (sin pisar ediciones) ----
 pago_total = float(st.session_state.get("pago_banco", 0.0) or 0.0)
 n = int(max(1, st.session_state.get("n_pab", 1)))
 
-# Asegurar al menos n filas (si en el editor eliminaron filas)
+# Si el usuario eliminó filas, garantizar que haya al menos n
 if len(df_final) < n:
     faltan2 = n - len(df_final)
     extra2 = pd.DataFrame({
@@ -331,11 +329,8 @@ if len(df_final) < n:
     df_final["N"] = range(len(df_final))
 
 if pago_total > 0 and n >= 1:
-    # Distribución en pesos enteros para que la suma exacta sea pago_total
     cuota_base = int(round(pago_total / n))
-    # Ajustar la última para no perder/redondear
     for i in range(n):
-        # No sobrescribir si el usuario ya puso un valor distinto de 0/NaN
         ya_tiene = pd.notna(df_final.loc[i, "Pago(s) a banco"]) and float(df_final.loc[i, "Pago(s) a banco"]) != 0.0
         if not ya_tiene:
             if i < n - 1:
@@ -344,5 +339,8 @@ if pago_total > 0 and n >= 1:
                 suma_prev = float(cuota_base) * (n - 1)
                 df_final.loc[i, "Pago(s) a banco"] = float(max(0.0, pago_total - suma_prev))
 
-# 6) Persistir cambios finales
+# Persistir cambios finales
 st.session_state.tabla_pagos = df_final
+
+st.caption("La tabla se prellena con PAGO BANCO / N PaB en las primeras N filas, pero puedes editar cualquier valor. "
+           "Escribe números tal cual (sin $ ni puntos). Puedes agregar filas; N se reenumera solo.")
