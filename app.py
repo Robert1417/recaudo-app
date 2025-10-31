@@ -322,56 +322,74 @@ else:
         porcentaje_capped = max(0.0, min(porcentaje, 100.0))
         st.progress(int(round(porcentaje_capped)))
         st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
+        
+# ------------------ 5) Cronograma de pagos (tabla editable con fechas automáticas) ------------------
+st.markdown("### 5) Cronograma de pagos (tabla editable con fechas automáticas)")
 
-# ------------------ 5) Cronograma de pagos (editable) ------------------
-st.markdown("### 5) Cronograma de pagos (tabla editable)")
+def _ultimo_dia_mes(fecha):
+    """Devuelve el último día del mes de una fecha dada."""
+    if pd.isna(fecha):
+        return pd.NaT
+    mes = fecha.month + 1
+    año = fecha.year
+    if mes > 12:
+        mes = 1
+        año += 1
+    primer_dia_siguiente = date(año, mes, 1)
+    ultimo_dia = primer_dia_siguiente - pd.Timedelta(days=1)
+    return ultimo_dia
 
-# Garantizar que la tabla ya refleje CE inicial vigente antes de pintar
-_sync_ce_inicial_to_table()
-
+# Copia segura de la tabla actual
 df_view = st.session_state.tabla_pagos.copy(deep=True)
+
+# --- Generar fechas automáticas si faltan ---
+if len(df_view) > 0:
+    for i in range(len(df_view)):
+        if pd.isna(df_view.loc[i, "FECHA"]) or str(df_view.loc[i, "FECHA"]).strip() == "":
+            if i == 0:
+                df_view.loc[i, "FECHA"] = date.today()
+            else:
+                fecha_anterior = pd.to_datetime(df_view.loc[i - 1, "FECHA"])
+                df_view.loc[i, "FECHA"] = _ultimo_dia_mes(fecha_anterior)
+
+# --- Editor de tabla ---
 edited_df = st.data_editor(
     df_view,
     use_container_width=True,
     num_rows="dynamic",
     column_config={
-        "N": st.column_config.NumberColumn(
-            "N", min_value=0, max_value=100, step=1, disabled=True,
-            help="Consecutivo automático desde 0."
-        ),
-        "FECHA": st.column_config.DateColumn(
-            "FECHA", format="YYYY-MM-DD",
-            help="La primera fila queda en hoy si está vacía."
-        ),
-        "Pago(s) a banco": st.column_config.NumberColumn(
-            "Pago(s) a banco", step=1,
-            help="Escribe el valor en pesos (sin signo ni separador)."
-        ),
-        "Pagos de CE": st.column_config.NumberColumn(
-            "Pagos de CE", step=1,
-            help="Escribe el valor en pesos (sin signo ni separador)."
-        ),
+        "N": st.column_config.NumberColumn("N", disabled=True),
+        "FECHA": st.column_config.DateColumn("FECHA", format="YYYY-MM-DD"),
+        "Pago(s) a banco": st.column_config.NumberColumn("Pago(s) a banco", step=1),
+        "Pagos de CE": st.column_config.NumberColumn("Pagos de CE", step=1),
     },
     key="editor_tabla_pagos",
 )
 
-# --- Persistir lo editado y aplicar mínimos (fecha/N) ---
+# --- Sincronizar con CE inicial ---
 df_final = edited_df.copy(deep=True)
-
 if len(df_final) > 0:
-    if pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == "":
+    if pd.isna(df_final.loc[0, "FECHA"]):
         df_final.loc[0, "FECHA"] = date.today()
+    if ce_inicial > 0:
+        df_final.loc[0, "Pagos de CE"] = float(ce_inicial)
 
-# Recalcular N si hiciera falta
-n_expected = list(range(len(df_final)))
-if "N" not in df_final.columns or df_final["N"].tolist() != n_expected:
-    df_final.reset_index(drop=True, inplace=True)
-    df_final["N"] = range(len(df_final))
+# --- Recalcular N y autocompletar nuevas filas ---
+df_final.reset_index(drop=True, inplace=True)
+df_final["N"] = range(len(df_final))
+
+# Si el usuario agregó nuevas filas → completar con fecha automática
+for i in range(len(df_view), len(df_final)):
+    if i == 0:
+        df_final.loc[i, "FECHA"] = date.today()
+    else:
+        fecha_anterior = pd.to_datetime(df_final.loc[i - 1, "FECHA"])
+        df_final.loc[i, "FECHA"] = _ultimo_dia_mes(fecha_anterior)
+    df_final.loc[i, "N"] = i
 
 st.session_state.tabla_pagos = df_final
 
 st.caption(
-    "Sin dobles tecleos: cualquier cambio en PAGO BANCO o N PaB reparte al instante (la última cuota ajusta) y el resto queda en 0. "
-    "La primera fila de 'Pagos de CE' siempre refleja el CE inicial en el mismo instante. "
-    "Al cambiar de Referencia/Id, todo se reinicia limpio."
+    "🗓️ Las fechas se completan automáticamente: la primera es hoy y las siguientes son el último día del mes siguiente. "
+    "Si agregas nuevas filas, se rellenan con la fecha y número consecutivo automáticamente."
 )
