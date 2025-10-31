@@ -324,69 +324,84 @@ else:
         st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
         
 # ------------------ 5) Cronograma de pagos (tabla editable con fechas automáticas) ------------------
+import calendar
+from datetime import timedelta
+
 st.markdown("### 5) Cronograma de pagos (tabla editable con fechas automáticas)")
 
-def _ultimo_dia_mes(fecha):
-    """Devuelve el último día del mes de una fecha dada."""
-    if pd.isna(fecha):
-        return pd.NaT
-    mes = fecha.month + 1
-    año = fecha.year
+df_view = st.session_state.tabla_pagos.copy(deep=True)
+
+# --- Función auxiliar para obtener el último día del mes siguiente ---
+def ultimo_dia_mes_siguiente(fecha_base):
+    if pd.isna(fecha_base):
+        fecha_base = date.today()
+    mes = fecha_base.month + 1
+    año = fecha_base.year
     if mes > 12:
         mes = 1
         año += 1
-    primer_dia_siguiente = date(año, mes, 1)
-    ultimo_dia = primer_dia_siguiente - pd.Timedelta(days=1)
-    return ultimo_dia
+    ultimo_dia = calendar.monthrange(año, mes)[1]
+    return date(año, mes, ultimo_dia)
 
-# Copia segura de la tabla actual
-df_view = st.session_state.tabla_pagos.copy(deep=True)
-
-# --- Generar fechas automáticas si faltan ---
+# --- Completar fechas faltantes ---
 if len(df_view) > 0:
-    for i in range(len(df_view)):
-        if pd.isna(df_view.loc[i, "FECHA"]) or str(df_view.loc[i, "FECHA"]).strip() == "":
-            if i == 0:
-                df_view.loc[i, "FECHA"] = date.today()
-            else:
-                fecha_anterior = pd.to_datetime(df_view.loc[i - 1, "FECHA"])
-                df_view.loc[i, "FECHA"] = _ultimo_dia_mes(fecha_anterior)
+    # primera fecha = hoy
+    if pd.isna(df_view.loc[0, "FECHA"]) or str(df_view.loc[0, "FECHA"]).strip() == "":
+        df_view.loc[0, "FECHA"] = date.today()
 
-# --- Editor de tabla ---
+    # fechas siguientes = último día del mes siguiente a la anterior
+    for i in range(1, len(df_view)):
+        if pd.isna(df_view.loc[i, "FECHA"]) or str(df_view.loc[i, "FECHA"]).strip() == "":
+            df_view.loc[i, "FECHA"] = ultimo_dia_mes_siguiente(df_view.loc[i - 1, "FECHA"])
+
+# --- Sincronizar CE inicial en la primera fila ---
+ce_inicial = float(st.session_state.ce_inicial_val or 0.0)
+if len(df_view) > 0 and ce_inicial > 0:
+    df_view.loc[0, "Pagos de CE"] = float(ce_inicial)
+
+# --- Editor interactivo ---
 edited_df = st.data_editor(
     df_view,
     use_container_width=True,
     num_rows="dynamic",
     column_config={
-        "N": st.column_config.NumberColumn("N", disabled=True),
-        "FECHA": st.column_config.DateColumn("FECHA", format="YYYY-MM-DD"),
-        "Pago(s) a banco": st.column_config.NumberColumn("Pago(s) a banco", step=1),
-        "Pagos de CE": st.column_config.NumberColumn("Pagos de CE", step=1),
+        "N": st.column_config.NumberColumn(
+            "N", min_value=0, max_value=100, step=1, disabled=True,
+            help="Consecutivo automático desde 0."
+        ),
+        "FECHA": st.column_config.DateColumn(
+            "FECHA", format="YYYY-MM-DD",
+            help="La primera fila es hoy; las siguientes son el último día del mes siguiente."
+        ),
+        "Pago(s) a banco": st.column_config.NumberColumn(
+            "Pago(s) a banco", step=1,
+            help="Escribe el valor en pesos (sin signo ni separador)."
+        ),
+        "Pagos de CE": st.column_config.NumberColumn(
+            "Pagos de CE", step=1,
+            help="La primera fila refleja el CE inicial."
+        ),
     },
     key="editor_tabla_pagos",
 )
 
-# --- Sincronizar con CE inicial ---
+# --- Detectar nuevas filas y asignar fecha y N automáticamente ---
 df_final = edited_df.copy(deep=True)
-if len(df_final) > 0:
-    if pd.isna(df_final.loc[0, "FECHA"]):
-        df_final.loc[0, "FECHA"] = date.today()
-    if ce_inicial > 0:
-        df_final.loc[0, "Pagos de CE"] = float(ce_inicial)
+if len(df_final) > len(st.session_state.tabla_pagos):
+    filas_nuevas = len(df_final) - len(st.session_state.tabla_pagos)
+    for _ in range(filas_nuevas):
+        last_index = len(df_final) - filas_nuevas
+        last_fecha = df_final.loc[last_index - 1, "FECHA"] if last_index > 0 else date.today()
+        next_fecha = ultimo_dia_mes_siguiente(last_fecha)
+        next_n = last_index
+        df_final.loc[last_index, "FECHA"] = next_fecha
+        df_final.loc[last_index, "N"] = next_n
 
-# --- Recalcular N y autocompletar nuevas filas ---
+# --- Recalcular N secuencial si hiciera falta ---
 df_final.reset_index(drop=True, inplace=True)
 df_final["N"] = range(len(df_final))
 
-# Si el usuario agregó nuevas filas → completar con fecha automática
-for i in range(len(df_view), len(df_final)):
-    if i == 0:
-        df_final.loc[i, "FECHA"] = date.today()
-    else:
-        fecha_anterior = pd.to_datetime(df_final.loc[i - 1, "FECHA"])
-        df_final.loc[i, "FECHA"] = _ultimo_dia_mes(fecha_anterior)
-    df_final.loc[i, "N"] = i
-
+# --- Guardar persistente ---
 st.session_state.tabla_pagos = df_final
 
 st.caption(
