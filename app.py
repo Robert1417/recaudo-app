@@ -34,6 +34,22 @@ def _to_num(x):
         x = x.replace(",", "")
     return pd.to_numeric(x, errors="coerce")
 
+def _distribuir_en_n_pagos(total: float, n: int) -> list[float]:
+    """
+    Reparte 'total' en 'n' cuotas en pesos enteros:
+    - Todas iguales redondeadas
+    - La última ajusta para que la suma sea exactamente 'total'
+    """
+    n = max(1, int(n))
+    total_int = int(round(float(total)))
+    base = total_int // n
+    resto = total_int - base * n
+    cuotas = [float(base)] * n
+    # agregamos el resto (positivo o cero) a la última
+    if n > 0:
+        cuotas[-1] = float(base + resto)
+    return cuotas
+
 # ------------------ Funciones cacheadas (perf) ------------------
 @st.cache_data(ttl=900, show_spinner=False)
 def _read_file(file):
@@ -140,6 +156,15 @@ if st.session_state.get("sig_sel") != sig_sel:
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
     st.session_state._tabla_needs_repartition = True  # primer render
+    # Reinicio tabla de pagos
+    n_init = list(range(0, 5))  # 0..4
+    fechas_init = [date.today()] + [pd.NaT] * (len(n_init) - 1)
+    st.session_state.tabla_pagos = pd.DataFrame({
+        "N": n_init,
+        "FECHA": fechas_init,
+        "Pago(s) a banco": [0.0] * len(n_init),
+        "Pagos de CE": [0.0] * len(n_init),
+    })
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -213,7 +238,7 @@ with c3:
     )
     st.session_state.n_pab = st.session_state.n_pab_input
 
-# Detectar cambios en PAGO BANCO o N PaB → disparar repartición
+# Detectar cambios en PAGO BANCO o N PaB → disparar repartición total
 if st.session_state.get("_last_pab") != st.session_state.pago_banco or st.session_state.get("_last_n") != st.session_state.n_pab:
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
@@ -260,41 +285,46 @@ else:
             f"**{porcentaje:,.2f}%** de la Comisión de éxito"
         )
 
-# ---------- 5) Cronograma de pagos (tabla editable + prellenado reactivo) ----------
+# ---------- 5) Cronograma de pagos (tabla editable + prellenado REACTIVO) ----------
 st.markdown("### 5) Cronograma de pagos (tabla editable)")
 
-# Reiniciar tabla si cambió la selección (referencia/ids)
-if st.session_state.get("sig_sel") != st.session_state.get("_tabla_sig_sel"):
-    st.session_state._tabla_sig_sel = st.session_state.sig_sel
-    n_init = list(range(0, 5))  # 0..4
-    fechas_init = [date.today()] + [pd.NaT] * (len(n_init) - 1)
-    st.session_state.tabla_pagos = pd.DataFrame({
-        "N": n_init,
-        "FECHA": fechas_init,
-        "Pago(s) a banco": [0.0] * len(n_init),
-        "Pagos de CE": [0.0] * len(n_init),
-    })
+# 5.1 Repartición ANTES de mostrar el editor (si cambió PAGO BANCO o N PaB)
+if st.session_state.get("_tabla_needs_repartition", False):
+    df_final = st.session_state.tabla_pagos.copy(deep=True)
+    n = int(max(1, st.session_state.get("n_pab", 1)))
+    total = float(st.session_state.get("pago_banco", 0.0) or 0.0)
 
-# Asegurar que haya al menos N PaB filas ANTES del editor
-n_pab = int(max(1, st.session_state.get("n_pab", 1)))
-df_work = st.session_state.tabla_pagos.copy(deep=True)
+    # Asegurar que haya al menos n filas
+    if len(df_final) < n:
+        faltan = n - len(df_final)
+        extra = pd.DataFrame({
+            "N": list(range(len(df_final), len(df_final) + faltan)),
+            "FECHA": [pd.NaT] * faltan,
+            "Pago(s) a banco": [0.0] * faltan,
+            "Pagos de CE": [0.0] * faltan,
+        })
+        df_final = pd.concat([df_final.reset_index(drop=True), extra], ignore_index=True)
 
-if len(df_work) < n_pab:
-    faltan = n_pab - len(df_work)
-    extra = pd.DataFrame({
-        "N": list(range(len(df_work), len(df_work) + faltan)),
-        "FECHA": [pd.NaT] * faltan,
-        "Pago(s) a banco": [0.0] * faltan,
-        "Pagos de CE": [0.0] * faltan,
-    })
-    df_work = pd.concat([df_work.reset_index(drop=True), extra], ignore_index=True)
+    # Recalcular N
+    df_final.reset_index(drop=True, inplace=True)
+    df_final["N"] = range(len(df_final))
 
-df_work.reset_index(drop=True, inplace=True)
-df_work["N"] = range(len(df_work))
+    # Reparto limpio: poner 0.0 desde N en adelante y distribuir en 0..N-1
+    cuotas = _distribuir_en_n_pagos(total, n) if total > 0 else [0.0] * n
+    # Primero, limpiar toda la columna
+    df_final["Pago(s) a banco"] = df_final["Pago(s) a banco"].astype(float)
+    df_final.loc[:, "Pago(s) a banco"] = 0.0
+    # Luego, escribir exactamente las primeras n cuotas
+    for i in range(n):
+        df_final.loc[i, "Pago(s) a banco"] = float(cuotas[i])
 
-# Editor (deep copy) para evitar "doble tecleo"
+    st.session_state.tabla_pagos = df_final
+    st.session_state._tabla_needs_repartition = False
+
+# 5.2 Mostrar editor
+df_view = st.session_state.tabla_pagos.copy(deep=True)
 edited_df = st.data_editor(
-    df_work.copy(deep=True),
+    df_view,
     use_container_width=True,
     num_rows="dynamic",
     column_config={
@@ -310,75 +340,25 @@ edited_df = st.data_editor(
     key="editor_tabla_pagos",
 )
 
-# Guardar lo editado inmediatamente
+# 5.3 Guardar lo editado inmediatamente
 st.session_state.tabla_pagos = edited_df.copy(deep=True)
 
-# Completar primera FECHA = hoy si quedó vacía
+# 5.4 Completar primera FECHA = hoy si quedó vacía
 df_final = st.session_state.tabla_pagos
 if len(df_final) > 0 and (pd.isna(df_final.loc[0, "FECHA"]) or str(df_final.loc[0, "FECHA"]).strip() == ""):
     df_final.loc[0, "FECHA"] = date.today()
 
-# Recalcular N si no coincide con 0..n-1
+# 5.5 Recalcular N si no coincide con 0..n-1
 n_expected = list(range(len(df_final)))
 if "N" not in df_final.columns or df_final["N"].tolist() != n_expected:
     df_final.reset_index(drop=True, inplace=True)
     df_final["N"] = range(len(df_final))
 
-# ---- Si cambió PAGO BANCO o N PaB → forzar nueva repartición ----
-if st.session_state.get("_tabla_needs_repartition", False):
-    # Garantizar al menos n filas
-    if len(df_final) < n_pab:
-        faltan2 = n_pab - len(df_final)
-        extra2 = pd.DataFrame({
-            "N": list(range(len(df_final), len(df_final) + faltan2)),
-            "FECHA": [pd.NaT] * faltan2,
-            "Pago(s) a banco": [0.0] * faltan2,
-            "Pagos de CE": [0.0] * faltan2,
-        })
-        df_final = pd.concat([df_final.reset_index(drop=True), extra2], ignore_index=True)
-        df_final["N"] = range(len(df_final))
-        st.session_state.tabla_pagos = df_final
-
-    # Limpiar las primeras N filas para que el prellenado sobrescriba
-    for i in range(n_pab):
-        if i < len(df_final):
-            df_final.loc[i, "Pago(s) a banco"] = 0.0
-
-    st.session_state._tabla_needs_repartition = False  # ya se limpió, ahora prellenamos
-
-# ---- PRELLENADO: Pago(s) a banco = PAGO BANCO / N PaB (ajuste en la última) ----
-pago_total = float(st.session_state.get("pago_banco", 0.0) or 0.0)
-n = int(max(1, st.session_state.get("n_pab", 1)))
-
-# Si faltan filas por modificaciones del usuario, crearlas
-if len(df_final) < n:
-    faltan3 = n - len(df_final)
-    extra3 = pd.DataFrame({
-        "N": list(range(len(df_final), len(df_final) + faltan3)),
-        "FECHA": [pd.NaT] * faltan3,
-        "Pago(s) a banco": [0.0] * faltan3,
-        "Pagos de CE": [0.0] * faltan3,
-    })
-    df_final = pd.concat([df_final.reset_index(drop=True), extra3], ignore_index=True)
-    df_final["N"] = range(len(df_final))
-
-if pago_total > 0 and n >= 1:
-    cuota_base = int(round(pago_total / n))
-    for i in range(n):
-        # Sólo rellenar si está en cero o NaN; si el usuario ya puso algo distinto, lo respetamos.
-        ya_tiene = pd.notna(df_final.loc[i, "Pago(s) a banco"]) and float(df_final.loc[i, "Pago(s) a banco"]) != 0.0
-        if not ya_tiene:
-            if i < n - 1:
-                df_final.loc[i, "Pago(s) a banco"] = float(cuota_base)
-            else:
-                suma_prev = float(cuota_base) * (n - 1)
-                df_final.loc[i, "Pago(s) a banco"] = float(max(0.0, pago_total - suma_prev))
-
-# Persistir cambios finales
+# Persistir
 st.session_state.tabla_pagos = df_final
 
 st.caption(
-    "La tabla se actualiza automáticamente al cambiar PAGO BANCO o N PaB, "
-    "repartiendo el pago en las primeras N filas. Todo sigue editable. "
-    "Escribe números tal cual (sin $ ni puntos). Puedes agregar filas; N se reenumera solo."
+    "La tabla se recalcula automáticamente al cambiar PAGO BANCO o N PaB: "
+    "las primeras N filas se rellenan con PAGO BANCO/N (la última ajusta), y el resto queda en 0. "
+    "Todo sigue editable. Puedes agregar filas; N se reenumera solo."
 )
