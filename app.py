@@ -116,139 +116,144 @@ if not ids_sel:
 
 sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 
-# ---------- 3) cajas editables ----------
+# ---------- 3) Valores base (reactivo, sin form ni botón) ----------
 st.markdown("### 3) Valores base (puedes editarlos)")
 
-# Usamos un formulario para evitar rerun por cada tecla y acelerar la app
-with st.form("parametros_base"):
-    # Del primer registro tomamos Apartado/Comisión/Saldo/CE; la Deuda se SUMA si hay varias
-    fila_primera = sel.iloc[0]
-    deuda_res_total   = float(sel[col_deu].sum(skipna=True))
-    apartado_base     = float(fila_primera[col_apar]) if pd.notna(fila_primera[col_apar]) else 0.0
-    comision_m_base   = float(fila_primera[col_com]) if pd.notna(fila_primera[col_com]) else 0.0
-    saldo_base        = float(fila_primera[col_saldo]) if pd.notna(fila_primera[col_saldo]) else 0.0
-    ce_base           = float(fila_primera[col_ce]) if pd.notna(fila_primera[col_ce]) else 0.0
+# 3.1 Defaults desde la selección actual
+fila_primera = sel.iloc[0]
+deuda_res_total_def = float(sel[col_deu].sum(skipna=True))
+apartado_base_def   = float(fila_primera[col_apar]) if pd.notna(fila_primera[col_apar]) else 0.0
+comision_m_base_def = float(fila_primera[col_com]) if pd.notna(fila_primera[col_com]) else 0.0
+saldo_base_def      = float(fila_primera[col_saldo]) if pd.notna(fila_primera[col_saldo]) else 0.0
+ce_base_def         = float(fila_primera[col_ce]) if pd.notna(fila_primera[col_ce]) else 0.0
 
-    # --- FILA 1: Deuda / Comisión / Apartado / Saldo ---
-    col1, col2, col3, col4 = st.columns(4)
+# 3.2 Inicializar/actualizar estado cuando cambie la selección
+sig_sel = (str(ref_input), tuple(sorted(map(str, ids_sel))))
+if st.session_state.get("sig_sel") != sig_sel:
+    st.session_state.sig_sel = sig_sel
+    st.session_state.deuda_res_edit = deuda_res_total_def
+    st.session_state.comision_m_edit = comision_m_base_def
+    st.session_state.apartado_edit   = apartado_base_def
+    st.session_state.saldo_edit      = saldo_base_def
+    st.session_state.ce_base         = ce_base_def
+    # También reiniciamos campos derivados/editables
+    st.session_state.pago_banco      = 0.0
+    st.session_state.n_pab           = 1
+    st.session_state.comision_exito  = max(0.0, (deuda_res_total_def - 0.0) * 1.19 * ce_base_def)
+    st.session_state.ce_inicial_txt  = ""
 
-    with col1:
-        deuda_res_edit = st.number_input(
-            "💰 Deuda Resuelve",
-            min_value=0.0, step=1000.0,
-            value=deuda_res_total, format="%.0f"
-        )
+# 3.3 Inputs principales (reactivos)
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.session_state.deuda_res_edit = st.number_input(
+        "💰 Deuda Resuelve", min_value=0.0, step=1000.0,
+        value=float(st.session_state.deuda_res_edit), format="%.0f", key="deuda_res_edit_input"
+    )
+    st.session_state.deuda_res_edit = st.session_state.deuda_res_edit_input
 
-    with col2:
-        comision_m_edit = st.number_input(
-            "🎯 Comisión Mensual",
-            min_value=0.0, step=1000.0,
-            value=comision_m_base, format="%.0f"
-        )
+with col2:
+    st.session_state.comision_m_edit = st.number_input(
+        "🎯 Comisión Mensual", min_value=0.0, step=1000.0,
+        value=float(st.session_state.comision_m_edit), format="%.0f", key="comision_m_edit_input"
+    )
+    st.session_state.comision_m_edit = st.session_state.comision_m_edit_input
 
-    with col3:
-        apartado_edit = st.number_input(
-            "📆 Apartado Mensual",
-            min_value=0.0, step=1000.0,
-            value=apartado_base, format="%.0f"
-        )
+with col3:
+    st.session_state.apartado_edit = st.number_input(
+        "📆 Apartado Mensual", min_value=0.0, step=1000.0,
+        value=float(st.session_state.apartado_edit), format="%.0f", key="apartado_edit_input"
+    )
+    st.session_state.apartado_edit = st.session_state.apartado_edit_input
 
-    with col4:
-        saldo_edit = st.number_input(
-            "💼 Saldo (Ahorro)",
-            min_value=0.0, step=1000.0,
-            value=saldo_base, format="%.0f"
-        )
+with col4:
+    st.session_state.saldo_edit = st.number_input(
+        "💼 Saldo (Ahorro)", min_value=0.0, step=1000.0,
+        value=float(st.session_state.saldo_edit), format="%.0f", key="saldo_edit_input"
+    )
+    st.session_state.saldo_edit = st.session_state.saldo_edit_input
 
-    # --- FILA 2: Saldo Neto / Depósito ---
-    saldo_neto = 0.0
-    if pd.notna(saldo_edit) and saldo_edit > 0:
-        saldo_neto = float(saldo_edit) - (float(saldo_edit) - 25000.0) * 0.004
-        saldo_neto = max(0.0, saldo_neto)
+# 3.4 Saldo Neto y Depósito
+saldo_neto = 0.0
+if pd.notna(st.session_state.saldo_edit) and st.session_state.saldo_edit > 0:
+    saldo_neto = float(st.session_state.saldo_edit) - (float(st.session_state.saldo_edit) - 25000.0) * 0.004
+    saldo_neto = max(0.0, saldo_neto)
+saldo_neto_disp = float(np.round(saldo_neto, 0))
 
-    saldo_neto_disp = float(np.round(saldo_neto, 0))
+col5, col6 = st.columns(2)
+with col5:
+    st.number_input(
+        "🧾 Saldo Neto", value=saldo_neto_disp, step=1000.0, min_value=0.0,
+        format="%.0f", disabled=True,
+        help="Saldo − (Saldo − 25.000) × 0.004 (solo si Saldo > 0)"
+    )
+with col6:
+    deposito_edit = st.number_input(
+        "💵 Depósito", min_value=0.0, step=1000.0,
+        value=0.0, format="%.0f", help="Monto extra aportado al inicio; por defecto 0"
+    )
 
-    col5, col6 = st.columns(2)
+# ---------- 4) PAGO BANCO y parámetros derivados (reactivo) ----------
+st.markdown("### 4) PAGO BANCO y parámetros derivados")
 
-    with col5:
-        st.number_input(
-            "🧾 Saldo Neto",
-            value=saldo_neto_disp,
-            step=1000.0,
-            min_value=0.0,
-            format="%.0f",
-            disabled=True,
-            help="Calculado automáticamente: Saldo − (Saldo − 25.000) × 0.004 (solo si Saldo > 0)"
-        )
+c1, c2, c3 = st.columns([1,1,1])
+with c1:
+    st.session_state.pago_banco = st.number_input(
+        "🏦 PAGO BANCO", min_value=0.0, step=1000.0,
+        value=float(st.session_state.pago_banco), format="%.0f", key="pago_banco_input"
+    )
+    st.session_state.pago_banco = st.session_state.pago_banco_input
 
-    with col6:
-        deposito_edit = st.number_input(
-            "💵 Depósito",
-            min_value=0.0, step=1000.0,
-            value=0.0, format="%.0f",
-            help="Monto extra aportado al inicio; por defecto 0"
-        )
+with c2:
+    descuento = None
+    if st.session_state.deuda_res_edit and st.session_state.deuda_res_edit > 0:
+        descuento = max(0.0, 1.0 - (st.session_state.pago_banco / st.session_state.deuda_res_edit)) * 100.0
+    st.text_input("📉 DESCUENTO (%)", value=(f"{descuento:.2f} %" if descuento is not None else ""), disabled=True)
 
-    # ---------- 4) Pago banco, descuento, N PaB, comisión éxito, CE inicial ----------
-    st.markdown("### 4) PAGO BANCO y parámetros derivados")
+with c3:
+    st.session_state.n_pab = st.number_input(
+        "🧮 N PaB", min_value=1, step=1, value=int(st.session_state.n_pab), key="n_pab_input"
+    )
+    st.session_state.n_pab = st.session_state.n_pab_input
 
-    c1, c2, c3 = st.columns([1,1,1])
-    with c1:
-        pago_banco = st.number_input("🏦 PAGO BANCO", min_value=0.0, step=1000.0, value=0.0, format="%.0f")
-    with c2:
-        descuento = None
-        if deuda_res_edit and deuda_res_edit > 0:
-            descuento = max(0.0, 1.0 - (pago_banco / deuda_res_edit)) * 100.0
-        st.text_input("📉 DESCUENTO (%)", value=(f"{descuento:.2f} %" if descuento is not None else ""), disabled=True)
-    with c3:
-        n_pab = st.number_input("🧮 N PaB", min_value=1, step=1, value=1)
+# Comisión de éxito editable (prefill dinámico si cambia deuda o pago)
+com_exito_prefill = max(0.0, (st.session_state.deuda_res_edit - st.session_state.pago_banco) * 1.19 * st.session_state.ce_base)
+c4, c5 = st.columns(2)
+with c4:
+    # Si el usuario no ha tocado manualmente, usamos el prefill
+    if "comision_exito_overridden" not in st.session_state:
+        st.session_state.comision_exito = com_exito_prefill
+    com_input = st.number_input(
+        "🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
+        value=float(st.session_state.comision_exito), format="%.0f", key="comision_exito_input"
+    )
+    # Si difiere del prefill, marcamos que fue editado por el usuario
+    st.session_state.comision_exito_overridden = (abs(com_input - com_exito_prefill) > 1e-6)
+    st.session_state.comision_exito = com_input
 
-    com_exito_default = max(0.0, (deuda_res_edit - pago_banco) * 1.19 * ce_base)
+with c5:
+    st.session_state.ce_inicial_txt = st.text_input("🧪 CE inicial", value=st.session_state.ce_inicial_txt, placeholder="Ej. 150000")
+    try:
+        ce_inicial = float(st.session_state.ce_inicial_txt.replace(",", ".")) if st.session_state.ce_inicial_txt.strip() != "" else None
+    except Exception:
+        ce_inicial = None
+        st.warning("CE inicial inválido; déjalo vacío o usa un número como 0.12")
 
-    c4, c5 = st.columns(2)
-    with c4:
-        comision_exito = st.number_input(
-            "🏁 Comisión de éxito (editable)",
-            min_value=0.0, step=1000.0,
-            value=float(com_exito_default), format="%.0f",
-            help=f"Prefill: (Deuda Resuelve − PAGO BANCO) × 1.19 × CE (CE base del 1er registro = {ce_base:.4f})"
-        )
-    with c5:
-        ce_inicial_txt = st.text_input("🧪 CE inicial", value="", placeholder="Ej. 150000")
-        try:
-            ce_inicial = float(ce_inicial_txt.replace(",", ".")) if ce_inicial_txt.strip() != "" else None
-        except Exception:
-            ce_inicial = None
-            st.warning("CE inicial inválido; déjalo vacío o usa un número como 0.12")
-
-    # --- Barra: CE inicial vs Comisión de éxito ---
-    st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
-
-    if (ce_inicial is None) or (ce_inicial <= 0):
-        st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
+# Barra de avance
+st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
+if (ce_inicial is None) or (ce_inicial <= 0):
+    st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
+else:
+    base = float(st.session_state.comision_exito) if st.session_state.comision_exito and st.session_state.comision_exito > 0 else 0.0
+    if base <= 0:
+        st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular el porcentaje.")
     else:
-        base = float(comision_exito) if comision_exito and comision_exito > 0 else 0.0
-        if base <= 0:
-            st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular el porcentaje.")
-        else:
-            porcentaje = (float(ce_inicial) / base) * 100.0
-            porcentaje_capped = max(0.0, min(porcentaje, 100.0))  # limitar entre 0% y 100%
-
-            # Barra de progreso
-            st.progress(int(round(porcentaje_capped)))
-
-            # Texto con detalle debajo
-            st.caption(
-                f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  "
-                f"**{porcentaje:,.2f}%** de la Comisión de éxito"
-            )
-
-    # Botón para aplicar (evita re-ejecutar todo en cada tecla)
-    aplicar = st.form_submit_button("Aplicar cambios")
-
-# Si no se han aplicado cambios, no seguimos (evitamos cálculos/render extra)
-if not aplicar:
-    st.stop()
+        porcentaje = (float(ce_inicial) / base) * 100.0
+        porcentaje_capped = max(0.0, min(porcentaje, 100.0))
+        st.progress(int(round(porcentaje_capped)))
+        st.caption(
+            f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  "
+            f"**{porcentaje:,.2f}%** de la Comisión de éxito"
+        )
 
 # ---------- 5) Cronograma de pagos (tabla editable, sin formato de miles) ----------
 st.markdown("### 5) Cronograma de pagos (tabla editable)")
