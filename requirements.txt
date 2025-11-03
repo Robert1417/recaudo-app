@@ -6,3 +6,13 @@ joblib==1.4.2
 python-dateutil>=2.8
 openpyxl>=3.1
 streamlit==1.39.0
+pyarrow
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
+gspread
+papermill
+matplotlib
+seaborn
+statsmodels
