@@ -8,6 +8,62 @@ from pathlib import Path
 import json
 from joblib import load
 
+# ==== NUEVO: transformadores CUSTOM usados al entrenar ====
+# Deben estar definidos ANTES de cargar el joblib.
+from sklearn.base import BaseEstimator, TransformerMixin
+
+class LogAndDrop(BaseEstimator, TransformerMixin):
+    """
+    Crea columnas log1p de ['C/A', 'AMOUNT_TOTAL'] y elimina las originales.
+    Mantiene ['PRI-ULT','Ratio_PP'] tal cual.
+    Salida: ['PRI-ULT','Ratio_PP','C/A_log','AMOUNT_TOTAL_log']
+    """
+    def __init__(self, ca_col="C/A", amt_col="AMOUNT_TOTAL"):
+        self.ca_col = ca_col
+        self.amt_col = amt_col
+        self.out_feature_names_ = ["PRI-ULT", "Ratio_PP", "C/A_log", "AMOUNT_TOTAL_log"]
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        X = X.copy()
+        X["C/A_log"] = np.log1p(pd.to_numeric(X[self.ca_col], errors="coerce").astype(float))
+        X["AMOUNT_TOTAL_log"] = np.log1p(pd.to_numeric(X[self.amt_col], errors="coerce").astype(float))
+        X = X.drop(columns=[self.ca_col, self.amt_col])
+        return X[["PRI-ULT", "Ratio_PP", "C/A_log", "AMOUNT_TOTAL_log"]]
+
+    def get_feature_names_out(self, input_features=None):
+        return np.array(self.out_feature_names_)
+
+class Winsorizer(BaseEstimator, TransformerMixin):
+    """
+    Winsoriza por cuantiles (p_low, p_high) columnas numéricas.
+    Aprende límites en fit y los aplica en transform.
+    """
+    def __init__(self, columns=None, p_low=0.005, p_high=0.005):
+        self.columns = columns or []
+        self.p_low = p_low
+        self.p_high = p_high
+        self.lows_ = {}
+        self.highs_ = {}
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X, copy=True)
+        for c in self.columns:
+            s = pd.to_numeric(X[c], errors="coerce")
+            self.lows_[c] = s.quantile(self.p_low)
+            self.highs_[c] = s.quantile(1 - self.p_high)
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X, copy=True)
+        for c in self.columns:
+            lo = self.lows_[c]
+            hi = self.highs_[c]
+            X[c] = pd.to_numeric(X[c], errors="coerce").clip(lower=lo, upper=hi)
+        return X
+
 # ------------------ Ajustes globales ------------------
 pd.set_option("mode.copy_on_write", True)
 st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
@@ -21,7 +77,7 @@ st.caption(
     "6) Revisa KPIs (PLAZO lo ingresas tú)."
 )
 
-# ==== NUEVO: paths + loaders del modelo ====
+# ==== paths + loaders del modelo ====
 MODEL_PATH = Path("mlp_recaudo_pipeline.joblib")
 META_PATH  = Path("mlp_recaudo_meta.json")
 
@@ -30,6 +86,7 @@ def load_model():
     if not MODEL_PATH.exists():
         st.error("No encontré el archivo del modelo `mlp_recaudo_pipeline.joblib` en la carpeta del repo.")
         st.stop()
+    # Con las clases definidas arriba, el unpickling ya podrá resolver LogAndDrop/Winsorizer
     return load(MODEL_PATH)
 
 @st.cache_data(show_spinner=False)
@@ -81,9 +138,8 @@ def _map_columns(columns_list: tuple[str, ...]):
     col_ce    = _find_col(dummy_df, ["CE"])
     return col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce
 
-# -------- helpers de CE (para evitar que se "devuelva") --------
+# -------- helpers de CE --------
 def _prefill_ce():
-    """Setea CE con la fórmula solo si el usuario NO la ha modificado (override=False)."""
     if not st.session_state.get("comision_exito_overridden", False):
         deuda_res = float(st.session_state.get("deuda_res_edit", 0.0) or 0.0)
         pago_bco  = float(st.session_state.get("pago_banco", 0.0) or 0.0)
@@ -91,7 +147,6 @@ def _prefill_ce():
         st.session_state.comision_exito = max(0.0, (deuda_res - pago_bco) * 1.19 * ce_base)
 
 def _mark_override_ce():
-    """Marca CE como fijada por el usuario (no volver a prellenar)."""
     st.session_state.comision_exito_overridden = True
 
 # ------------------ 1) cargar base ------------------
@@ -159,7 +214,6 @@ if st.session_state.get("sig_sel") != sig_sel:
     st.session_state.clear()
     st.session_state.sig_sel = sig_sel
 
-    # Inits
     st.session_state.deuda_res_edit = deuda_res_total_def
     st.session_state.comision_m_edit = comision_m_base_def
     st.session_state.apartado_edit   = apartado_base_def
@@ -174,7 +228,6 @@ if st.session_state.get("sig_sel") != sig_sel:
 
     st.session_state.ce_inicial_val  = 0.0
 
-    # Track de cambios de PaB / N PaB
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
 
@@ -227,16 +280,14 @@ with c3:
     st.number_input("🧮 N PaB", min_value=1, step=1,
                     value=int(st.session_state.n_pab), key="n_pab")
 
-# Si cambia PAGO BANCO o N PaB: solo prellenar CE si NO hay override
 if (st.session_state._last_pab != st.session_state.pago_banco) or (st.session_state._last_n != st.session_state.n_pab):
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
-    _prefill_ce()  # respeta override
+    _prefill_ce()
 
 # Comisión de éxito (editable) y CE inicial
 c4, c5 = st.columns(2)
 with c4:
-    # Mostrar el valor actual (sea auto o manual). El 'value' se ignora si key existe (persistencia de estado).
     st.number_input("🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
                     value=float(st.session_state.get("comision_exito", 0.0)),
                     format="%.0f", key="comision_exito", on_change=_mark_override_ce)
@@ -262,7 +313,6 @@ else:
 # ------------------ 6) Validación y KPIs (sin tabla) ------------------
 st.markdown("### 6) Validación y KPIs")
 
-# Entradas/valores base
 pago_banco        = float(st.session_state.get("pago_banco", 0.0) or 0.0)
 n_pab             = int(st.session_state.get("n_pab", 1) or 1)
 comision_mensual  = float(st.session_state.get("comision_m_edit", 0.0) or 0.0)
@@ -270,13 +320,8 @@ apartado_mensual  = float(st.session_state.get("apartado_edit", 0.0) or 0.0)
 comision_exito    = float(st.session_state.get("comision_exito", 0.0) or 0.0)
 ce_inicial        = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
 
-# 6.1 PLAZO lo digita el usuario
 plazo = st.number_input("📅 PLAZO (meses) (lo ingresas tú)", min_value=1, step=1, value=1)
-
-# 6.2 Primer Pago BANCO = PAGO BANCO / N PaB
 primer_pago_banco = (pago_banco / n_pab) if n_pab > 0 else 0.0
-
-# 6.3 KPIs
 pct_primer_pago = (ce_inicial / comision_exito) if comision_exito > 0 else np.nan
 
 if (plazo - 1) > 0 and apartado_mensual > 0:
@@ -295,18 +340,17 @@ with c3:
 with c4:
     st.text_input("Cuota/Apartado", value=("—" if np.isnan(cuota_apartado) else f"{cuota_apartado:.4f}"), disabled=True)
 
-# Nota visual si CE está fijada manualmente
 if st.session_state.get("comision_exito_overridden", False):
     st.caption("🔒 Comisión de éxito fijada manualmente: no se recalcula con cambios en PAGO BANCO/N PaB.")
 
 # ================== 7) INTEGRACIÓN DEL MODELO ==================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
 
-# Mapeo de KPIs → features crudas del pipeline:
-# PRI-ULT       <- PLAZO
-# Ratio_PP      <- % Primer Pago (CE inicial / CE) (ratio 0-1; si entrenaste 0–100, multiplica por 100)
-# C/A           <- Cuota/Apartado
-# AMOUNT_TOTAL  <- Comisión de éxito total
+# KPIs → features crudas:
+# PRI-ULT <- PLAZO
+# Ratio_PP <- CE inicial / CE (0–1; si entrenaste 0–100, multiplica por 100)
+# C/A <- Cuota/Apartado
+# AMOUNT_TOTAL <- Comisión de éxito total
 
 def _to_float_or_nan(x):
     try:
@@ -324,7 +368,6 @@ feature_vals = {
 with st.expander("🔎 Ver features que se enviarán al modelo (crudas)", expanded=False):
     st.json(feature_vals)
 
-# Validaciones previas
 issues = []
 if np.isnan(feature_vals["AMOUNT_TOTAL"]) or feature_vals["AMOUNT_TOTAL"] < 0:
     issues.append("AMOUNT_TOTAL (Comisión de éxito total) no puede ser NaN ni negativa.")
