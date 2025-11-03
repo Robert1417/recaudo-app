@@ -3,6 +3,11 @@ import pandas as pd
 import numpy as np
 from datetime import date
 
+# ==== NUEVO: imports para el modelo ====
+from pathlib import Path
+import json
+from joblib import load
+
 # ------------------ Ajustes globales ------------------
 pd.set_option("mode.copy_on_write", True)
 st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
@@ -15,6 +20,27 @@ st.caption(
     "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO** y **Comisión de éxito** • "
     "6) Revisa KPIs (PLAZO lo ingresas tú)."
 )
+
+# ==== NUEVO: paths + loaders del modelo ====
+MODEL_PATH = Path("mlp_recaudo_pipeline.joblib")
+META_PATH  = Path("mlp_recaudo_meta.json")
+
+@st.cache_resource(show_spinner=False)
+def load_model():
+    if not MODEL_PATH.exists():
+        st.error("No encontré el archivo del modelo `mlp_recaudo_pipeline.joblib` en la carpeta del repo.")
+        st.stop()
+    return load(MODEL_PATH)
+
+@st.cache_data(show_spinner=False)
+def load_meta():
+    meta = {}
+    if META_PATH.exists():
+        try:
+            meta = json.loads(META_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+    return meta
 
 # ------------------ utilidades ------------------
 def _norm(s: str) -> str:
@@ -272,3 +298,62 @@ with c4:
 # Nota visual si CE está fijada manualmente
 if st.session_state.get("comision_exito_overridden", False):
     st.caption("🔒 Comisión de éxito fijada manualmente: no se recalcula con cambios en PAGO BANCO/N PaB.")
+
+# ================== 7) INTEGRACIÓN DEL MODELO ==================
+st.markdown("### 7) Predicción de **recaudo_real** con MLP")
+
+# Mapeo de KPIs → features crudas del pipeline:
+# PRI-ULT       <- PLAZO
+# Ratio_PP      <- % Primer Pago (CE inicial / CE) (ratio 0-1; si entrenaste 0–100, multiplica por 100)
+# C/A           <- Cuota/Apartado
+# AMOUNT_TOTAL  <- Comisión de éxito total
+
+def _to_float_or_nan(x):
+    try:
+        return float(x)
+    except Exception:
+        return np.nan
+
+feature_vals = {
+    "PRI-ULT": _to_float_or_nan(plazo),
+    "Ratio_PP": _to_float_or_nan(pct_primer_pago if not np.isnan(pct_primer_pago) else np.nan),
+    "C/A": _to_float_or_nan(cuota_apartado if not np.isnan(cuota_apartado) else np.nan),
+    "AMOUNT_TOTAL": _to_float_or_nan(comision_exito),
+}
+
+with st.expander("🔎 Ver features que se enviarán al modelo (crudas)", expanded=False):
+    st.json(feature_vals)
+
+# Validaciones previas
+issues = []
+if np.isnan(feature_vals["AMOUNT_TOTAL"]) or feature_vals["AMOUNT_TOTAL"] < 0:
+    issues.append("AMOUNT_TOTAL (Comisión de éxito total) no puede ser NaN ni negativa.")
+if np.isnan(feature_vals["PRI-ULT"]) or feature_vals["PRI-ULT"] < 1:
+    issues.append("PRI-ULT (PLAZO) debe ser un entero ≥ 1.")
+if np.isnan(feature_vals["Ratio_PP"]) or feature_vals["Ratio_PP"] < 0:
+    issues.append("Ratio_PP (% Primer Pago) no puede ser NaN ni negativo. Usa 0 si aplica.")
+if np.isnan(feature_vals["C/A"]) or feature_vals["C/A"] <= 0:
+    issues.append("C/A (Cuota/Apartado) debe ser > 0.")
+
+if issues:
+    st.warning("⚠️ Revisa antes de predecir:\n- " + "\n- ".join(issues))
+
+col_pred1, col_pred2 = st.columns([1,1])
+with col_pred1:
+    do_predict = st.button("🔮 Predecir recaudo", type="primary", use_container_width=True)
+with col_pred2:
+    meta = load_meta()
+    if meta:
+        st.caption(f"Modelo cargado • target: {meta.get('target','recaudo_real')}")
+
+if do_predict:
+    try:
+        model = load_model()
+        FEATURES_RAW = ["PRI-ULT", "Ratio_PP", "C/A", "AMOUNT_TOTAL"]
+        X_pred = pd.DataFrame([feature_vals], columns=FEATURES_RAW)
+        yhat = float(model.predict(X_pred)[0])
+        st.success(f"✅ Predicción de recaudo_real: {yhat:,.2f}")
+        st.caption("Entradas usadas por el pipeline (crudas):")
+        st.dataframe(pd.DataFrame([feature_vals]), use_container_width=True)
+    except Exception as e:
+        st.error(f"Error al predecir: {e}")
