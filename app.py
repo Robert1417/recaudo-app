@@ -69,6 +69,12 @@ pd.set_option("mode.copy_on_write", True)
 st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
 st.title("💸 Calculadora de Recaudo")
 
+import sklearn, numpy, joblib
+st.sidebar.caption(
+    f"🧩 NumPy: {numpy.__version__}\n"
+    f"🧠 scikit-learn: {sklearn.__version__}\n"
+    f"💼 joblib: {joblib.__version__}"
+)
 st.caption(
     "1) Carga tu base `cartera_asignada_filtrada` • "
     "2) Escribe la **Referencia** y selecciona **uno o varios Id deuda** • "
