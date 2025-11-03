@@ -1,0 +1,58 @@
+name: Actualizar base y modelo (semanal)
+
+on:
+  schedule:
+    # Martes 6:00 a. m. Bogotá = 11:00 UTC
+    - cron: "0 11 * * 2"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  run-notebook:
+    runs-on: ubuntu-latest
+    env:
+      # Inyecta el JSON de la Service Account desde Secrets
+      MI_JSON: ${{ secrets.MI_JSON }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Instala lo de tu requirements.txt (app + libs base)
+          pip install -r requirements.txt
+          # Asegura papermill y clientes de Google (si no están ya en requirements)
+          pip install papermill google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
+      - name: Run notebook with Papermill
+        run: |
+          # Ejecuta tu notebook y guarda un output con las celdas ejecutadas
+          mkdir -p notebooks
+          papermill notebooks/Calculadora_Recaudo.ipynb notebooks/Calculadora_Recaudo_output.ipynb
+
+      - name: Commit & push artifacts
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Archivos que tu app usa automáticamente
+          git add data/cartera_asignada_filtrada.parquet data/cartera_asignada_filtrada.csv || true
+          git add mlp_recaudo_pipeline.joblib mlp_recaudo_meta.json || true
+          # (Opcional) mantener el output del notebook para auditoría
+          git add notebooks/Calculadora_Recaudo_output.ipynb || true
+          if ! git diff --cached --quiet; then
+            git commit -m "🤖 Actualización semanal de base y modelo"
+            git push
+          else
+            echo "No hay cambios que commitear."
+          fi
