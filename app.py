@@ -2,14 +2,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import date
-
-# ==== NUEVO: imports para el modelo ====
 from pathlib import Path
 import json
 from joblib import load
 
-# ==== NUEVO: transformadores CUSTOM usados al entrenar ====
-# Deben estar definidos ANTES de cargar el joblib.
+# ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
 
 class LogAndDrop(BaseEstimator, TransformerMixin):
@@ -64,6 +61,7 @@ class Winsorizer(BaseEstimator, TransformerMixin):
             X[c] = pd.to_numeric(X[c], errors="coerce").clip(lower=lo, upper=hi)
         return X
 
+
 # ------------------ Ajustes globales ------------------
 pd.set_option("mode.copy_on_write", True)
 st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
@@ -75,24 +73,27 @@ st.sidebar.caption(
     f"🧠 scikit-learn: {sklearn.__version__}\n"
     f"💼 joblib: {joblib.__version__}"
 )
+
 st.caption(
-    "1) Carga tu base `cartera_asignada_filtrada` • "
+    "1) La app carga automáticamente la base generada por el workflow (`data/cartera_asignada_filtrada`) • "
     "2) Escribe la **Referencia** y selecciona **uno o varios Id deuda** • "
     "3) Ajusta valores editables (Deuda, Apartado, Comisión, Saldo) • "
     "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO** y **Comisión de éxito** • "
     "6) Revisa KPIs (PLAZO lo ingresas tú)."
 )
 
-# ==== paths + loaders del modelo ====
-MODEL_PATH = Path("mlp_recaudo_pipeline.joblib")
-META_PATH  = Path("mlp_recaudo_meta.json")
+# ==== Rutas de artefactos generados por el notebook/Action ====
+DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
+DATA_CSV     = Path("data/cartera_asignada_filtrada.csv")
+MODEL_PATH   = Path("mlp_recaudo_pipeline.joblib")
+META_PATH    = Path("mlp_recaudo_meta.json")
 
+# =================== Loaders cacheados ===================
 @st.cache_resource(show_spinner=False)
 def load_model():
     if not MODEL_PATH.exists():
-        st.error("No encontré el archivo del modelo `mlp_recaudo_pipeline.joblib` en la carpeta del repo.")
+        st.error("No encontré el archivo del modelo `mlp_recaudo_pipeline.joblib` en la raíz del repo.")
         st.stop()
-    # Con las clases definidas arriba, el unpickling ya podrá resolver LogAndDrop/Winsorizer
     return load(MODEL_PATH)
 
 @st.cache_data(show_spinner=False)
@@ -104,6 +105,23 @@ def load_meta():
         except Exception:
             meta = {}
     return meta
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_repo_base() -> pd.DataFrame | None:
+    """
+    Carga la base que deja el workflow (prefiere Parquet, luego CSV).
+    Devuelve None si no existe.
+    """
+    try:
+        if DATA_PARQUET.exists():
+            df = pd.read_parquet(DATA_PARQUET)
+            return df
+        if DATA_CSV.exists():
+            return pd.read_csv(DATA_CSV)
+        return None
+    except Exception:
+        # Si algo falla leyendo, permitimos fallback a subida manual
+        return None
 
 # ------------------ utilidades ------------------
 def _norm(s: str) -> str:
@@ -155,19 +173,30 @@ def _prefill_ce():
 def _mark_override_ce():
     st.session_state.comision_exito_overridden = True
 
-# ------------------ 1) cargar base ------------------
-st.markdown("### 1) Cargar base (CSV o Excel)")
-up = st.file_uploader("📂 Sube `cartera_asignada_filtrada`", type=["csv", "xlsx"])
-if not up:
-    st.info("Sube un archivo para continuar.")
-    st.stop()
+# =================== 1) Cargar base ===================
+st.markdown("### 1) Base `cartera_asignada_filtrada`")
 
-try:
-    df_base = _read_file(up)
-except Exception as e:
-    st.error(f"No pude leer el archivo: {e}")
-    st.stop()
+df_base = load_repo_base()
+src_badge = None
 
+if df_base is not None:
+    src_badge = "📦 Fuente: data/ (workflow semanal)"
+    st.success("✅ Cargada automáticamente desde el repo.")
+else:
+    src_badge = "📤 Fuente: subida manual"
+    st.info("No encontré la base en `data/`. Sube un CSV/XLSX como respaldo.")
+    up = st.file_uploader("📂 Subir `cartera_asignada_filtrada`", type=["csv", "xlsx"])
+    if not up:
+        st.stop()
+    try:
+        df_base = _read_file(up)
+    except Exception as e:
+        st.error(f"No pude leer el archivo: {e}")
+        st.stop()
+
+st.caption(src_badge)
+
+# Mapear columnas obligatorias
 colnames_tuple = tuple(map(str, df_base.columns))
 col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce = _map_columns(colnames_tuple)
 
@@ -180,9 +209,9 @@ if faltan:
     st.stop()
 
 df_base = _normalize_numeric(df_base, [col_deu, col_apar, col_com, col_saldo, col_ce])
-st.success("✅ Base cargada")
+st.success(f"✅ Base lista • filas: {len(df_base):,}")
 
-# ------------------ 2) referencia → seleccionar id(s) ------------------
+# =================== 2) Referencia → seleccionar id(s) ===================
 st.markdown("### 2) Referencia → seleccionar **Id deuda** (uno o varios)")
 ref_input = st.text_input("🔎 Escribe la **Referencia** (exacta como aparece en la base)")
 if not ref_input:
@@ -205,7 +234,7 @@ if not ids_sel:
 
 sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 
-# ------------------ 3) Valores base (reactivo) ------------------
+# =================== 3) Valores base (reactivo) ===================
 st.markdown("### 3) Valores base (puedes editarlos)")
 
 fila_primera = sel.iloc[0]
@@ -270,7 +299,7 @@ with col6:
                     value=0.0, format="%.0f", key="deposito_edit",
                     help="Monto extra aportado al inicio; por defecto 0")
 
-# ------------------ 4) PAGO BANCO y derivados ------------------
+# =================== 4) PAGO BANCO y derivados ===================
 st.markdown("### 4) PAGO BANCO y parámetros derivados")
 
 c1, c2, c3 = st.columns([1,1,1])
@@ -316,7 +345,7 @@ else:
     st.progress(int(round(porcentaje_capped)))
     st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
 
-# ------------------ 6) Validación y KPIs (sin tabla) ------------------
+# =================== 6) Validación y KPIs (sin tabla) ===================
 st.markdown("### 6) Validación y KPIs")
 
 pago_banco        = float(st.session_state.get("pago_banco", 0.0) or 0.0)
@@ -349,14 +378,8 @@ with c4:
 if st.session_state.get("comision_exito_overridden", False):
     st.caption("🔒 Comisión de éxito fijada manualmente: no se recalcula con cambios en PAGO BANCO/N PaB.")
 
-# ================== 7) INTEGRACIÓN DEL MODELO ==================
+# =================== 7) Predicción con el modelo ===================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
-
-# KPIs → features crudas:
-# PRI-ULT <- PLAZO
-# Ratio_PP <- CE inicial / CE (0–1; si entrenaste 0–100, multiplica por 100)
-# C/A <- Cuota/Apartado
-# AMOUNT_TOTAL <- Comisión de éxito total
 
 def _to_float_or_nan(x):
     try:
