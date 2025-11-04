@@ -67,7 +67,7 @@ jobs:
         if: always()
         run: rm -f MI_JSON.json
 
-      - name: Commit & push artefactos
+      - name: Commit & push artefactos (seguro)
         env:
           BRANCH_NAME: ${{ github.ref_name }}
         run: |
@@ -75,14 +75,24 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 1) Trae la rama remota y rebasea ANTES de tocar el índice
+          # Guarda temporalmente cambios sin commitear
+          git stash push --include-untracked || true
+
+          # Trae cambios del remoto
           git fetch origin "$BRANCH_NAME"
           git checkout "$BRANCH_NAME"
-          git pull --rebase origin "$BRANCH_NAME"
+          git pull --rebase origin "$BRANCH_NAME" || true
 
-          # 2) Ahora sí, añade y commitea los artefactos generados
-          git add -A
+          # Restaura cambios guardados
+          git stash pop || true
+
+          # Añade solo los artefactos relevantes
+          git add data/cartera_asignada_filtrada.parquet \
+                  data/cartera_asignada_filtrada.csv \
+                  mlp_recaudo_pipeline.joblib \
+                  mlp_recaudo_meta.json \
+                  Calculadora_Recaudo_output.ipynb 2>/dev/null || true
+
+          # Commit & push
           git commit -m "Actualiza base y modelo [skip ci]" || echo "Sin cambios que commitear"
-
-          # 3) Empuja
           git push origin HEAD:"$BRANCH_NAME"
