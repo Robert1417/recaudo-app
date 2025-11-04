@@ -2,8 +2,13 @@ name: Actualizar base y modelo (semanal)
 
 on:
   schedule:
-    - cron: "0 11 * * 2"   # Martes 6:00am Bogotá (UTC-5 => 11:00 UTC)
+    # Martes 06:00 a.m. Bogotá (UTC-5) => 11:00 UTC
+    - cron: "0 11 * * 2"
   workflow_dispatch: {}
+
+# 🔐 necesario para poder hacer git push con el GITHUB_TOKEN
+permissions:
+  contents: write
 
 jobs:
   run-notebook:
@@ -12,6 +17,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -22,8 +30,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # extras para ejecutar el notebook y Google APIs:
-          pip install papermill jupyter google-api-python-client google-auth google-auth-oauthlib gspread
+          # extras para ejecutar el notebook y Google APIs
+          pip install papermill jupyter ipykernel \
+                      google-api-python-client google-auth google-auth-httplib2 \
+                      google-auth-oauthlib gspread
 
       - name: Escribir MI_JSON.json desde secreto
         env:
@@ -39,10 +49,10 @@ jobs:
         run: mkdir -p data
 
       - name: Ejecutar notebook
+        env:
+          PYTHONIOENCODING: "utf-8"
         run: |
-          # Tu notebook está en la raíz:
-          papermill "Calculadora_Recaudo.ipynb" "Calculadora_Recaudo_output.ipynb" \
-            -k python3
+          papermill "Calculadora_Recaudo.ipynb" "Calculadora_Recaudo_output.ipynb" -k python3
 
       - name: Verificar artefactos generados
         run: |
@@ -52,10 +62,26 @@ jobs:
           test -f mlp_recaudo_meta.json
           test -f data/cartera_asignada_filtrada.parquet
 
+      # Nunca subas credenciales
+      - name: Eliminar credenciales antes del commit
+        if: always()
+        run: rm -f MI_JSON.json
+
       - name: Commit & push artefactos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+
+          # Agrega solo lo que nos interesa
+          git add data/cartera_asignada_filtrada.parquet \
+                  data/cartera_asignada_filtrada.csv \
+                  mlp_recaudo_pipeline.joblib \
+                  mlp_recaudo_meta.json \
+                  Calculadora_Recaudo_output.ipynb 2>/dev/null || true
+
+          # Por si hay cambios en remoto
+          git pull --rebase
           git commit -m "Actualiza base y modelo [skip ci]" || echo "Sin cambios que commitear"
           git push
