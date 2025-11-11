@@ -7,9 +7,9 @@
   ],
   "target": "recaudo_real",
   "metrics": {
-    "mae": 0.18536920199453824,
-    "rmse": 0.2709487707848408,
-    "r2": 0.03267602733739372
+    "mae": 0.02751827533736852,
+    "rmse": 0.08335209455574086,
+    "r2": 0.8381267346552117
   },
   "notes": "Pipeline: Log1p(C/A,AMOUNT_TOTAL)+winsor(0.5%)+imputer(median)+RobustScaler+MLP(64,32)",
   "versions": {
