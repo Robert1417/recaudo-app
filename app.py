@@ -88,16 +88,52 @@ DATA_CSV     = Path("data/cartera_asignada_filtrada.csv")
 MODEL_PATH   = Path("mlp_recaudo_pipeline.joblib")
 META_PATH    = Path("mlp_recaudo_meta.json")
 
+
+# ========= Helpers de "versión de archivo" para invalidar cache =========
+
+def _file_version(path: Path) -> str:
+    """
+    Devuelve una 'firma' del archivo basada en mtime + tamaño.
+    Si el archivo no existe, devuelve 'missing'.
+    """
+    try:
+        stat = path.stat()
+        return f"{stat.st_mtime_ns}-{stat.st_size}"
+    except FileNotFoundError:
+        return "missing"
+
+def _model_version() -> str:
+    return _file_version(MODEL_PATH)
+
+def _meta_version() -> str:
+    return _file_version(META_PATH)
+
+def _data_version() -> str:
+    # Si existe parquet, usamos ese; si no, miramos CSV.
+    if DATA_PARQUET.exists():
+        return _file_version(DATA_PARQUET)
+    if DATA_CSV.exists():
+        return _file_version(DATA_CSV)
+    return "missing"
+
+
 # =================== Loaders cacheados ===================
 @st.cache_resource(show_spinner=False)
-def load_model():
+def load_model(_version: str):
+    """
+    Carga el modelo MLP. _version es la firma del archivo y se usa
+    solo para invalidar el cache cuando cambie el .joblib.
+    """
     if not MODEL_PATH.exists():
         st.error("No encontré el archivo del modelo `mlp_recaudo_pipeline.joblib` en la raíz del repo.")
         st.stop()
     return load(MODEL_PATH)
 
 @st.cache_data(show_spinner=False)
-def load_meta():
+def load_meta(_version: str):
+    """
+    Carga el JSON de metadata. Se refresca cuando cambie el archivo.
+    """
     meta = {}
     if META_PATH.exists():
         try:
@@ -106,10 +142,11 @@ def load_meta():
             meta = {}
     return meta
 
-@st.cache_data(ttl=600, show_spinner=False)
-def load_repo_base() -> pd.DataFrame | None:
+@st.cache_data(show_spinner=False)
+def load_repo_base(_version: str) -> pd.DataFrame | None:
     """
     Carga la base que deja el workflow (prefiere Parquet, luego CSV).
+    _version se usa solo para invalidar cache cuando cambian los archivos.
     Devuelve None si no existe.
     """
     try:
@@ -176,7 +213,7 @@ def _mark_override_ce():
 # =================== 1) Cargar base ===================
 st.markdown("### 1) Base `cartera_asignada_filtrada`")
 
-df_base = load_repo_base()
+df_base = load_repo_base(_data_version())
 src_badge = None
 
 if df_base is not None:
@@ -414,13 +451,13 @@ col_pred1, col_pred2 = st.columns([1,1])
 with col_pred1:
     do_predict = st.button("🔮 Predecir recaudo", type="primary", use_container_width=True)
 with col_pred2:
-    meta = load_meta()
+    meta = load_meta(_meta_version())
     if meta:
         st.caption(f"Modelo cargado • target: {meta.get('target','recaudo_real')}")
 
 if do_predict:
     try:
-        model = load_model()
+        model = load_model(_model_version())
         FEATURES_RAW = ["PRI-ULT", "Ratio_PP", "C/A", "AMOUNT_TOTAL"]
         X_pred = pd.DataFrame([feature_vals], columns=FEATURES_RAW)
         yhat = float(model.predict(X_pred)[0])
