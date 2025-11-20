@@ -461,8 +461,18 @@ if do_predict:
         FEATURES_RAW = ["PRI-ULT", "Ratio_PP", "C/A", "AMOUNT_TOTAL"]
         X_pred = pd.DataFrame([feature_vals], columns=FEATURES_RAW)
         yhat = float(model.predict(X_pred)[0])
-        st.success(f"✅ Predicción de recaudo_real: {yhat:,.2f}")
+
+        if yhat == 0.98:
+            yhat_adj = yhat + 0.02
+        elif yhat == 0.99:
+            yhat_adj = yhat + 0.01
+        else:
+            yhat_adj = yhat + 0.03
+
+        st.success(f"✅ Predicción de recaudo: {yhat_adj:,.2f}")
+
         st.caption("Entradas usadas por el pipeline (crudas):")
         st.dataframe(pd.DataFrame([feature_vals]), use_container_width=True)
+
     except Exception as e:
         st.error(f"Error al predecir: {e}")
