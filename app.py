@@ -199,6 +199,53 @@ def _map_columns(columns_list: tuple[str, ...]):
     col_ce    = _find_col(dummy_df, ["CE"])
     return col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce
 
+# ---- Helpers para inputs en pesos con separador de miles ----
+def _format_pesos(value) -> str:
+    try:
+        v = float(value)
+    except Exception:
+        return ""
+    if np.isnan(v):
+        return ""
+    # Formato colombiano: punto como separador de miles, sin decimales
+    return f"{v:,.0f}".replace(",", ".")
+
+def pesos_input(label: str, key: str, help: str | None = None, disabled: bool = False):
+    """
+    Input de texto para pesos colombianos:
+    - Muestra separador de miles (.)
+    - Guarda el valor numérico limpio en st.session_state[key] (float)
+    """
+    raw_val = st.session_state.get(key, 0.0)
+    try:
+        base_val = float(raw_val or 0.0)
+    except Exception:
+        base_val = 0.0
+
+    default_txt = _format_pesos(base_val)
+    txt = st.text_input(
+        label,
+        value=default_txt,
+        key=f"{key}_display",
+        help=help,
+        disabled=disabled
+    )
+
+    txt_clean = txt.strip().replace(".", "").replace(",", "")
+    if txt_clean == "":
+        new_val = 0.0
+    else:
+        try:
+            new_val = float(txt_clean)
+        except Exception:
+            new_val = base_val  # si no se puede parsear, dejamos el valor anterior
+
+    if new_val < 0:
+        new_val = 0.0
+
+    st.session_state[key] = new_val
+    return new_val
+
 # -------- helpers de CE --------
 def _prefill_ce():
     if not st.session_state.get("comision_exito_overridden", False):
@@ -308,17 +355,13 @@ if st.session_state.get("sig_sel") != sig_sel:
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.number_input("💰 Deuda Resuelve", min_value=0.0, step=1000.0,
-                    value=float(st.session_state.deuda_res_edit), format="%.0f", key="deuda_res_edit")
+    pesos_input("💰 Deuda Resuelve", key="deuda_res_edit")
 with col2:
-    st.number_input("🎯 Comisión Mensual", min_value=0.0, step=1000.0,
-                    value=float(st.session_state.comision_m_edit), format="%.0f", key="comision_m_edit")
+    pesos_input("🎯 Comisión Mensual", key="comision_m_edit")
 with col3:
-    st.number_input("📆 Apartado Mensual", min_value=0.0, step=1000.0,
-                    value=float(st.session_state.apartado_edit), format="%.0f", key="apartado_edit")
+    pesos_input("📆 Apartado Mensual", key="apartado_edit")
 with col4:
-    st.number_input("💼 Saldo (Ahorro)", min_value=0.0, step=1000.0,
-                    value=float(st.session_state.saldo_edit), format="%.0f", key="saldo_edit")
+    pesos_input("💼 Saldo (Ahorro)", key="saldo_edit")
 
 # 3.4 Saldo Neto y Depósito
 saldo_neto = 0.0
@@ -329,50 +372,65 @@ saldo_neto_disp = float(np.round(saldo_neto, 0))
 
 col5, col6 = st.columns(2)
 with col5:
-    st.number_input("🧾 Saldo Neto", value=saldo_neto_disp, step=1000.0, min_value=0.0,
-                    format="%.0f", disabled=True,
-                    help="Saldo − (Saldo − 25.000) × 0.004 (solo si Saldo > 0)")
+    st.number_input(
+        "🧾 Saldo Neto",
+        value=saldo_neto_disp,
+        step=1000.0,
+        min_value=0.0,
+        format="%.0f",
+        disabled=True,
+        help="Saldo − (Saldo − 25.000) × 0.004 (solo si Saldo > 0)"
+    )
 with col6:
-    st.number_input("💵 Depósito", min_value=0.0, step=1000.0,
-                    value=0.0, format="%.0f", key="deposito_edit",
-                    help="Monto extra aportado al inicio; por defecto 0")
+    pesos_input("💵 Depósito", key="deposito_edit",
+                help="Monto extra aportado al inicio; por defecto 0")
 
 # =================== 4) PAGO BANCO y derivados ===================
 st.markdown("### 4) PAGO BANCO y parámetros derivados")
 
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
-    st.number_input("🏦 PAGO BANCO", min_value=0.0, step=1000.0,
-                    value=float(st.session_state.pago_banco), format="%.0f", key="pago_banco")
+    pesos_input("🏦 PAGO BANCO", key="pago_banco")
 with c2:
     descuento = None
     if st.session_state.deuda_res_edit and st.session_state.deuda_res_edit > 0:
         descuento = max(0.0, 1.0 - (st.session_state.pago_banco / st.session_state.deuda_res_edit)) * 100.0
-    st.text_input("📉 DESCUENTO (%)", value=(f"{descuento:.2f} %" if descuento is not None else ""), disabled=True)
+    st.text_input(
+        "📉 DESCUENTO (%)",
+        value=(f"{descuento:.2f} %" if descuento is not None else ""),
+        disabled=True
+    )
 with c3:
-    st.number_input("🧮 N PaB", min_value=1, step=1,
-                    value=int(st.session_state.n_pab), key="n_pab")
+    st.number_input(
+        "🧮 N PaB",
+        min_value=1,
+        step=1,
+        value=int(st.session_state.n_pab),
+        key="n_pab"
+    )
 
 # Campo adicional: Primer PAGO BANCO solo si N PaB > 1
 if st.session_state.n_pab > 1:
     pago_banco_actual = float(st.session_state.pago_banco or 0.0)
-    # default: lo que ya haya, o pago_banco / n_pab si no hay nada
-    primer_default = st.session_state.get(
-        "primer_pago_banco",
-        (pago_banco_actual / st.session_state.n_pab) if (pago_banco_actual > 0 and st.session_state.n_pab > 0) else 0.0
-    )
-    # asegurar que el default no supere el total
-    primer_default = min(max(primer_default, 0.0), pago_banco_actual)
 
-    st.number_input(
+    if (
+        "primer_pago_banco" not in st.session_state
+        or st.session_state.primer_pago_banco > pago_banco_actual
+    ):
+        if pago_banco_actual > 0 and st.session_state.n_pab > 0:
+            st.session_state.primer_pago_banco = pago_banco_actual / st.session_state.n_pab
+        else:
+            st.session_state.primer_pago_banco = 0.0
+
+    pesos_input(
         "💳 Primer PAGO BANCO",
-        min_value=0.0,
-        max_value=float(pago_banco_actual),
-        step=1000.0,
-        value=float(primer_default),
-        format="%.0f",
         key="primer_pago_banco",
         help="Monto del primer pago al banco (el resto se reparte en los siguientes PaB)."
+    )
+    # Clamp para que nunca supere el total
+    st.session_state.primer_pago_banco = min(
+        max(st.session_state.primer_pago_banco, 0.0),
+        pago_banco_actual
     )
 else:
     # Si solo hay un PaB, el primer pago es todo el PAGO BANCO
@@ -387,13 +445,12 @@ if (st.session_state._last_pab != st.session_state.pago_banco) or (st.session_st
 # Comisión de éxito (editable) y CE inicial
 c4, c5 = st.columns(2)
 with c4:
-    st.number_input("🏁 Comisión de éxito (editable)", min_value=0.0, step=1000.0,
-                    value=float(st.session_state.get("comision_exito", 0.0)),
-                    format="%.0f", key="comision_exito", on_change=_mark_override_ce)
+    prev_ce = float(st.session_state.get("comision_exito", 0.0) or 0.0)
+    new_ce = pesos_input("🏁 Comisión de éxito (editable)", key="comision_exito")
+    if new_ce != prev_ce:
+        _mark_override_ce()
 with c5:
-    st.number_input("🧪 CE inicial", min_value=0.0, step=1000.0,
-                    value=float(st.session_state.get("ce_inicial_val", 0.0)),
-                    format="%.0f", key="ce_inicial_val")
+    pesos_input("🧪 CE inicial", key="ce_inicial_val")
 
 # Avance CE inicial vs Comisión de éxito
 st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
@@ -428,14 +485,12 @@ primer_pago_banco = float(
         pago_banco if n_pab == 1 else (pago_banco / n_pab if n_pab > 0 else 0.0)
     )
 )
-# Clamp por seguridad
 primer_pago_banco = min(max(primer_pago_banco, 0.0), pago_banco)
 resto_pago_banco = max(0.0, pago_banco - primer_pago_banco)
 
 pct_primer_pago = (ce_inicial / comision_exito) if comision_exito > 0 else np.nan
 
 if (plazo - 1) > 0 and apartado_mensual > 0:
-    # Nota: ahora usamos explícitamente el resto del PAGO BANCO
     numerador = (comision_exito + resto_pago_banco - ce_inicial + comision_mensual)
     cuota_apartado = (numerador / (plazo - 1)) / apartado_mensual
 else:
@@ -447,9 +502,17 @@ with c1:
 with c2:
     st.number_input("📅 PLAZO (meses)", value=float(plazo), step=1.0, format="%.0f", disabled=True)
 with c3:
-    st.text_input("% Primer Pago (CE inicial / CE)", value=("—" if np.isnan(pct_primer_pago) else f"{pct_primer_pago:.2f}"), disabled=True)
+    st.text_input(
+        "% Primer Pago (CE inicial / CE)",
+        value=("—" if np.isnan(pct_primer_pago) else f"{pct_primer_pago:.2f}"),
+        disabled=True
+    )
 with c4:
-    st.text_input("Cuota/Apartado", value=("—" if np.isnan(cuota_apartado) else f"{cuota_apartado:.4f}"), disabled=True)
+    st.text_input(
+        "Cuota/Apartado",
+        value=("—" if np.isnan(cuota_apartado) else f"{cuota_apartado:.4f}"),
+        disabled=True
+    )
 
 if st.session_state.get("comision_exito_overridden", False):
     st.caption("🔒 Comisión de éxito fijada manualmente: no se recalcula con cambios en PAGO BANCO/N PaB.")
