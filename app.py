@@ -409,28 +409,34 @@ with c3:
         key="n_pab"
     )
 
+# --- Lógica para transición 1 -> >1 PaB (default = PAGO BANCO / N PaB) ---  # <<<
+pago_banco = float(st.session_state.get("pago_banco", 0.0) or 0.0)
+n_pab = int(st.session_state.get("n_pab", 1) or 1)
+
+prev_n_pab = st.session_state.get("_prev_n_pab_for_primer", 1)
+if n_pab > 1 and prev_n_pab == 1:
+    # Primera vez que pasamos de 1 a más de un PaB: usar PAGO BANCO / N PaB
+    if pago_banco > 0 and n_pab > 0:
+        st.session_state.primer_pago_banco = pago_banco / n_pab
+    else:
+        st.session_state.primer_pago_banco = 0.0
+st.session_state._prev_n_pab_for_primer = n_pab
+# -------------------------------------------------------------------------  # <<<
+
 # Campo adicional: Primer PAGO BANCO solo si N PaB > 1
-if st.session_state.n_pab > 1:
+if n_pab > 1:
     pago_banco_actual = float(st.session_state.pago_banco or 0.0)
 
-    if (
-        "primer_pago_banco" not in st.session_state
-        or st.session_state.primer_pago_banco > pago_banco_actual
-    ):
-        if pago_banco_actual > 0 and st.session_state.n_pab > 0:
-            st.session_state.primer_pago_banco = pago_banco_actual / st.session_state.n_pab
-        else:
-            st.session_state.primer_pago_banco = 0.0
+    # Aseguramos que no supere el total ni sea negativo
+    st.session_state.primer_pago_banco = min(
+        max(float(st.session_state.get("primer_pago_banco", 0.0) or 0.0), 0.0),
+        pago_banco_actual
+    )
 
     pesos_input(
         "💳 Primer PAGO BANCO",
         key="primer_pago_banco",
         help="Monto del primer pago al banco (el resto se reparte en los siguientes PaB)."
-    )
-    # Clamp para que nunca supere el total
-    st.session_state.primer_pago_banco = min(
-        max(st.session_state.primer_pago_banco, 0.0),
-        pago_banco_actual
     )
 else:
     # Si solo hay un PaB, el primer pago es todo el PAGO BANCO
