@@ -294,6 +294,7 @@ if st.session_state.get("sig_sel") != sig_sel:
 
     st.session_state.pago_banco      = 0.0
     st.session_state.n_pab           = 1
+    st.session_state.primer_pago_banco = 0.0
 
     st.session_state.comision_exito_overridden = False
     st.session_state.comision_exito  = max(0.0, (deuda_res_total_def - 0.0) * 1.19 * ce_base_def)
@@ -352,6 +353,32 @@ with c3:
     st.number_input("🧮 N PaB", min_value=1, step=1,
                     value=int(st.session_state.n_pab), key="n_pab")
 
+# Campo adicional: Primer PAGO BANCO solo si N PaB > 1
+if st.session_state.n_pab > 1:
+    pago_banco_actual = float(st.session_state.pago_banco or 0.0)
+    # default: lo que ya haya, o pago_banco / n_pab si no hay nada
+    primer_default = st.session_state.get(
+        "primer_pago_banco",
+        (pago_banco_actual / st.session_state.n_pab) if (pago_banco_actual > 0 and st.session_state.n_pab > 0) else 0.0
+    )
+    # asegurar que el default no supere el total
+    primer_default = min(max(primer_default, 0.0), pago_banco_actual)
+
+    st.number_input(
+        "💳 Primer PAGO BANCO",
+        min_value=0.0,
+        max_value=float(pago_banco_actual),
+        step=1000.0,
+        value=float(primer_default),
+        format="%.0f",
+        key="primer_pago_banco",
+        help="Monto del primer pago al banco (el resto se reparte en los siguientes PaB)."
+    )
+else:
+    # Si solo hay un PaB, el primer pago es todo el PAGO BANCO
+    st.session_state.primer_pago_banco = float(st.session_state.pago_banco or 0.0)
+
+# Detectar cambios en PAGO BANCO / N PaB para recalcular CE (si no está bloqueada)
 if (st.session_state._last_pab != st.session_state.pago_banco) or (st.session_state._last_n != st.session_state.n_pab):
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
@@ -393,11 +420,23 @@ comision_exito    = float(st.session_state.get("comision_exito", 0.0) or 0.0)
 ce_inicial        = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
 
 plazo = st.number_input("📅 PLAZO (meses) (lo ingresas tú)", min_value=1, step=1, value=1)
-primer_pago_banco = (pago_banco / n_pab) if n_pab > 0 else 0.0
+
+# Primer PAGO BANCO: si hay más de un PaB, usamos el input; si no, todo el pago
+primer_pago_banco = float(
+    st.session_state.get(
+        "primer_pago_banco",
+        pago_banco if n_pab == 1 else (pago_banco / n_pab if n_pab > 0 else 0.0)
+    )
+)
+# Clamp por seguridad
+primer_pago_banco = min(max(primer_pago_banco, 0.0), pago_banco)
+resto_pago_banco = max(0.0, pago_banco - primer_pago_banco)
+
 pct_primer_pago = (ce_inicial / comision_exito) if comision_exito > 0 else np.nan
 
 if (plazo - 1) > 0 and apartado_mensual > 0:
-    numerador = (comision_exito + pago_banco - ce_inicial - primer_pago_banco + comision_mensual)
+    # Nota: ahora usamos explícitamente el resto del PAGO BANCO
+    numerador = (comision_exito + resto_pago_banco - ce_inicial + comision_mensual)
     cuota_apartado = (numerador / (plazo - 1)) / apartado_mensual
 else:
     cuota_apartado = np.nan
