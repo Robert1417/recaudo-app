@@ -199,20 +199,52 @@ def _map_columns(columns_list: tuple[str, ...]):
     col_ce    = _find_col(dummy_df, ["CE"])
     return col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce
 
-# ---- Helper para vista previa en pesos con separador de miles ----
-def mostrar_preview_pesos(label_preview: str, valor: float | int | None):
-    """
-    Muestra debajo de un input numérico cómo se está interpretando el valor,
-    con separador de miles (.) y sin decimales.
-    """
-    if valor is None:
-        valor = 0.0
+# ---- Helpers para inputs en pesos con separador de miles ----
+def _format_pesos(value) -> str:
     try:
-        v = float(valor)
+        v = float(value)
     except Exception:
-        v = 0.0
-    texto = f"{v:,.0f}".replace(",", ".")
-    st.caption(f"{label_preview}: **{texto}**")
+        return ""
+    if np.isnan(v):
+        return ""
+    # Formato colombiano: punto como separador de miles, sin decimales
+    return f"{v:,.0f}".replace(",", ".")
+
+def pesos_input(label: str, key: str, help: str | None = None, disabled: bool = False):
+    """
+    Input de texto para pesos colombianos:
+    - Muestra separador de miles (.)
+    - Guarda el valor numérico limpio en st.session_state[key] (float)
+    """
+    raw_val = st.session_state.get(key, 0.0)
+    try:
+        base_val = float(raw_val or 0.0)
+    except Exception:
+        base_val = 0.0
+
+    default_txt = _format_pesos(base_val)
+    txt = st.text_input(
+        label,
+        value=default_txt,
+        key=f"{key}_display",
+        help=help,
+        disabled=disabled
+    )
+
+    txt_clean = txt.strip().replace(".", "").replace(",", "")
+    if txt_clean == "":
+        new_val = 0.0
+    else:
+        try:
+            new_val = float(txt_clean)
+        except Exception:
+            new_val = base_val  # si no se puede parsear, dejamos el valor anterior
+
+    if new_val < 0:
+        new_val = 0.0
+
+    st.session_state[key] = new_val
+    return new_val
 
 # -------- helpers de CE --------
 def _prefill_ce():
@@ -323,45 +355,13 @@ if st.session_state.get("sig_sel") != sig_sel:
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    deuda_res_val = st.number_input(
-        "💰 Deuda Resuelve",
-        min_value=0.0,
-        step=1000.0,
-        value=float(st.session_state.deuda_res_edit),
-        format="%.0f",
-        key="deuda_res_edit",
-    )
-    mostrar_preview_pesos("Se interpreta como", deuda_res_val)
+    pesos_input("💰 Deuda Resuelve", key="deuda_res_edit")
 with col2:
-    comision_m_val = st.number_input(
-        "🎯 Comisión Mensual",
-        min_value=0.0,
-        step=1000.0,
-        value=float(st.session_state.comision_m_edit),
-        format="%.0f",
-        key="comision_m_edit",
-    )
-    mostrar_preview_pesos("Se interpreta como", comision_m_val)
+    pesos_input("🎯 Comisión Mensual", key="comision_m_edit")
 with col3:
-    apartado_val = st.number_input(
-        "📆 Apartado Mensual",
-        min_value=0.0,
-        step=1000.0,
-        value=float(st.session_state.apartado_edit),
-        format="%.0f",
-        key="apartado_edit",
-    )
-    mostrar_preview_pesos("Se interpreta como", apartado_val)
+    pesos_input("📆 Apartado Mensual", key="apartado_edit")
 with col4:
-    saldo_val = st.number_input(
-        "💼 Saldo (Ahorro)",
-        min_value=0.0,
-        step=1000.0,
-        value=float(st.session_state.saldo_edit),
-        format="%.0f",
-        key="saldo_edit",
-    )
-    mostrar_preview_pesos("Se interpreta como", saldo_val)
+    pesos_input("💼 Saldo (Ahorro)", key="saldo_edit")
 
 # 3.4 Saldo Neto y Depósito
 saldo_neto = 0.0
@@ -382,32 +382,15 @@ with col5:
         help="Saldo − (Saldo − 25.000) × 0.004 (solo si Saldo > 0)"
     )
 with col6:
-    deposito_val = st.number_input(
-        "💵 Depósito",
-        min_value=0.0,
-        step=1000.0,
-        value=float(st.session_state.get("deposito_edit", 0.0)),
-        format="%.0f",
-        key="deposito_edit",
-        help="Monto extra aportado al inicio; por defecto 0"
-    )
-    # Si quisieras, también podrías mostrar preview aquí:
-    # mostrar_preview_pesos("Se interpreta como", deposito_val)
+    pesos_input("💵 Depósito", key="deposito_edit",
+                help="Monto extra aportado al inicio; por defecto 0")
 
 # =================== 4) PAGO BANCO y derivados ===================
 st.markdown("### 4) PAGO BANCO y parámetros derivados")
 
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
-    pago_banco_val = st.number_input(
-        "🏦 PAGO BANCO",
-        min_value=0.0,
-        step=1000.0,
-        value=float(st.session_state.pago_banco),
-        format="%.0f",
-        key="pago_banco"
-    )
-    mostrar_preview_pesos("Se interpreta como", pago_banco_val)
+    pesos_input("🏦 PAGO BANCO", key="pago_banco")
 with c2:
     descuento = None
     if st.session_state.deuda_res_edit and st.session_state.deuda_res_edit > 0:
@@ -439,20 +422,14 @@ if st.session_state.n_pab > 1:
         else:
             st.session_state.primer_pago_banco = 0.0
 
-    primer_val = st.number_input(
+    pesos_input(
         "💳 Primer PAGO BANCO",
-        min_value=0.0,
-        max_value=float(pago_banco_actual),
-        step=1000.0,
-        value=float(st.session_state.primer_pago_banco),
-        format="%.0f",
         key="primer_pago_banco",
         help="Monto del primer pago al banco (el resto se reparte en los siguientes PaB)."
     )
-    mostrar_preview_pesos("Se interpreta como", primer_val)
-
+    # Clamp para que nunca supere el total
     st.session_state.primer_pago_banco = min(
-        max(primer_val, 0.0),
+        max(st.session_state.primer_pago_banco, 0.0),
         pago_banco_actual
     )
 else:
@@ -469,27 +446,11 @@ if (st.session_state._last_pab != st.session_state.pago_banco) or (st.session_st
 c4, c5 = st.columns(2)
 with c4:
     prev_ce = float(st.session_state.get("comision_exito", 0.0) or 0.0)
-    ce_val = st.number_input(
-        "🏁 Comisión de éxito (editable)",
-        min_value=0.0,
-        step=1000.0,
-        value=prev_ce,
-        format="%.0f",
-        key="comision_exito",
-    )
-    mostrar_preview_pesos("Se interpreta como", ce_val)
-    if ce_val != prev_ce:
+    new_ce = pesos_input("🏁 Comisión de éxito (editable)", key="comision_exito")
+    if new_ce != prev_ce:
         _mark_override_ce()
 with c5:
-    ce_ini_val = st.number_input(
-        "🧪 CE inicial",
-        min_value=0.0,
-        step=1000.0,
-        value=float(st.session_state.get("ce_inicial_val", 0.0)),
-        format="%.0f",
-        key="ce_inicial_val",
-    )
-    mostrar_preview_pesos("Se interpreta como", ce_ini_val)
+    pesos_input("🧪 CE inicial", key="ce_inicial_val")
 
 # Avance CE inicial vs Comisión de éxito
 st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
