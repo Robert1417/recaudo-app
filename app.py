@@ -409,19 +409,23 @@ with c3:
         key="n_pab"
     )
 
-# --- Lógica para transición 1 -> >1 PaB (default = PAGO BANCO / N PaB) ---  # <<<
+# --- Lógica: si cambia N PaB, recalculamos Primer PAGO BANCO ---  # <<<
 pago_banco = float(st.session_state.get("pago_banco", 0.0) or 0.0)
 n_pab = int(st.session_state.get("n_pab", 1) or 1)
 
-prev_n_pab = st.session_state.get("_prev_n_pab_for_primer", 1)
-if n_pab > 1 and prev_n_pab == 1:
-    # Primera vez que pasamos de 1 a más de un PaB: usar PAGO BANCO / N PaB
-    if pago_banco > 0 and n_pab > 0:
-        st.session_state.primer_pago_banco = pago_banco / n_pab
+prev_n_pab = st.session_state.get("_prev_n_pab_for_primer", n_pab)
+if n_pab != prev_n_pab:
+    # Cambió el N PaB → recalculamos primer pago
+    if n_pab > 1:
+        if pago_banco > 0:
+            st.session_state.primer_pago_banco = pago_banco / n_pab
+        else:
+            st.session_state.primer_pago_banco = 0.0
     else:
-        st.session_state.primer_pago_banco = 0.0
+        # Si vuelve a 1, todo el PAGO BANCO va al primer pago
+        st.session_state.primer_pago_banco = pago_banco
 st.session_state._prev_n_pab_for_primer = n_pab
-# -------------------------------------------------------------------------  # <<<
+# --------------------------------------------------------  # <<<
 
 # Campo adicional: Primer PAGO BANCO solo si N PaB > 1
 if n_pab > 1:
