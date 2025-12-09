@@ -199,7 +199,7 @@ def _map_columns(columns_list: tuple[str, ...]):
     col_ce    = _find_col(dummy_df, ["CE"])
     return col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce
 
-# ---- Helpers para inputs en pesos con separador de miles ----
+# ---- Helpers para inputs en pesos con separador de miles (solo otros campos) ----
 def _format_pesos(value) -> str:
     try:
         v = float(value)
@@ -212,9 +212,8 @@ def _format_pesos(value) -> str:
 
 def pesos_input(label: str, key: str, help: str | None = None, disabled: bool = False):
     """
-    Input de texto para pesos colombianos:
-    - Muestra separador de miles (.)
-    - Guarda el valor numérico limpio en st.session_state[key] (float)
+    Input de texto para pesos colombianos (para Deuda, Apartado, etc.)
+    NO se usa para Comisión de éxito para evitar conflictos.
     """
     raw_val = st.session_state.get(key, 0.0)
     try:
@@ -248,14 +247,18 @@ def pesos_input(label: str, key: str, help: str | None = None, disabled: bool = 
 
 # -------- helpers de CE --------
 def _prefill_ce():
-    if not st.session_state.get("comision_exito_overridden", False):
-        deuda_res = float(st.session_state.get("deuda_res_edit", 0.0) or 0.0)
-        pago_bco  = float(st.session_state.get("pago_banco", 0.0) or 0.0)
-        ce_base   = float(st.session_state.get("ce_base", 0.0) or 0.0)
-        st.session_state.comision_exito = max(0.0, (deuda_res - pago_bco) * 1.19 * ce_base)
-
-def _mark_override_ce():
-    st.session_state.comision_exito_overridden = True
+    """
+    Comisión de éxito automática mientras no esté override:
+    (Deuda Resuelve - PAGO BANCO) * 1.19 * CE base
+    """
+    if st.session_state.get("comision_exito_overridden", False):
+        return
+    deuda_res = float(st.session_state.get("deuda_res_edit", 0.0) or 0.0)
+    pago_bco  = float(st.session_state.get("pago_banco", 0.0) or 0.0)
+    ce_base   = float(st.session_state.get("ce_base", 0.0) or 0.0)
+    ce = max(0.0, (deuda_res - pago_bco) * 1.19 * ce_base)
+    st.session_state.comision_exito = ce
+    st.session_state.comision_exito_auto = ce  # guardamos referencia del valor "auto"
 
 # =================== 1) Cargar base ===================
 st.markdown("### 1) Base `cartera_asignada_filtrada`")
@@ -343,8 +346,13 @@ if st.session_state.get("sig_sel") != sig_sel:
     st.session_state.n_pab           = 1
     st.session_state.primer_pago_banco = 0.0
 
+    # Flags CE
     st.session_state.comision_exito_overridden = False
-    st.session_state.comision_exito  = max(0.0, (deuda_res_total_def - 0.0) * 1.19 * ce_base_def)
+
+    # Comisión de éxito inicial (PAGO BANCO = 0)
+    ce_ini = max(0.0, (deuda_res_total_def - 0.0) * 1.19 * ce_base_def)
+    st.session_state.comision_exito = ce_ini
+    st.session_state.comision_exito_auto = ce_ini
 
     st.session_state.ce_inicial_val  = 0.0
 
@@ -409,7 +417,7 @@ with c3:
         key="n_pab"
     )
 
-# --- Lógica: si cambia N PaB, recalculamos Primer PAGO BANCO ---  # <<<
+# --- Lógica: si cambia N PaB, recalculamos Primer PAGO BANCO ---
 pago_banco = float(st.session_state.get("pago_banco", 0.0) or 0.0)
 n_pab = int(st.session_state.get("n_pab", 1) or 1)
 
@@ -425,7 +433,7 @@ if n_pab != prev_n_pab:
         # Si vuelve a 1, todo el PAGO BANCO va al primer pago
         st.session_state.primer_pago_banco = pago_banco
 st.session_state._prev_n_pab_for_primer = n_pab
-# --------------------------------------------------------  # <<<
+# --------------------------------------------------------
 
 # Campo adicional: Primer PAGO BANCO solo si N PaB > 1
 if n_pab > 1:
@@ -446,7 +454,7 @@ else:
     # Si solo hay un PaB, el primer pago es todo el PAGO BANCO
     st.session_state.primer_pago_banco = float(st.session_state.pago_banco or 0.0)
 
-# Detectar cambios en PAGO BANCO / N PaB para recalcular CE (si no está bloqueada)
+# Detectar cambios en PAGO BANCO / N PaB para recalcular CE
 if (st.session_state._last_pab != st.session_state.pago_banco) or (st.session_state._last_n != st.session_state.n_pab):
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
@@ -455,10 +463,24 @@ if (st.session_state._last_pab != st.session_state.pago_banco) or (st.session_st
 # Comisión de éxito (editable) y CE inicial
 c4, c5 = st.columns(2)
 with c4:
-    prev_ce = float(st.session_state.get("comision_exito", 0.0) or 0.0)
-    new_ce = pesos_input("🏁 Comisión de éxito (editable)", key="comision_exito")
-    if new_ce != prev_ce:
-        _mark_override_ce()
+    # Valor automático de referencia
+    auto_ce = float(st.session_state.get("comision_exito_auto", st.session_state.get("comision_exito", 0.0)) or 0.0)
+    current_ce = float(st.session_state.get("comision_exito", 0.0) or 0.0)
+
+    new_ce = st.number_input(
+        "🏁 Comisión de éxito (editable)",
+        key="comision_exito",
+        value=current_ce,
+        step=1000.0,
+        format="%.0f",
+        help="Por defecto se calcula con la fórmula, pero puedes ajustarla manualmente."
+    )
+
+    # Si el valor actual se separa del valor "auto", marcamos override
+    if not st.session_state.get("comision_exito_overridden", False):
+        if abs(new_ce - auto_ce) > 0.5:
+            st.session_state.comision_exito_overridden = True
+
 with c5:
     pesos_input("🧪 CE inicial", key="ce_inicial_val")
 
