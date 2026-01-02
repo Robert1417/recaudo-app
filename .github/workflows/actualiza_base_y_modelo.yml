@@ -35,7 +35,7 @@ jobs:
                       google-api-python-client google-auth google-auth-httplib2 \
                       google-auth-oauthlib gspread
 
-      - name: Escribir MI_JSON.json desde secreto
+      - name: Validar secreto MI_JSON y escribir archivo temporal
         env:
           MI_JSON: ${{ secrets.MI_JSON }}
         run: |
@@ -43,7 +43,13 @@ jobs:
             echo "FALTA el secreto MI_JSON en GitHub → Settings > Secrets and variables > Actions"
             exit 1
           fi
-          echo "$MI_JSON" > MI_JSON.json
+
+          # Escribir de forma segura (evita problemas con saltos de línea / encoding)
+          python - <<'PY'
+          import os, pathlib
+          pathlib.Path("MI_JSON.json").write_text(os.environ["MI_JSON"], encoding="utf-8")
+          print("MI_JSON.json escrito OK")
+          PY
 
       - name: Crear carpeta data si no existe
         run: mkdir -p data
@@ -51,6 +57,8 @@ jobs:
       - name: Ejecutar notebook
         env:
           PYTHONIOENCODING: "utf-8"
+          # ✅ Clave: el notebook busca MI_JSON en variables de entorno (os.environ)
+          MI_JSON: ${{ secrets.MI_JSON }}
         run: |
           papermill "Calculadora_Recaudo.ipynb" "Calculadora_Recaudo_output.ipynb" -k python3
 
