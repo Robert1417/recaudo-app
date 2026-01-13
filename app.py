@@ -279,24 +279,28 @@ def _prefill_ce():
     ce = max(0.0, (deuda_res - pago_bco) * 1.19 * ce_base)
     st.session_state.comision_exito = ce
     st.session_state.comision_exito_auto = ce  # guardamos referencia del valor "auto"
-
+    
 # =================== 1) Cargar base ===================
 st.markdown("### 1) Base `cartera_asignada_filtrada`")
+
+DEBUG = False  # ← pon True solo cuando quieras ver debug
 
 df_base = load_repo_base(_data_version())
 src_badge = None
 
 # 🔎 DEBUG 1: ¿qué archivo se está usando?
-if DATA_PARQUET.exists():
-    st.info("📌 Leyendo PARQUET: data/cartera_asignada_filtrada.parquet")
-elif DATA_CSV.exists():
-    st.info("📌 Leyendo CSV: data/cartera_asignada_filtrada.csv")
-else:
-    st.warning("📌 No hay base en data/, usando subida manual")
+if DEBUG:
+    if DATA_PARQUET.exists():
+        st.info("📌 Leyendo PARQUET: data/cartera_asignada_filtrada.parquet")
+    elif DATA_CSV.exists():
+        st.info("📌 Leyendo CSV: data/cartera_asignada_filtrada.csv")
+    else:
+        st.warning("📌 No hay base en data/, usando subida manual")
 
-# 🔎 DEBUG 2: ver columnas EXACTAS (repr, para detectar invisibles)
-st.write("🧾 Columnas detectadas (repr):")
-st.write([repr(c) for c in df_base.columns])
+# 🔎 DEBUG 2: ver columnas EXACTAS (repr)
+if DEBUG and df_base is not None:
+    st.write("🧾 Columnas detectadas (repr):")
+    st.write([repr(c) for c in df_base.columns])
 
 # 🧹 LIMPIEZA FUERTE de nombres de columnas (quita caracteres invisibles)
 def _clean_colname(c):
@@ -308,11 +312,13 @@ def _clean_colname(c):
     c = re.sub(r"\s+", " ", c)    # colapsa espacios múltiples
     return c
 
-df_base.columns = [_clean_colname(c) for c in df_base.columns]
+if df_base is not None:
+    df_base.columns = [_clean_colname(c) for c in df_base.columns]
 
 # 🔎 DEBUG 3: columnas DESPUÉS de limpiar
-st.write("🧾 Columnas limpiadas:")
-st.write(list(df_base.columns))
+if DEBUG and df_base is not None:
+    st.write("🧾 Columnas limpiadas:")
+    st.write(list(df_base.columns))
 
 ###########################################################################################################
 if df_base is not None:
@@ -331,7 +337,6 @@ else:
         st.stop()
 
 st.caption(src_badge)
-
 # Mapear columnas obligatorias
 colnames_tuple = tuple(map(str, df_base.columns))
 col_ref, col_id, col_banco, col_deu, col_apar, col_com, col_saldo, col_ce = _map_columns(colnames_tuple)
