@@ -278,14 +278,35 @@ st.markdown("### 1) Base `cartera_asignada_filtrada`")
 
 df_base = load_repo_base(_data_version())
 src_badge = None
-###########################################################################################################################################
-# 🔎 DEBUG: ¿qué archivo se está usando?
+
+# 🔎 DEBUG 1: ¿qué archivo se está usando?
 if DATA_PARQUET.exists():
     st.info("📌 Leyendo PARQUET: data/cartera_asignada_filtrada.parquet")
 elif DATA_CSV.exists():
     st.info("📌 Leyendo CSV: data/cartera_asignada_filtrada.csv")
 else:
     st.warning("📌 No hay base en data/, usando subida manual")
+
+# 🔎 DEBUG 2: ver columnas EXACTAS (repr, para detectar invisibles)
+st.write("🧾 Columnas detectadas (repr):")
+st.write([repr(c) for c in df_base.columns])
+
+# 🧹 LIMPIEZA FUERTE de nombres de columnas (quita caracteres invisibles)
+def _clean_colname(c):
+    c = str(c)
+    c = c.replace("\ufeff", "")   # BOM
+    c = c.replace("\u200b", "")   # zero-width space
+    c = c.replace("\xa0", " ")    # NBSP
+    c = c.strip()
+    c = re.sub(r"\s+", " ", c)    # colapsa espacios múltiples
+    return c
+
+df_base.columns = [_clean_colname(c) for c in df_base.columns]
+
+# 🔎 DEBUG 3: columnas DESPUÉS de limpiar
+st.write("🧾 Columnas limpiadas:")
+st.write(list(df_base.columns))
+
 ###########################################################################################################
 if df_base is not None:
     src_badge = "📦 Fuente: data/ (workflow semanal)"
