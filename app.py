@@ -83,6 +83,13 @@ st.caption(
     "6) Revisa KPIs (PLAZO lo ingresas tú)."
 )
 
+# =================== 🔄 Reinicio manual (limpiar cache) ===================
+st.sidebar.markdown("### 🔄 Control")
+if st.sidebar.button("Reiniciar calculadora (limpiar cache)"):
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.rerun()
+
 # ==== Rutas de artefactos generados por el notebook/Action ====
 DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
 DATA_CSV     = Path("data/cartera_asignada_filtrada.csv")
