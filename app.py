@@ -278,7 +278,15 @@ st.markdown("### 1) Base `cartera_asignada_filtrada`")
 
 df_base = load_repo_base(_data_version())
 src_badge = None
-
+###########################################################################################################################################
+# 🔎 DEBUG: ¿qué archivo se está usando?
+if DATA_PARQUET.exists():
+    st.info("📌 Leyendo PARQUET: data/cartera_asignada_filtrada.parquet")
+elif DATA_CSV.exists():
+    st.info("📌 Leyendo CSV: data/cartera_asignada_filtrada.csv")
+else:
+    st.warning("📌 No hay base en data/, usando subida manual")
+###########################################################################################################
 if df_base is not None:
     src_badge = "📦 Fuente: data/ (workflow semanal)"
     st.success("✅ Cargada automáticamente desde el repo.")
