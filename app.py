@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 import json
 from joblib import load
+import re  # ✅ NUEVO
 
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -162,9 +163,15 @@ def load_repo_base(_version: str) -> pd.DataFrame | None:
 
 # ------------------ utilidades ------------------
 def _norm(s: str) -> str:
+    # ✅ MEJORADO: soporta guiones, underscores, espacios raros, etc.
     s = str(s).strip().lower()
     rep = str.maketrans("áéíóúü", "aeiouu")
-    return s.translate(rep).replace("  ", " ").replace("\xa0", " ")
+    s = s.translate(rep)
+    s = s.replace("\xa0", " ")
+    s = s.replace("_", " ").replace("-", " ")
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def _find_col(df: pd.DataFrame, candidates):
     cols = {_norm(c): c for c in df.columns}
@@ -192,7 +199,13 @@ def _map_columns(columns_list: tuple[str, ...]):
     col_ref   = _find_col(dummy_df, ["Referencia"])
     col_id    = _find_col(dummy_df, ["Id deuda","id deuda","id_deuda"])
     col_banco = _find_col(dummy_df, ["Banco"])
-    col_deu   = _find_col(dummy_df, ["Deuda Resuelve","deuda resuelve"])
+
+    # ✅ MEJORADO: acepta Deuda Resuelve o D_BRAVO (cualquier escritura)
+    col_deu   = _find_col(dummy_df, [
+        "Deuda Resuelve", "deuda resuelve", "deuda_resuelve", "deuda-resuelve",
+        "D_BRAVO", "d_bravo", "d bravo", "d-bravo", "dbravo"
+    ])
+
     col_apar  = _find_col(dummy_df, ["Apartado Mensual","apartado mensual"])
     col_com   = _find_col(dummy_df, ["Comisión Mensual","comision mensual","comisión mensual"])
     col_saldo = _find_col(dummy_df, ["Saldo","Ahorro"])
