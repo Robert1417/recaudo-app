@@ -54,11 +54,11 @@ jobs:
       - name: Crear carpeta data si no existe
         run: mkdir -p data
 
-      # ✅ CLAVE: borra artefactos viejos para forzar re-entrenamiento / re-guardado
-      - name: Forzar regeneración (borrar artefactos viejos)
+      # ✅ borra artefactos viejos para forzar re-entrenamiento / re-guardado del modelo
+      - name: Forzar regeneración (borrar artefactos viejos del modelo)
         run: |
           rm -f mlp_recaudo_pipeline.joblib mlp_recaudo_meta.json
-          echo "Borrados artefactos viejos (si existían)."
+          echo "Borrados artefactos viejos del modelo (si existían)."
           ls -lh || true
 
       - name: Ejecutar notebook (con logs)
@@ -68,6 +68,21 @@ jobs:
           MI_JSON: ${{ secrets.MI_JSON }}
         run: |
           papermill "Calculadora_Recaudo.ipynb" "Calculadora_Recaudo_output.ipynb" -k python3 --log-output
+
+      # ✅ marca de ejecución para que SIEMPRE haya commit aunque los datos sean iguales
+      - name: Marcar ejecución (last_run.txt)
+        run: |
+          date -u +"%Y-%m-%d %H:%M:%S UTC" > data/last_run.txt
+          echo "last_run actualizado:"
+          cat data/last_run.txt
+
+      - name: Debug columnas del PARQUET generado
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          df = pd.read_parquet("data/cartera_asignada_filtrada.parquet")
+          print("COLUMNAS PARQUET:", list(df.columns))
+          PY
 
       - name: Verificar artefactos generados + hash joblib
         run: |
@@ -80,6 +95,7 @@ jobs:
           test -f mlp_recaudo_pipeline.joblib
           test -f mlp_recaudo_meta.json
           test -f data/cartera_asignada_filtrada.parquet
+          test -f data/last_run.txt
 
           echo "==== SHA256 joblib ===="
           python - <<'PY'
@@ -116,6 +132,7 @@ jobs:
           # Añade solo los artefactos relevantes
           git add -f data/cartera_asignada_filtrada.parquet \
                   data/cartera_asignada_filtrada.csv \
+                  data/last_run.txt \
                   mlp_recaudo_pipeline.joblib \
                   mlp_recaudo_meta.json \
                   Calculadora_Recaudo_output.ipynb 2>/dev/null || true
