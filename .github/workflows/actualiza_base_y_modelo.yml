@@ -1,12 +1,8 @@
-name: Actualizar base y modelo (semanal)
+name: Actualizar base y modelo (FORZAR CAMBIO)
 
 on:
-  schedule:
-    # Martes 06:00 a.m. Bogotá (UTC-5) => 11:00 UTC
-    - cron: "0 11 * * 2"
   workflow_dispatch: {}
 
-# 🔐 necesario para poder hacer git push con el GITHUB_TOKEN
 permissions:
   contents: write
 
@@ -30,7 +26,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # extras para ejecutar el notebook y Google APIs
           pip install papermill jupyter ipykernel \
                       google-api-python-client google-auth google-auth-httplib2 \
                       google-auth-oauthlib gspread
@@ -40,42 +35,37 @@ jobs:
           MI_JSON: ${{ secrets.MI_JSON }}
         run: |
           if [ -z "$MI_JSON" ]; then
-            echo "FALTA el secreto MI_JSON en GitHub → Settings > Secrets and variables > Actions"
+            echo "FALTA el secreto MI_JSON"
             exit 1
           fi
 
-          # Escribir de forma segura (evita problemas con saltos de línea / encoding)
           python - <<'PY'
           import os, pathlib
           pathlib.Path("MI_JSON.json").write_text(os.environ["MI_JSON"], encoding="utf-8")
           print("MI_JSON.json escrito OK")
           PY
 
-      - name: Crear carpeta data si no existe
+      - name: Crear carpeta data
         run: mkdir -p data
 
       - name: Ejecutar notebook
         env:
           PYTHONIOENCODING: "utf-8"
-          # ✅ Clave: el notebook busca MI_JSON en variables de entorno (os.environ)
           MI_JSON: ${{ secrets.MI_JSON }}
         run: |
           papermill "Calculadora_Recaudo.ipynb" "Calculadora_Recaudo_output.ipynb" -k python3
 
-      - name: Verificar artefactos generados
+      # 🔥 FUERZA UN CAMBIO REAL
+      - name: Forzar cambio controlado (timestamp)
         run: |
-          ls -lh
-          ls -lh data || true
-          test -f mlp_recaudo_pipeline.joblib
-          test -f mlp_recaudo_meta.json
-          test -f data/cartera_asignada_filtrada.parquet
+          date -u +"Última ejecución forzada: %Y-%m-%d %H:%M:%S UTC" > data/last_run.txt
+          echo "Cambio forzado escrito"
 
-      # Nunca subas credenciales
-      - name: Eliminar credenciales antes del commit
+      - name: Eliminar credenciales
         if: always()
         run: rm -f MI_JSON.json
 
-      - name: Commit & push artefactos (seguro)
+      - name: Commit & push (forzado)
         env:
           BRANCH_NAME: ${{ github.ref_name }}
         run: |
@@ -83,24 +73,12 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Guarda temporalmente cambios sin commitear
-          git stash push --include-untracked || true
-
-          # Trae cambios del remoto
-          git fetch origin "$BRANCH_NAME"
-          git checkout "$BRANCH_NAME"
-          git pull --rebase origin "$BRANCH_NAME" || true
-
-          # Restaura cambios guardados
-          git stash pop || true
-
-          # Añade solo los artefactos relevantes
-          git add data/cartera_asignada_filtrada.parquet \
+          git add data/last_run.txt \
+                  data/cartera_asignada_filtrada.parquet \
                   data/cartera_asignada_filtrada.csv \
                   mlp_recaudo_pipeline.joblib \
                   mlp_recaudo_meta.json \
-                  Calculadora_Recaudo_output.ipynb 2>/dev/null || true
+                  Calculadora_Recaudo_output.ipynb
 
-          # Commit & push
-          git commit -m "Actualiza base y modelo [skip ci]" || echo "Sin cambios que commitear"
+          git commit -m "Forzar actualización manual del modelo"
           git push origin HEAD:"$BRANCH_NAME"
