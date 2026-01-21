@@ -352,6 +352,219 @@ if faltan:
 df_base = _normalize_numeric(df_base, [col_deu, col_apar, col_com, col_saldo, col_ce])
 st.success(f"✅ Base lista • filas: {len(df_base):,}")
 
+# =================== 🚀 MODO MASIVO (EXCEL) ===================
+st.markdown("---")
+st.markdown("## 🚀 Modo masivo (sube Excel → calcula → descarga resultados)")
+
+with st.expander("📌 Columnas mínimas requeridas", expanded=False):
+    st.markdown("""
+**Excel de entrada (mínimo):**
+- Referencia
+- Id deuda
+- PAGO BANCO
+
+**Opcional:**
+- Comisión de éxito (si la incluyes, se usa como override)
+""")
+
+# Selector global: % CE inicial (se aplica a todo el archivo)
+pct_ce_ini = st.selectbox(
+    "🧪 ¿Qué % de la Comisión de éxito será el CE inicial (para todos)?",
+    options=[0.10, 0.20, 0.30, 0.40, 0.50],
+    index=1,
+    format_func=lambda x: f"{int(x*100)}%"
+)
+
+# Uploader masivo (preferimos Excel)
+up_mass = st.file_uploader("📤 Sube tu Excel (modo masivo)", type=["xlsx", "xls", "csv"], key="up_mass")
+
+def _ensure_num(s):
+    # soporta 1.234.567 o 1,234,567 y otros formatos
+    if pd.isna(s):
+        return np.nan
+    x = str(s).strip()
+    if x == "":
+        return np.nan
+    x = x.replace(".", "").replace(",", "")
+    try:
+        return float(x)
+    except Exception:
+        return np.nan
+
+def _coalesce(a, b):
+    # si a es NaN usa b
+    return np.where(pd.isna(a), b, a)
+
+def _read_mass(file):
+    if file.name.lower().endswith(".csv"):
+        return pd.read_csv(file)
+    return pd.read_excel(file, engine="openpyxl")
+
+def _adjust_pred(y):
+    # misma regla que tu app
+    y = float(y)
+    if y == 0.98:
+        return y + 0.02
+    if y == 0.99:
+        return y + 0.01
+    return y + 0.03
+
+if up_mass is not None:
+    df_in = _read_mass(up_mass)
+    df_in.columns = [_clean_colname(c) for c in df_in.columns]
+
+    # Detectar columnas de input con tolerancia a variantes
+    in_cols_tuple = tuple(map(str, df_in.columns))
+    in_ref, in_id, _, in_deu, in_apar, in_com, in_saldo, in_ce = _map_columns(in_cols_tuple)
+
+    def _find_in(df, candidates):
+        return _find_col(df, candidates)
+
+    col_pago = _find_in(df_in, ["PAGO BANCO", "PAGO_BANCO", "Pago Banco", "pago banco"])
+    col_cexito = _find_in(df_in, ["Comisión de éxito", "Comision de exito", "COMISION_EXITO", "comision exito"])
+
+    # Validación mínima
+    if in_ref is None or in_id is None or col_pago is None:
+        st.error("Tu archivo debe traer columnas equivalentes a **Referencia**, **Id deuda** y **PAGO BANCO**.")
+        st.stop()
+
+    df_work = df_in.copy()
+
+    # Parse numéricos del input
+    df_work[col_pago] = df_work[col_pago].apply(_ensure_num)
+    if col_cexito and col_cexito in df_work.columns:
+        df_work[col_cexito] = df_work[col_cexito].apply(_ensure_num)
+
+    # Cruce con base por (Referencia, Id deuda)
+    base_min = df_base[[col_ref, col_id, col_deu, col_apar, col_com, col_saldo, col_ce]].copy()
+    base_min[col_ref] = base_min[col_ref].astype(str)
+    base_min[col_id]  = base_min[col_id].astype(str)
+
+    df_work[in_ref] = df_work[in_ref].astype(str)
+    df_work[in_id]  = df_work[in_id].astype(str)
+
+    df_m = df_work.merge(
+        base_min,
+        left_on=[in_ref, in_id],
+        right_on=[col_ref, col_id],
+        how="left",
+        suffixes=("", "_base")
+    )
+    df_m["match_base"] = ~df_m[col_deu].isna()
+
+    # Permitir overrides opcionales (si vienen en el input)
+    def pick(user_col, base_col):
+        if user_col is None or user_col not in df_m.columns:
+            return df_m[base_col].astype(float)
+        tmp = df_m[user_col].apply(_ensure_num).astype(float)
+        return _coalesce(tmp, df_m[base_col].astype(float))
+
+    deuda_res = pick(in_deu, col_deu)
+    apartado = pick(in_apar, col_apar)
+    com_mens = pick(in_com, col_com)
+    saldo    = pick(in_saldo, col_saldo)
+    ce_base  = pick(in_ce, col_ce)
+
+    pago_banco = df_m[col_pago].astype(float).fillna(0.0)
+    pago_banco = np.maximum(0.0, pago_banco)
+
+    # N PaB fijo en 1 => primer pago = pago banco; resto = 0
+    primer_pago = pago_banco
+    resto_pago  = np.zeros_like(pago_banco)
+
+    # Comisión de éxito: override si viene, si no fórmula
+    if col_cexito and col_cexito in df_m.columns:
+        cexito_user = df_m[col_cexito].astype(float)
+    else:
+        cexito_user = np.nan
+
+    cexito_auto = np.maximum(0.0, (deuda_res - pago_banco) * 1.19 * ce_base)
+    com_exito = _coalesce(cexito_user, cexito_auto)
+    com_exito = np.maximum(0.0, com_exito)
+
+    # CE inicial = % * comisión de éxito (constante por fila)
+    ce_inicial = com_exito * float(pct_ce_ini)
+
+    # Ratio_PP = CE inicial / CE = pct_ce_ini (si CE>0)
+    ratio_pp = np.where(com_exito > 0, ce_inicial / com_exito, np.nan)
+
+    # Descuento %
+    descuento_pct = np.where(
+        deuda_res > 0,
+        np.maximum(0.0, 1.0 - (pago_banco / deuda_res)) * 100.0,
+        np.nan
+    )
+
+    # Barrer PLAZO 1..9 y quedarnos con la mejor predicción
+    model = load_model(_model_version())
+    best_pred = np.full(len(df_m), np.nan, dtype=float)
+    best_plazo = np.full(len(df_m), np.nan, dtype=float)
+    best_cuota = np.full(len(df_m), np.nan, dtype=float)
+
+    for plazo in range(1, 10):
+        # cuota/apartado (misma lógica que tu app)
+        # numerador = (com_exito + resto_pago - ce_inicial + com_mens)
+        numerador = (com_exito + resto_pago - ce_inicial + com_mens)
+
+        cuota_apartado = np.where(
+            (plazo - 1) > 0,
+            np.where(apartado > 0, (numerador / (plazo - 1)) / apartado, np.nan),
+            np.nan
+        )
+
+        X_pred = pd.DataFrame({
+            "PRI-ULT": np.full(len(df_m), float(plazo)),
+            "Ratio_PP": ratio_pp.astype(float),
+            "C/A": cuota_apartado.astype(float),
+            "AMOUNT_TOTAL": com_exito.astype(float)
+        })
+
+        # Intentamos predecir; donde haya NaNs el modelo puede fallar, así que protegemos
+        try:
+            preds = model.predict(X_pred).astype(float)
+            preds_adj = np.array([_adjust_pred(p) for p in preds], dtype=float)
+        except Exception:
+            # Si falla por NaNs, marcamos todo como NaN en este plazo
+            preds_adj = np.full(len(df_m), np.nan, dtype=float)
+
+        # Actualizar "best" donde sea mejor
+        improve = np.where(np.isnan(best_pred), True, preds_adj > best_pred)
+        best_pred = np.where(improve, preds_adj, best_pred)
+        best_plazo = np.where(improve, float(plazo), best_plazo)
+        best_cuota = np.where(improve, cuota_apartado, best_cuota)
+
+    df_out = pd.DataFrame({
+        "Referencia": df_m[in_ref],
+        "Id deuda": df_m[in_id],
+        "match_base": df_m["match_base"],
+        "PAGO BANCO": pago_banco,
+        "N PaB": 1,
+        "Deuda Resuelve (usada)": deuda_res,
+        "Apartado Mensual (usado)": apartado,
+        "Comisión Mensual (usada)": com_mens,
+        "Saldo (usado)": saldo,
+        "CE base (usada)": ce_base,
+        "DESCUENTO (%)": descuento_pct,
+        "Comisión de éxito (usada)": com_exito,
+        "% CE inicial usado": float(pct_ce_ini),
+        "CE inicial calculado": ce_inicial,
+        "BEST_PLAZO": best_plazo,
+        "BEST_Cuota/Apartado": best_cuota,
+        "BEST_PREDICCION (ajustada)": best_pred
+    })
+
+    st.success(f"✅ Procesadas {len(df_out):,} filas.")
+    st.caption("`match_base=False` significa que (Referencia, Id deuda) no cruzó con la base.")
+    st.dataframe(df_out.head(200), use_container_width=True)
+
+    # Descarga CSV (simple y robusto)
+    st.download_button(
+        "⬇️ Descargar resultados (CSV)",
+        data=df_out.to_csv(index=False).encode("utf-8"),
+        file_name="resultados_modo_masivo.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
 # =================== 2) Referencia → seleccionar id(s) ===================
 st.markdown("### 2) Referencia → seleccionar **Id deuda** (uno o varios)")
 ref_input = st.text_input("🔎 Escribe la **Referencia** (exacta como aparece en la base)")
