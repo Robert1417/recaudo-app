@@ -660,7 +660,7 @@ if do_predict:
 
 # ✅ NUEVO AJUSTE
         if feature_vals["AMOUNT_TOTAL"] > 6_000_000:
-            yhat_adj += 0.06
+            yhat_adj += 0.05
 
         st.success(f"✅ Predicción de recaudo: {yhat_adj:,.2f}")
 
