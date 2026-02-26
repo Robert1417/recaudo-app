@@ -650,12 +650,17 @@ if do_predict:
         X_pred = pd.DataFrame([feature_vals], columns=FEATURES_RAW)
         yhat = float(model.predict(X_pred)[0])
 
+# Ajustes existentes
         if yhat == 0.98:
             yhat_adj = yhat + 0.02
         elif yhat == 0.99:
             yhat_adj = yhat + 0.01
         else:
             yhat_adj = yhat + 0.03
+
+# ✅ NUEVO AJUSTE
+        if feature_vals["AMOUNT_TOTAL"] > 4_000_000:
+            yhat_adj += 0.6
 
         st.success(f"✅ Predicción de recaudo: {yhat_adj:,.2f}")
 
