@@ -6,6 +6,8 @@ from pathlib import Path
 import json
 from joblib import load
 import re  # ✅ NUEVO
+from datetime import datetime
+import os
 
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -167,6 +169,30 @@ def load_repo_base(_version: str) -> pd.DataFrame | None:
     except Exception:
         # Si algo falla leyendo, permitimos fallback a subida manual
         return None
+
+# =================== LOG LOCAL ===================
+def guardar_log_calculo(referencia, ids, features, prediccion):
+
+    log_path = "logs_calculadora.csv"
+
+    fila = {
+        "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "referencia": referencia,
+        "ids_deuda": ",".join(ids),
+        "plazo": features["PRI-ULT"],
+        "ratio_pp": features["Ratio_PP"],
+        "cuota_apartado": features["C/A"],
+        "amount_total": features["AMOUNT_TOTAL"],
+        "prediccion": prediccion
+    }
+
+    df_log = pd.DataFrame([fila])
+
+    if os.path.exists(log_path):
+        df_log.to_csv(log_path, mode="a", header=False, index=False)
+    else:
+        df_log.to_csv(log_path, mode="w", header=True, index=False)
+        
 
 # ------------------ utilidades ------------------
 def _norm(s: str) -> str:
@@ -663,6 +689,14 @@ if do_predict:
             yhat_adj += 0.05
 
         st.success(f"✅ Predicción de recaudo: {yhat_adj:,.2f}")
+
+        # ✅ Guardar registro del cálculo
+        guardar_log_calculo(
+            referencia=ref_input,
+            ids=ids_sel,
+            features=feature_vals,
+            prediccion=yhat_adj
+        )
 
         st.caption("Entradas usadas por el pipeline (crudas):")
         st.dataframe(pd.DataFrame([feature_vals]), use_container_width=True)
