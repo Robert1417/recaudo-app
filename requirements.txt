@@ -16,3 +16,4 @@ papermill
 matplotlib
 seaborn
 statsmodels
+oauth2client
