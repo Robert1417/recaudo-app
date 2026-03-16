@@ -97,6 +97,7 @@ DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
 DATA_CSV     = Path("data/cartera_asignada_filtrada.csv")
 MODEL_PATH   = Path("mlp_recaudo_pipeline.joblib")
 META_PATH    = Path("mlp_recaudo_meta.json")
+LOG_PATH     = Path("data/logs/logs_calculadora.csv")
 
 
 # ========= Helpers de "versión de archivo" para invalidar cache =========
@@ -173,7 +174,7 @@ def load_repo_base(_version: str) -> pd.DataFrame | None:
 # =================== LOG LOCAL ===================
 def guardar_log_calculo(referencia, ids, features, prediccion):
 
-    log_path = "logs_calculadora.csv"
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     fila = {
         "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -188,10 +189,10 @@ def guardar_log_calculo(referencia, ids, features, prediccion):
 
     df_log = pd.DataFrame([fila])
 
-    if os.path.exists(log_path):
-        df_log.to_csv(log_path, mode="a", header=False, index=False)
+    if LOG_PATH.exists():
+        df_log.to_csv(LOG_PATH, mode="a", header=False, index=False)
     else:
-        df_log.to_csv(log_path, mode="w", header=True, index=False)
+        df_log.to_csv(LOG_PATH, mode="w", header=True, index=False)
         
 
 # ------------------ utilidades ------------------
