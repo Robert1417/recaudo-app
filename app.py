@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from datetime import date
 from pathlib import Path
+from tempfile import gettempdir
 import json
 from joblib import load
 import re  # ✅ NUEVO
@@ -171,27 +172,59 @@ def load_repo_base(_version: str) -> pd.DataFrame | None:
         return None
 
 # =================== LOG LOCAL ===================
-def guardar_log_calculo(referencia, ids, features, prediccion):
+def _get_writable_log_path() -> Path:
+    """
+    Devuelve la ruta donde se guardará el histórico.
+    Si `data/` no es escribible (por despliegue), usa un fallback temporal.
+    """
+    candidates = [
+        LOG_PATH,
+        Path(gettempdir()) / "recaudo-app" / "logs_calculadora.csv",
+    ]
 
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    for path in candidates:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.parent.joinpath(".write_test").open("w", encoding="utf-8") as f:
+                f.write("ok")
+            path.parent.joinpath(".write_test").unlink(missing_ok=True)
+            return path
+        except Exception:
+            continue
+
+    return LOG_PATH
+
+
+def guardar_log_calculo(referencia, ids, features, prediccion):
+    """
+    Guarda una fila del histórico y retorna (ok, path, error_msg).
+    """
+    log_path = _get_writable_log_path()
 
     fila = {
         "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "referencia": referencia,
-        "ids_deuda": ",".join(ids),
-        "plazo": features["PRI-ULT"],
-        "ratio_pp": features["Ratio_PP"],
-        "cuota_apartado": features["C/A"],
-        "amount_total": features["AMOUNT_TOTAL"],
-        "prediccion": prediccion
+        "referencia": str(referencia),
+        "ids_deuda": ",".join(map(str, ids)),
+        "plazo": features.get("PRI-ULT"),
+        "ratio_pp": features.get("Ratio_PP"),
+        "cuota_apartado": features.get("C/A"),
+        "amount_total": features.get("AMOUNT_TOTAL"),
+        "prediccion": prediccion,
     }
 
-    df_log = pd.DataFrame([fila])
-
-    if LOG_PATH.exists():
-        df_log.to_csv(LOG_PATH, mode="a", header=False, index=False)
-    else:
-        df_log.to_csv(LOG_PATH, mode="w", header=True, index=False)
+    try:
+        df_log = pd.DataFrame([fila])
+        file_exists = log_path.exists() and log_path.stat().st_size > 0
+        df_log.to_csv(
+            log_path,
+            mode="a" if file_exists else "w",
+            header=not file_exists,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        return True, log_path, None
+    except Exception as e:
+        return False, log_path, str(e)
         
 
 # ------------------ utilidades ------------------
@@ -691,12 +724,17 @@ if do_predict:
         st.success(f"✅ Predicción de recaudo: {yhat_adj:,.2f}")
 
         # ✅ Guardar registro del cálculo
-        guardar_log_calculo(
+        ok_log, log_path, err_log = guardar_log_calculo(
             referencia=ref_input,
             ids=ids_sel,
             features=feature_vals,
             prediccion=yhat_adj
         )
+
+        if ok_log:
+            st.caption(f"🗂️ Histórico guardado en: `{log_path}`")
+        else:
+            st.warning(f"No se pudo guardar el histórico en `{log_path}`: {err_log}")
 
         st.caption("Entradas usadas por el pipeline (crudas):")
         st.dataframe(pd.DataFrame([feature_vals]), use_container_width=True)
