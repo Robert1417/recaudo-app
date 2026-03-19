@@ -150,10 +150,12 @@ def _data_version() -> str:
 
 def _parse_relaxed_service_account_string(raw_value: str) -> dict:
     """
-    Intenta parsear un service account aunque venga como texto "pegado"
-    con saltos de línea reales dentro de `private_key`.
+    Intenta reconstruir un JSON de service account aunque llegue como texto
+    con saltos reales dentro de `private_key`, wrappers extra o texto copiado
+    desde distintos gestores de secretos.
     """
-    fields = [
+    required_fields = ["private_key", "client_email"]
+    known_fields = [
         "type",
         "project_id",
         "private_key_id",
@@ -167,64 +169,92 @@ def _parse_relaxed_service_account_string(raw_value: str) -> dict:
         "universe_domain",
     ]
 
+    text = raw_value.strip()
+
+    if text.startswith("MI_JSON="):
+        text = text.split("=", 1)[1].strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start : end + 1]
+
     parsed = {}
-    for i, field in enumerate(fields):
-        marker = f'"{field}"'
-        start = raw_value.find(marker)
-        if start == -1:
+    for i, field in enumerate(known_fields):
+        field_match = re.search(rf'"{re.escape(field)}"\s*:\s*"', text)
+        if not field_match:
             continue
 
-        start = raw_value.find(":", start)
-        if start == -1:
-            continue
-        start += 1
+        value_start = field_match.end()
+        next_positions = []
+        for next_field in known_fields[i + 1 :]:
+            next_match = re.search(rf'",\s*"{re.escape(next_field)}"\s*:', text[value_start:])
+            if next_match:
+                next_positions.append(value_start + next_match.start())
 
-        while start < len(raw_value) and raw_value[start] in " \t\r\n":
-            start += 1
-
-        if start >= len(raw_value) or raw_value[start] != '"':
-            continue
-
-        start += 1
-        if i + 1 < len(fields):
-            next_marker = f'",   "{fields[i + 1]}"'
-            end = raw_value.find(next_marker, start)
-            if end == -1:
-                next_marker = f'", "{fields[i + 1]}"'
-                end = raw_value.find(next_marker, start)
+        if next_positions:
+            value_end = min(next_positions)
         else:
-            end = raw_value.rfind('"}')
-            if end == -1:
-                end = raw_value.rfind('" }')
+            tail_match = re.search(r'"\s*}$', text[value_start:])
+            if not tail_match:
+                continue
+            value_end = value_start + tail_match.start()
 
-        if end == -1:
-            continue
+        parsed[field] = text[value_start:value_end]
 
-        parsed[field] = raw_value[start:end]
-
-    if not parsed or "private_key" not in parsed or "client_email" not in parsed:
+    if not all(field in parsed for field in required_fields):
         raise RuntimeError(
             "El secreto `MI_JSON` no se pudo interpretar. Revisa que tenga el JSON completo del service account."
         )
 
     return parsed
-
+    
+def _looks_like_service_account_mapping(value) -> bool:
+    try:
+        data = dict(value)
+    except Exception:
+        return False
+    return "private_key" in data and "client_email" in data
 
 def _load_google_service_account_info() -> dict:
     """
     Carga el JSON del service account desde Streamlit Secrets o variable de entorno.
-    Acepta MI_JSON como dict o string JSON.
+    Soporta MI_JSON como string JSON, tabla TOML, dict directo o variables separadas.
     """
     creds_source = None
 
     try:
         if "MI_JSON" in st.secrets:
             creds_source = st.secrets["MI_JSON"]
+        elif _looks_like_service_account_mapping(st.secrets):
+            creds_source = dict(st.secrets)    
     except Exception:
         creds_source = None
 
     if creds_source is None:
-        creds_source = os.environ.get("MI_JSON")
+        env_json = os.environ.get("MI_JSON")
+        if env_json:
+            creds_source = env_json
+        else:
+            env_fields = {
+                key: os.environ.get(key)
+                for key in [
+                    "type",
+                    "project_id",
+                    "private_key_id",
+                    "private_key",
+                    "client_email",
+                    "client_id",
+                    "auth_uri",
+                    "token_uri",
+                    "auth_provider_x509_cert_url",
+                    "client_x509_cert_url",
+                    "universe_domain",
+                ]
+                if os.environ.get(key) is not None
+            }
+            if _looks_like_service_account_mapping(env_fields):
+                creds_source = env_fields
 
     if creds_source is None:
         raise RuntimeError(
@@ -242,8 +272,7 @@ def _load_google_service_account_info() -> dict:
                 creds_info = ast.literal_eval(creds_source)
             except Exception:
                 creds_info = _parse_relaxed_service_account_string(creds_source)
-    elif isinstance(creds_source, dict):
-        creds_info = dict(creds_source)
+    
     else:
         try:
             creds_info = dict(creds_source)
@@ -252,7 +281,10 @@ def _load_google_service_account_info() -> dict:
 
     private_key = creds_info.get("private_key")
     if isinstance(private_key, str):
-        creds_info["private_key"] = private_key.replace("\\n", "\n")
+        normalized_key = private_key.strip().replace("\r\n", "\n").replace("\\n", "\n")
+        if "-----BEGIN PRIVATE KEY-----" in normalized_key and not normalized_key.endswith("\n"):
+            normalized_key += "\n"
+        creds_info["private_key"] = normalized_key
 
     return creds_info
 
