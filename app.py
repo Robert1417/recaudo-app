@@ -8,6 +8,10 @@ import json
 from joblib import load
 import re  # ✅ NUEVO
 from datetime import datetime
+import os
+
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -98,6 +102,22 @@ DATA_CSV     = Path("data/cartera_asignada_filtrada.csv")
 MODEL_PATH   = Path("mlp_recaudo_pipeline.joblib")
 META_PATH    = Path("mlp_recaudo_meta.json")
 LOG_PATH     = Path("data/logs/logs_calculadora.csv")
+GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
+GOOGLE_SHEET_TAB = "Historico Calculadora"
+GOOGLE_SHEETS_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+GOOGLE_SHEET_HEADERS = [
+    "fecha",
+    "referencia",
+    "ids_deuda",
+    "plazo",
+    "ratio_pp",
+    "cuota_apartado",
+    "amount_total",
+    "prediccion",
+]
 
 
 # ========= Helpers de "versión de archivo" para invalidar cache =========
@@ -127,7 +147,82 @@ def _data_version() -> str:
         return _file_version(DATA_CSV)
     return "missing"
 
+def _load_google_service_account_info() -> dict:
+    """
+    Carga el JSON del service account desde Streamlit Secrets o variable de entorno.
+    Acepta MI_JSON como dict o string JSON.
+    """
+    creds_source = None
 
+    try:
+        if "MI_JSON" in st.secrets:
+            creds_source = st.secrets["MI_JSON"]
+    except Exception:
+        creds_source = None
+
+    if creds_source is None:
+        creds_source = os.environ.get("MI_JSON")
+
+    if creds_source is None:
+        raise RuntimeError(
+            "No encontré el secreto `MI_JSON`. Configúralo en Streamlit Secrets o como variable de entorno."
+        )
+
+    if isinstance(creds_source, str):
+        creds_source = creds_source.strip()
+        if not creds_source:
+            raise RuntimeError("El secreto `MI_JSON` está vacío.")
+        try:
+            creds_info = json.loads(creds_source)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("El secreto `MI_JSON` no tiene un JSON válido.") from exc
+    elif isinstance(creds_source, dict):
+        creds_info = dict(creds_source)
+    else:
+        try:
+            creds_info = dict(creds_source)
+        except Exception as exc:
+            raise RuntimeError("No pude interpretar el secreto `MI_JSON` como credenciales válidas.") from exc
+
+    private_key = creds_info.get("private_key")
+    if isinstance(private_key, str):
+        creds_info["private_key"] = private_key.replace("\\n", "\n")
+
+    return creds_info
+
+
+@st.cache_resource(show_spinner=False)
+def get_google_sheet_worksheet():
+    """
+    Devuelve la hoja de cálculo destino para histórico.
+    Se cachea mientras no cambie el proceso.
+    """
+    creds_info = _load_google_service_account_info()
+    credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
+    client = gspread.authorize(credentials)
+    spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+    return spreadsheet.worksheet(GOOGLE_SHEET_TAB)
+
+
+def _append_row_to_google_sheet(row_data: dict):
+    """
+    Inserta una fila en Google Sheets y retorna (ok, destination, error_msg).
+    """
+    try:
+        worksheet = get_google_sheet_worksheet()
+        expected_headers = GOOGLE_SHEET_HEADERS
+        current_headers = worksheet.row_values(1)
+        if current_headers[: len(expected_headers)] != expected_headers:
+            worksheet.update("A1:H1", [expected_headers])
+
+        worksheet.append_row(
+            [row_data.get(header, "") for header in expected_headers],
+            value_input_option="USER_ENTERED",
+        )
+        return True, f"Google Sheets > {GOOGLE_SHEET_TAB}", None
+    except Exception as e:
+        return False, f"Google Sheets > {GOOGLE_SHEET_TAB}", str(e)
+        
 # =================== Loaders cacheados ===================
 @st.cache_resource(show_spinner=False)
 def load_model(_version: str):
@@ -197,10 +292,10 @@ def _get_writable_log_path() -> Path:
 
 def guardar_log_calculo(referencia, ids, features, prediccion):
     """
-    Guarda una fila del histórico y retorna (ok, path, error_msg).
+    Guarda una fila del histórico en Google Sheets y, como respaldo,
+    también en CSV local. Retorna un diccionario con el resultado.
     """
-    log_path = _get_writable_log_path()
-
+    
     fila = {
         "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "referencia": str(referencia),
@@ -211,6 +306,11 @@ def guardar_log_calculo(referencia, ids, features, prediccion):
         "amount_total": features.get("AMOUNT_TOTAL"),
         "prediccion": prediccion,
     }
+    sheet_ok, sheet_dest, sheet_err = _append_row_to_google_sheet(fila)
+
+    log_path = _get_writable_log_path()
+    local_ok = False
+    local_err = None
 
     try:
         df_log = pd.DataFrame([fila])
@@ -222,9 +322,18 @@ def guardar_log_calculo(referencia, ids, features, prediccion):
             index=False,
             encoding="utf-8-sig",
         )
-        return True, log_path, None
+        local_ok = True
     except Exception as e:
-        return False, log_path, str(e)
+        local_err = str(e)
+
+    return {
+        "sheet_ok": sheet_ok,
+        "sheet_destination": sheet_dest,
+        "sheet_error": sheet_err,
+        "local_ok": local_ok,
+        "local_path": log_path,
+        "local_error": local_err,
+    }
         
 
 # ------------------ utilidades ------------------
@@ -724,17 +833,28 @@ if do_predict:
         st.success(f"✅ Predicción de recaudo: {yhat_adj:,.2f}")
 
         # ✅ Guardar registro del cálculo
-        ok_log, log_path, err_log = guardar_log_calculo(
+        log_result = guardar_log_calculo(
             referencia=ref_input,
             ids=ids_sel,
             features=feature_vals,
             prediccion=yhat_adj
         )
 
-        if ok_log:
-            st.caption(f"🗂️ Histórico guardado en: `{log_path}`")
+        if log_result["sheet_ok"]:
+            st.caption(f"📊 Histórico guardado en: `{log_result['sheet_destination']}`")
         else:
-            st.warning(f"No se pudo guardar el histórico en `{log_path}`: {err_log}")
+            st.warning(
+                "No se pudo guardar el histórico en Google Sheets. "
+                f"Detalle: {log_result['sheet_error']}"
+            )
+
+        if log_result["local_ok"]:
+            st.caption(f"🗂️ Respaldo local guardado en: `{log_result['local_path']}`")
+        elif not log_result["sheet_ok"]:
+            st.error(
+                "Tampoco se pudo guardar el respaldo local. "
+                f"Detalle: {log_result['local_error']}"
+            )
 
         st.caption("Entradas usadas por el pipeline (crudas):")
         st.dataframe(pd.DataFrame([feature_vals]), use_container_width=True)
