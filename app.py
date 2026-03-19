@@ -803,6 +803,35 @@ if np.isnan(feature_vals["C/A"]) or feature_vals["C/A"] <= 0:
 if issues:
     st.warning("⚠️ Revisa antes de predecir:\n- " + "\n- ".join(issues))
 
+with st.expander("📊 Diagnóstico de guardado en Google Sheets", expanded=False):
+    gs_status = diagnosticar_google_sheets()
+
+    if gs_status["ok"]:
+        st.success(
+            "Conexión lista. "
+            f"Cuenta de servicio: `{gs_status['client_email']}` • "
+            f"Archivo: `{gs_status['spreadsheet_title']}` • "
+            f"Hoja: `{gs_status['worksheet_title']}`"
+        )
+        st.caption(
+            "No necesitas escribir los encabezados manualmente: la app intenta ponerlos en la fila 1 "
+            "cuando guardas el primer registro."
+        )
+    else:
+        st.error(
+            "La app no pudo conectarse a Google Sheets. "
+            f"Detalle: {gs_status['error']}"
+        )
+        st.markdown(
+            f"""
+**Revisa estos puntos:**
+- El secreto `MI_JSON` debe existir y ser un JSON válido del service account.
+- Debes compartir el spreadsheet con este correo: `{gs_status['client_email']}`.
+- La pestaña debe llamarse exactamente `{GOOGLE_SHEET_TAB}`.
+- El guardado solo se ejecuta cuando presionas **Predecir recaudo**.
+"""
+        )
+
 col_pred1, col_pred2 = st.columns([1,1])
 with col_pred1:
     do_predict = st.button("🔮 Predecir recaudo", type="primary", use_container_width=True)
