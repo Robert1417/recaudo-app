@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 from tempfile import gettempdir
 import json
+import ast
 from joblib import load
 import re  # ✅ NUEVO
 from datetime import datetime
@@ -147,6 +148,68 @@ def _data_version() -> str:
         return _file_version(DATA_CSV)
     return "missing"
 
+def _parse_relaxed_service_account_string(raw_value: str) -> dict:
+    """
+    Intenta parsear un service account aunque venga como texto "pegado"
+    con saltos de línea reales dentro de `private_key`.
+    """
+    fields = [
+        "type",
+        "project_id",
+        "private_key_id",
+        "private_key",
+        "client_email",
+        "client_id",
+        "auth_uri",
+        "token_uri",
+        "auth_provider_x509_cert_url",
+        "client_x509_cert_url",
+        "universe_domain",
+    ]
+
+    parsed = {}
+    for i, field in enumerate(fields):
+        marker = f'"{field}"'
+        start = raw_value.find(marker)
+        if start == -1:
+            continue
+
+        start = raw_value.find(":", start)
+        if start == -1:
+            continue
+        start += 1
+
+        while start < len(raw_value) and raw_value[start] in " \t\r\n":
+            start += 1
+
+        if start >= len(raw_value) or raw_value[start] != '"':
+            continue
+
+        start += 1
+        if i + 1 < len(fields):
+            next_marker = f'",   "{fields[i + 1]}"'
+            end = raw_value.find(next_marker, start)
+            if end == -1:
+                next_marker = f'", "{fields[i + 1]}"'
+                end = raw_value.find(next_marker, start)
+        else:
+            end = raw_value.rfind('"}')
+            if end == -1:
+                end = raw_value.rfind('" }')
+
+        if end == -1:
+            continue
+
+        parsed[field] = raw_value[start:end]
+
+    if not parsed or "private_key" not in parsed or "client_email" not in parsed:
+        raise RuntimeError(
+            "El secreto `MI_JSON` no se pudo interpretar. Revisa que tenga el JSON completo del service account."
+        )
+
+    return parsed
+
+
 def _load_google_service_account_info() -> dict:
     """
     Carga el JSON del service account desde Streamlit Secrets o variable de entorno.
@@ -174,8 +237,11 @@ def _load_google_service_account_info() -> dict:
             raise RuntimeError("El secreto `MI_JSON` está vacío.")
         try:
             creds_info = json.loads(creds_source)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("El secreto `MI_JSON` no tiene un JSON válido.") from exc
+        except json.JSONDecodeError:
+            try:
+                creds_info = ast.literal_eval(creds_source)
+            except Exception:
+                creds_info = _parse_relaxed_service_account_string(creds_source)
     elif isinstance(creds_source, dict):
         creds_info = dict(creds_source)
     else:
