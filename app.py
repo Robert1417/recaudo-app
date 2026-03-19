@@ -222,6 +222,51 @@ def _append_row_to_google_sheet(row_data: dict):
         return True, f"Google Sheets > {GOOGLE_SHEET_TAB}", None
     except Exception as e:
         return False, f"Google Sheets > {GOOGLE_SHEET_TAB}", str(e)
+
+
+def diagnosticar_google_sheets():
+    """
+    Valida que el secreto, el spreadsheet y la pestaña destino estén accesibles.
+    No escribe datos; solo devuelve el estado para mostrarlo en la UI.
+    """
+    try:
+        creds_info = _load_google_service_account_info()
+        client_email = creds_info.get("client_email", "desconocido")
+
+        credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
+        client = gspread.authorize(credentials)
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        worksheet = spreadsheet.worksheet(GOOGLE_SHEET_TAB)
+
+        return {
+            "ok": True,
+            "client_email": client_email,
+            "spreadsheet_title": spreadsheet.title,
+            "worksheet_title": worksheet.title,
+            "error": None,
+        }
+    except Exception as e:
+        client_email = "desconocido"
+        try:
+            creds_info = _load_google_service_account_info()
+            client_email = creds_info.get("client_email", "desconocido")
+        except Exception:
+            pass
+
+        return {
+            "ok": False,
+            "client_email": client_email,
+            "spreadsheet_title": None,
+            "worksheet_title": None,
+            "error": str(e),
+        }
+
+
+def google_sheets_status():
+    """
+    Alias simple para evitar errores por diferencias de nombre al invocar el diagnóstico.
+    """
+    return diagnosticar_google_sheets()
         
 # =================== Loaders cacheados ===================
 @st.cache_resource(show_spinner=False)
@@ -306,12 +351,12 @@ def guardar_log_calculo(referencia, ids, features, prediccion):
         "amount_total": features.get("AMOUNT_TOTAL"),
         "prediccion": prediccion,
     }
+    
     sheet_ok, sheet_dest, sheet_err = _append_row_to_google_sheet(fila)
 
     log_path = _get_writable_log_path()
     local_ok = False
     local_err = None
-
     try:
         df_log = pd.DataFrame([fila])
         file_exists = log_path.exists() and log_path.stat().st_size > 0
@@ -804,7 +849,7 @@ if issues:
     st.warning("⚠️ Revisa antes de predecir:\n- " + "\n- ".join(issues))
 
 with st.expander("📊 Diagnóstico de guardado en Google Sheets", expanded=False):
-    gs_status = diagnosticar_google_sheets()
+    gs_status = google_sheets_status()
 
     if gs_status["ok"]:
         st.success(
