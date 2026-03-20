@@ -73,7 +73,7 @@ class Winsorizer(BaseEstimator, TransformerMixin):
 # ------------------ Ajustes globales ------------------
 pd.set_option("mode.copy_on_write", True)
 st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
-st.title("💸 Calculadora de Recaudo")
+st.title("💸 Calculadora de Recaudo [SANDBOX]")
 
 import sklearn, numpy, joblib
 st.sidebar.caption(
