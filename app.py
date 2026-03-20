@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import date
+from calendar import monthrange
 from pathlib import Path
 from tempfile import gettempdir
 import json
@@ -138,6 +139,104 @@ def _file_version(path: Path) -> str:
         return f"{stat.st_mtime_ns}-{stat.st_size}"
     except FileNotFoundError:
         return "missing"
+        
+def _sum_rounded_parts(values, digits=2):
+    rounded = [round(float(v), digits) for v in values]
+    if rounded:
+        rounded[-1] = round(sum(values) - sum(rounded[:-1]), digits)
+    return rounded
+
+
+def _last_day_of_month(base_date: date, months_ahead: int) -> date:
+    shifted = pd.Timestamp(base_date) + pd.DateOffset(months=months_ahead)
+    return date(int(shifted.year), int(shifted.month), monthrange(int(shifted.year), int(shifted.month))[1])
+
+
+def construir_cronograma_pagos(
+    fecha_inicial: date,
+    plazo: int,
+    n_pab: int,
+    pago_banco_total: float,
+    primer_pago_banco: float,
+    comision_total: float,
+    comision_inicial: float,
+):
+    plazo = max(int(plazo), 0)
+    n_pab = max(int(n_pab), 1)
+
+    primer_pago_banco = min(max(float(primer_pago_banco or 0.0), 0.0), max(float(pago_banco_total or 0.0), 0.0))
+    pago_banco_total = max(float(pago_banco_total or 0.0), 0.0)
+    comision_total = max(float(comision_total or 0.0), 0.0)
+    comision_inicial = min(max(float(comision_inicial or 0.0), 0.0), comision_total)
+
+    banco_restante = max(0.0, pago_banco_total - primer_pago_banco)
+    meses_banco_restantes = max(0, n_pab - 1)
+    meses_comision_restantes = max(0, plazo - meses_banco_restantes)
+    comision_restante = max(0.0, comision_total - comision_inicial)
+
+    pagos_banco = [primer_pago_banco]
+    if meses_banco_restantes > 0:
+        pagos_banco += _sum_rounded_parts(
+            [banco_restante / meses_banco_restantes] * meses_banco_restantes
+        )
+
+    pagos_comision = [comision_inicial]
+    if meses_comision_restantes > 0:
+        pagos_comision += _sum_rounded_parts(
+            [comision_restante / meses_comision_restantes] * meses_comision_restantes
+        )
+
+    filas = []
+
+    if pagos_banco[0] > 0:
+        filas.append(
+            {
+                "Fecha": fecha_inicial,
+                "Cantidad": pagos_banco[0],
+                "Concepto": "Pago 1 a Entidad Financiera",
+            }
+        )
+    if pagos_comision[0] > 0:
+        filas.append(
+            {
+                "Fecha": fecha_inicial,
+                "Cantidad": pagos_comision[0],
+                "Concepto": "Comisión Resuelve",
+            }
+        )
+
+    for idx, valor in enumerate(pagos_banco[1:], start=1):
+        if valor <= 0:
+            continue
+        filas.append(
+            {
+                "Fecha": _last_day_of_month(fecha_inicial, idx),
+                "Cantidad": valor,
+                "Concepto": f"Pago {idx + 1} a Entidad Financiera",
+            }
+        )
+
+    for idx, valor in enumerate(pagos_comision[1:], start=1):
+        if valor <= 0:
+            continue
+        offset_meses = meses_banco_restantes + idx
+        filas.append(
+            {
+                "Fecha": _last_day_of_month(fecha_inicial, offset_meses),
+                "Cantidad": valor,
+                "Concepto": "Comisión Resuelve",
+            }
+        )
+
+    cronograma = pd.DataFrame(filas)
+    if cronograma.empty:
+        cronograma = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto"])
+    return cronograma, {
+        "meses_banco_restantes": meses_banco_restantes,
+        "meses_comision_restantes": meses_comision_restantes,
+        "banco_restante": banco_restante,
+        "comision_restante": comision_restante,
+    }        
 
 def _model_version() -> str:
     return _file_version(MODEL_PATH)
@@ -898,6 +997,16 @@ if (plazo - 1) > 0 and apartado_mensual > 0:
 else:
     cuota_apartado = np.nan
 
+cronograma_df, cronograma_meta = construir_cronograma_pagos(
+    fecha_inicial=date.today(),
+    plazo=int(plazo),
+    n_pab=n_pab,
+    pago_banco_total=pago_banco,
+    primer_pago_banco=primer_pago_banco,
+    comision_total=comision_exito,
+    comision_inicial=ce_inicial,
+)
+
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.number_input("🏁 Comisión de éxito total", value=float(comision_exito), step=0.0, format="%.0f", disabled=True)
@@ -918,6 +1027,33 @@ with c4:
 
 if st.session_state.get("comision_exito_overridden", False):
     st.caption("🔒 Comisión de éxito fijada manualmente: no se recalcula con cambios en PAGO BANCO/N PaB.")
+
+st.markdown("### 6.1) Flujo sugerido de pagos")
+
+if int(plazo) < (n_pab - 1):
+    st.warning(
+        "El plazo es menor que los meses necesarios para completar los pagos al banco. "
+        "Aumenta el plazo o reduce N PaB para que después del primer mes los pagos no se crucen."
+    )
+else:
+    st.caption(
+        "Regla aplicada: hoy salen el primer pago al banco y la comisión inicial. "
+        "Luego los pagos al banco van primero, uno por mes al cierre de mes; "
+        "cuando terminan, la comisión restante se reparte de forma equitativa en los meses finales."
+    )
+    st.caption(
+        f"Meses restantes para banco: {cronograma_meta['meses_banco_restantes']} • "
+        f"Meses restantes para comisión: {cronograma_meta['meses_comision_restantes']}"
+    )
+
+cronograma_view = cronograma_df.copy()
+if not cronograma_view.empty:
+    cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"]).dt.strftime("%d/%m/%Y")
+    cronograma_view["Cantidad"] = cronograma_view["Cantidad"].map(lambda x: f"${x:,.2f} COP")
+    cronograma_view.index = range(1, len(cronograma_view) + 1)
+    st.dataframe(cronograma_view, use_container_width=True)
+else:
+    st.info("Aún no hay valores suficientes para construir el cronograma.")
 
 # =================== 7) Predicción con el modelo ===================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
