@@ -76,6 +76,11 @@ st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout
 st.title("💸 Calculadora de Recaudo")
 
 import sklearn, numpy, joblib
+from sklearn.impute import SimpleImputer
+
+# 🔧 PARCHE compatibilidad modelo viejo vs sklearn nuevo
+if not hasattr(SimpleImputer, "_fill_dtype"):
+    SimpleImputer._fill_dtype = None
 st.sidebar.caption(
     f"🧩 NumPy: {numpy.__version__}\n"
     f"🧠 scikit-learn: {sklearn.__version__}\n"
