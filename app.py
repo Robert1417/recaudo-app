@@ -152,6 +152,127 @@ def _last_day_of_month(base_date: date, months_ahead: int) -> date:
     return date(int(shifted.year), int(shifted.month), monthrange(int(shifted.year), int(shifted.month))[1])
 
 
+def _day_of_month(base_date: date, months_ahead: int, day: int | None) -> date:
+    if day is None:
+        return _last_day_of_month(base_date, months_ahead)
+    shifted = pd.Timestamp(base_date) + pd.DateOffset(months=months_ahead)
+    year = int(shifted.year)
+    month = int(shifted.month)
+    safe_day = min(max(int(day), 1), monthrange(year, month)[1])
+    return date(year, month, safe_day)
+
+
+def _month_offset(base_date: date, target_date: date) -> int:
+    return ((target_date.year - base_date.year) * 12) + (target_date.month - base_date.month)
+
+
+def _rebalance_group_amounts(df_group: pd.DataFrame, total_objetivo: float) -> pd.DataFrame:
+    df_group = df_group.sort_values("orden").copy()
+    total_objetivo = max(float(total_objetivo or 0.0), 0.0)
+
+    override_mask = df_group["cantidad_editada"].fillna(False).astype(bool)
+    total_editado = float(df_group.loc[override_mask, "Cantidad"].sum())
+    total_editado = min(max(total_editado, 0.0), total_objetivo)
+
+    restantes = df_group.index[~override_mask].tolist()
+    restante_disponible = max(0.0, total_objetivo - total_editado)
+
+    if restantes:
+        partes = _sum_rounded_parts([restante_disponible / len(restantes)] * len(restantes))
+        for idx, valor in zip(restantes, partes):
+            df_group.at[idx, "Cantidad"] = valor
+    elif override_mask.any():
+        ultimo_idx = df_group.index[-1]
+        otros = float(df_group.iloc[:-1]["Cantidad"].sum()) if len(df_group) > 1 else 0.0
+        df_group.at[ultimo_idx, "Cantidad"] = round(max(total_objetivo - otros, 0.0), 2)
+
+    return df_group
+
+
+def aplicar_overrides_cronograma(
+    cronograma_df: pd.DataFrame,
+    edited_rows: dict,
+    totales_por_tipo: dict,
+    fecha_inicial: date,
+    dia_pago_banco: int | None,
+    dia_pago_comision: int | None,
+):
+    if cronograma_df.empty:
+        return cronograma_df.copy(), []
+
+    df = cronograma_df.copy()
+    df["cantidad_editada"] = False
+    df["fecha_editada"] = False
+    advertencias = []
+
+    for row_position_str, cambios in (edited_rows or {}).items():
+        try:
+            row_position = int(row_position_str)
+        except (TypeError, ValueError):
+            continue
+        if row_position < 0 or row_position >= len(df):
+            continue
+
+        if "Fecha" in cambios and cambios["Fecha"]:
+            try:
+                df.at[row_position, "Fecha"] = pd.to_datetime(cambios["Fecha"]).date()
+                df.at[row_position, "fecha_editada"] = True
+            except Exception:
+                advertencias.append(f"No pude interpretar la fecha editada de la fila {row_position + 1}.")
+
+        if "Cantidad" in cambios:
+            try:
+                cantidad = max(float(cambios["Cantidad"]), 0.0)
+                df.at[row_position, "Cantidad"] = cantidad
+                df.at[row_position, "cantidad_editada"] = True
+            except Exception:
+                advertencias.append(f"No pude interpretar el monto editado de la fila {row_position + 1}.")
+
+    partes = []
+    for tipo, group in df.groupby("tipo", sort=False):
+        total_objetivo = totales_por_tipo.get(tipo, float(group["Cantidad"].sum()))
+        partes.append(_rebalance_group_amounts(group, total_objetivo))
+        total_editado = float(group.loc[group["cantidad_editada"], "Cantidad"].sum())
+        if total_editado > total_objetivo + 0.01:
+            advertencias.append(
+                f"Los montos editados de {tipo} superan el total disponible; ajusté el restante a cero."
+            )
+
+    df = pd.concat(partes).sort_values("orden").reset_index(drop=True)
+
+    banco_future_mask = (df["tipo"] == "banco") & (df["months_ahead"] > 0)
+    banco_ocupados = set()
+    for idx in df.index[banco_future_mask]:
+        if bool(df.at[idx, "fecha_editada"]):
+            fecha_banco = pd.to_datetime(df.at[idx, "Fecha"]).date()
+            offset = max(1, _month_offset(fecha_inicial, fecha_banco))
+            banco_ocupados.add(offset)
+        else:
+            offset = int(df.at[idx, "months_ahead"])
+            banco_ocupados.add(offset)
+            df.at[idx, "Fecha"] = _day_of_month(fecha_inicial, offset, dia_pago_banco)
+
+    comision_future_mask = (df["tipo"] == "comision") & (df["months_ahead"] > 0)
+    offsets_comision_fijos = set()
+    for idx in df.index[comision_future_mask]:
+        if bool(df.at[idx, "fecha_editada"]):
+            fecha_comision = pd.to_datetime(df.at[idx, "Fecha"]).date()
+            offsets_comision_fijos.add(max(1, _month_offset(fecha_inicial, fecha_comision)))
+
+    siguiente_offset = 1
+    for idx in df.index[comision_future_mask]:
+        if bool(df.at[idx, "fecha_editada"]):
+            continue
+        while siguiente_offset in banco_ocupados or siguiente_offset in offsets_comision_fijos:
+            siguiente_offset += 1
+        df.at[idx, "months_ahead"] = siguiente_offset
+        df.at[idx, "Fecha"] = _day_of_month(fecha_inicial, siguiente_offset, dia_pago_comision)
+        offsets_comision_fijos.add(siguiente_offset)
+        siguiente_offset += 1
+
+    return df, advertencias
+
+
 def construir_cronograma_pagos(
     fecha_inicial: date,
     plazo: int,
@@ -160,6 +281,8 @@ def construir_cronograma_pagos(
     primer_pago_banco: float,
     comision_total: float,
     comision_inicial: float,
+    dia_pago_banco: int | None = None,
+    dia_pago_comision: int | None = None,
 ):
     plazo = max(int(plazo), 0)
     n_pab = max(int(n_pab), 1)
@@ -194,6 +317,9 @@ def construir_cronograma_pagos(
                 "Fecha": fecha_inicial,
                 "Cantidad": pagos_banco[0],
                 "Concepto": "Pago 1 a Entidad Financiera",
+                "tipo": "banco",
+                "orden": len(filas),
+                "months_ahead": 0,
             }
         )
     if pagos_comision[0] > 0:
@@ -202,6 +328,9 @@ def construir_cronograma_pagos(
                 "Fecha": fecha_inicial,
                 "Cantidad": pagos_comision[0],
                 "Concepto": "Comisión Resuelve",
+                "tipo": "comision",
+                "orden": len(filas),
+                "months_ahead": 0,
             }
         )
 
@@ -210,9 +339,12 @@ def construir_cronograma_pagos(
             continue
         filas.append(
             {
-                "Fecha": _last_day_of_month(fecha_inicial, idx),
+                "Fecha": _day_of_month(fecha_inicial, idx, dia_pago_banco),
                 "Cantidad": valor,
                 "Concepto": f"Pago {idx + 1} a Entidad Financiera",
+                "tipo": "banco",
+                "orden": len(filas),
+                "months_ahead": idx,
             }
         )
 
@@ -222,21 +354,24 @@ def construir_cronograma_pagos(
         offset_meses = meses_banco_restantes + idx
         filas.append(
             {
-                "Fecha": _last_day_of_month(fecha_inicial, offset_meses),
+                "Fecha": _day_of_month(fecha_inicial, offset_meses, dia_pago_comision),
                 "Cantidad": valor,
                 "Concepto": "Comisión Resuelve",
+                "tipo": "comision",
+                "orden": len(filas),
+                "months_ahead": offset_meses,
             }
         )
 
     cronograma = pd.DataFrame(filas)
     if cronograma.empty:
-        cronograma = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto"])
+        cronograma = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto", "tipo", "orden", "months_ahead"])
     return cronograma, {
         "meses_banco_restantes": meses_banco_restantes,
         "meses_comision_restantes": meses_comision_restantes,
         "banco_restante": banco_restante,
         "comision_restante": comision_restante,
-    }        
+    }      
 
 def _model_version() -> str:
     return _file_version(MODEL_PATH)
@@ -1030,6 +1165,68 @@ if st.session_state.get("comision_exito_overridden", False):
 
 st.markdown("### 6.1) Flujo sugerido de pagos")
 
+fecha_cfg_1, fecha_cfg_2, fecha_cfg_3, fecha_cfg_4, fecha_cfg_5 = st.columns([1.2, 1, 1.2, 1, 1])
+with fecha_cfg_1:
+    modo_fecha_banco = st.radio(
+        "Fechas banco",
+        options=["Fin de mes", "Día fijo"],
+        horizontal=True,
+        key="modo_fecha_banco",
+    )
+with fecha_cfg_2:
+    dia_pago_banco = None
+    if modo_fecha_banco == "Día fijo":
+        dia_pago_banco = int(
+            st.number_input(
+                "Día banco",
+                min_value=1,
+                max_value=31,
+                value=int(st.session_state.get("dia_pago_banco", 15)),
+                step=1,
+                key="dia_pago_banco",
+            )
+        )
+    else:
+        st.caption("Banco: fin de mes.")
+with fecha_cfg_3:
+    modo_fecha_comision = st.radio(
+        "Fechas comisión",
+        options=["Fin de mes", "Día fijo"],
+        horizontal=True,
+        key="modo_fecha_comision",
+    )
+with fecha_cfg_4:
+    dia_pago_comision = None
+    if modo_fecha_comision == "Día fijo":
+        dia_pago_comision = int(
+            st.number_input(
+                "Día comisión",
+                min_value=1,
+                max_value=31,
+                value=int(st.session_state.get("dia_pago_comision", 15)),
+                step=1,
+                key="dia_pago_comision",
+            )
+        )
+    else:
+        st.caption("Comisión: fin de mes.")
+with fecha_cfg_5:
+    if st.button("Restablecer cronograma", use_container_width=True):
+        st.session_state.pop("cronograma_editor", None)
+        st.rerun()
+
+cronograma_df, cronograma_meta = construir_cronograma_pagos(
+    fecha_inicial=date.today(),
+    plazo=int(plazo),
+    n_pab=n_pab,
+    pago_banco_total=pago_banco,
+    primer_pago_banco=primer_pago_banco,
+    comision_total=comision_exito,
+    comision_inicial=ce_inicial,
+    dia_pago_banco=dia_pago_banco,
+    dia_pago_comision=dia_pago_comision,
+)
+
 if int(plazo) < (n_pab - 1):
     st.warning(
         "El plazo es menor que los meses necesarios para completar los pagos al banco. "
@@ -1046,14 +1243,47 @@ else:
         f"Meses restantes para comisión: {cronograma_meta['meses_comision_restantes']}"
     )
 
-cronograma_view = cronograma_df.copy()
+totales_por_tipo = {
+    "banco": float(pago_banco),
+    "comision": float(comision_exito),
+}
+cronograma_editor_state = st.session_state.get("cronograma_editor", {})
+cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
+    cronograma_df=cronograma_df,
+    edited_rows=cronograma_editor_state.get("edited_rows", {}),
+    totales_por_tipo=totales_por_tipo,
+    fecha_inicial=date.today(),
+    dia_pago_banco=dia_pago_banco,
+    dia_pago_comision=dia_pago_comision,
+)
+
+for advertencia in advertencias_cronograma:
+    st.warning(advertencia)
+
+cronograma_view = cronograma_editado[["Fecha", "Cantidad", "Concepto"]].copy()
 if not cronograma_view.empty:
-    cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"]).dt.strftime("%d/%m/%Y")
-    cronograma_view["Cantidad"] = cronograma_view["Cantidad"].map(lambda x: f"${x:,.2f} COP")
+    cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
+    cronograma_view["Cantidad"] = pd.to_numeric(cronograma_view["Cantidad"], errors="coerce").fillna(0.0).round(2)
     cronograma_view.index = range(1, len(cronograma_view) + 1)
-    st.dataframe(cronograma_view, use_container_width=True)
+    st.caption(
+        "Puedes cambiar fechas y montos. Banco y comisión tienen reglas de día separadas; "
+        "si mueves un pago a entidad financiera a otro mes, la comisión ocupa el mes que quede libre."
+    )
+    st.data_editor(
+        cronograma_view,
+        key="cronograma_editor",
+        use_container_width=True,
+        num_rows="fixed",
+        hide_index=False,
+        column_config={
+            "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+            "Cantidad": st.column_config.NumberColumn("Cantidad", format="$ %.2f"),
+            "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
+        },
+        disabled=["Concepto"],
+    )
 else:
-    st.info("Aún no hay valores suficientes para construir el cronograma.")
+    st.info("Aún no hay valores suficientes para construir el cronograma."
 
 # =================== 7) Predicción con el modelo ===================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
