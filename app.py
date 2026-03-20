@@ -206,8 +206,8 @@ def aplicar_overrides_cronograma(
     df["cantidad_editada"] = False
     df["fecha_editada"] = False
     advertencias = []
-    editable_rows_df = (
-        df[df["months_ahead"] > 0]
+    display_rows_df = (
+        df
         .sort_values(by=["Fecha", "orden"])
         .reset_index()
     )
@@ -217,9 +217,11 @@ def aplicar_overrides_cronograma(
             row_position = int(row_position_str)
         except (TypeError, ValueError):
             continue
-        if row_position < 0 or row_position >= len(editable_rows_df):
+        if row_position < 0 or row_position >= len(display_rows_df):
             continue
-        target_idx = int(editable_rows_df.at[row_position, "index"])
+        target_idx = int(display_rows_df.at[row_position, "index"])
+        if int(df.at[target_idx, "months_ahead"]) == 0:
+            continue
 
         if "Fecha" in cambios and cambios["Fecha"]:
             try:
@@ -1283,48 +1285,31 @@ cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
 for advertencia in advertencias_cronograma:
     st.warning(advertencia)
 
-cronograma_flujo = cronograma_editado[["Fecha", "Cantidad", "Concepto"]].copy()
-cronograma_editable = cronograma_editado[cronograma_editado["months_ahead"] > 0][["Fecha", "Cantidad", "Concepto"]].copy()
+cronograma_view = cronograma_editado[["Fecha", "Cantidad", "Concepto"]].copy()
 
-if not cronograma_flujo.empty:
-    cronograma_flujo["Fecha"] = pd.to_datetime(cronograma_flujo["Fecha"])
-    cronograma_flujo["Cantidad"] = pd.to_numeric(cronograma_flujo["Cantidad"], errors="coerce").fillna(0.0).round(2)
-    cronograma_flujo.index = range(1, len(cronograma_flujo) + 1)
-    st.caption("Flujo final ordenado por fecha. Los dos pagos iniciales solo se cambian desde los inputs superiores.")
-    st.dataframe(
-        cronograma_flujo,
+if not cronograma_view.empty:
+    cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
+    cronograma_view["Cantidad"] = pd.to_numeric(cronograma_view["Cantidad"], errors="coerce").fillna(0.0).round(2)
+    cronograma_view.index = range(1, len(cronograma_view) + 1)
+    st.caption(
+        "Tabla principal ordenada por fecha. Los dos pagos iniciales se mantienen fijos y solo cambian desde los inputs; "
+        "las demás filas sí se pueden editar y recalculan el remanente."
+    )
+    st.data_editor(
+        cronograma_view,
+        key="cronograma_editor",
         use_container_width=True,
+        num_rows="fixed",
+        hide_index=False,
         column_config={
             "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
             "Cantidad": st.column_config.NumberColumn("Cantidad", format="$ %.2f"),
-            "Concepto": st.column_config.TextColumn("Concepto"),
+            "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
         },
+        disabled=["Concepto"],
     )
-
-    if not cronograma_editable.empty:
-        cronograma_editable["Fecha"] = pd.to_datetime(cronograma_editable["Fecha"])
-        cronograma_editable["Cantidad"] = pd.to_numeric(cronograma_editable["Cantidad"], errors="coerce").fillna(0.0).round(2)
-        cronograma_editable.index = range(1, len(cronograma_editable) + 1)
-        st.caption(
-            "Edita solo las cuotas posteriores. Los pagos iniciales son fijos en la tabla; "
-            "si cambias un valor de banco o comisión, se recalculan las demás cuotas del mismo tipo con el remanente."
-        )
-        st.data_editor(
-            cronograma_editable,
-            key="cronograma_editor",
-            use_container_width=True,
-            num_rows="fixed",
-            hide_index=False,
-            column_config={
-                "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-                "Cantidad": st.column_config.NumberColumn("Cantidad", format="$ %.2f"),
-                "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
-            },
-            disabled=["Concepto"],
-        )
 else:
     st.info("Aún no hay valores suficientes para construir el cronograma.")
-
 # =================== 7) Predicción con el modelo ===================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
 
