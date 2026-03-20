@@ -191,7 +191,7 @@ def _rebalance_group_amounts(df_group: pd.DataFrame, total_objetivo: float) -> p
 
 def aplicar_overrides_cronograma(
     cronograma_df: pd.DataFrame,
-    edited_rows: dict,
+    overrides_map: dict,
     totales_por_tipo: dict,
     fecha_inicial: date,
     dia_pago_banco: int | None,
@@ -206,20 +206,12 @@ def aplicar_overrides_cronograma(
     df["cantidad_editada"] = False
     df["fecha_editada"] = False
     advertencias = []
-    display_rows_df = (
-        df
-        .sort_values(by=["Fecha", "orden"])
-        .reset_index()
-    )
 
-    for row_position_str, cambios in (edited_rows or {}).items():
-        try:
-            row_position = int(row_position_str)
-        except (TypeError, ValueError):
+    for row_key, cambios in (overrides_map or {}).items():
+        target_matches = df.index[df["row_key"] == row_key].tolist()
+        if not target_matches:
             continue
-        if row_position < 0 or row_position >= len(display_rows_df):
-            continue
-        target_idx = int(display_rows_df.at[row_position, "index"])
+        target_idx = target_matches[0]
         if int(df.at[target_idx, "months_ahead"]) == 0:
             continue
 
@@ -228,7 +220,7 @@ def aplicar_overrides_cronograma(
                 df.at[target_idx, "Fecha"] = pd.to_datetime(cambios["Fecha"]).date()
                 df.at[target_idx, "fecha_editada"] = True
             except Exception:
-                advertencias.append(f"No pude interpretar la fecha editada de la fila {row_position + 1}.")
+                advertencias.append(f"No pude interpretar la fecha editada de {row_key}.")
 
         if "Cantidad" in cambios:
             try:
@@ -236,7 +228,7 @@ def aplicar_overrides_cronograma(
                 df.at[target_idx, "Cantidad"] = cantidad
                 df.at[target_idx, "cantidad_editada"] = True
             except Exception:
-                advertencias.append(f"No pude interpretar el monto editado de la fila {row_position + 1}.")
+                advertencias.append(f"No pude interpretar el monto editado de {row_key}.")
 
     banco_inicial_mask = (df["tipo"] == "banco") & (df["months_ahead"] == 0)
     if banco_inicial_mask.any():
@@ -343,6 +335,7 @@ def construir_cronograma_pagos(
                 "tipo": "banco",
                 "orden": len(filas),
                 "months_ahead": 0,
+                "row_key": "banco_0",
             }
         )
     if pagos_comision[0] > 0:
@@ -354,6 +347,7 @@ def construir_cronograma_pagos(
                 "tipo": "comision",
                 "orden": len(filas),
                 "months_ahead": 0,
+                "row_key": "comision_0",
             }
         )
 
@@ -368,6 +362,7 @@ def construir_cronograma_pagos(
                 "tipo": "banco",
                 "orden": len(filas),
                 "months_ahead": idx,
+                "row_key": f"banco_{idx}",
             }
         )
 
@@ -383,12 +378,13 @@ def construir_cronograma_pagos(
                 "tipo": "comision",
                 "orden": len(filas),
                 "months_ahead": offset_meses,
+                "row_key": f"comision_{idx}",
             }
         )
 
     cronograma = pd.DataFrame(filas)
     if cronograma.empty:
-        cronograma = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto", "tipo", "orden", "months_ahead"])
+        cronograma = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto", "tipo", "orden", "months_ahead", "row_key"])
     return cronograma, {
         "meses_banco_restantes": meses_banco_restantes,
         "meses_comision_restantes": meses_comision_restantes,
@@ -1236,6 +1232,7 @@ with fecha_cfg_4:
 with fecha_cfg_5:
     if st.button("Restablecer cronograma", use_container_width=True):
         st.session_state.pop("cronograma_editor", None)
+        st.session_state.pop("cronograma_overrides", None)
         st.rerun()
 
 cronograma_df, cronograma_meta = construir_cronograma_pagos(
@@ -1271,9 +1268,39 @@ totales_por_tipo = {
     "comision": float(comision_exito),
 }
 cronograma_editor_state = st.session_state.get("cronograma_editor", {})
+cronograma_overrides = st.session_state.get("cronograma_overrides", {})
+
+cronograma_base_editado, _ = aplicar_overrides_cronograma(
+    cronograma_df=cronograma_df,
+    overrides_map=cronograma_overrides,
+    totales_por_tipo=totales_por_tipo,
+    fecha_inicial=date.today(),
+    dia_pago_banco=dia_pago_banco,
+    dia_pago_comision=dia_pago_comision,
+    primer_pago_banco_input=primer_pago_banco,
+    comision_inicial_input=ce_inicial,
+)
+
+for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {}) or {}).items():
+    try:
+        row_position = int(row_position_str)
+    except (TypeError, ValueError):
+        continue
+    if row_position < 0 or row_position >= len(cronograma_base_editado):
+        continue
+    row = cronograma_base_editado.iloc[row_position]
+    if int(row["months_ahead"]) == 0:
+        continue
+    row_key = str(row["row_key"])
+    existing = cronograma_overrides.get(row_key, {})
+    existing.update(cambios)
+    cronograma_overrides[row_key] = existing
+
+st.session_state["cronograma_overrides"] = cronograma_overrides
+
 cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
     cronograma_df=cronograma_df,
-    edited_rows=cronograma_editor_state.get("edited_rows", {}),
+    overrides_map=cronograma_overrides,
     totales_por_tipo=totales_por_tipo,
     fecha_inicial=date.today(),
     dia_pago_banco=dia_pago_banco,
