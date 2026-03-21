@@ -17,3 +17,5 @@ google-auth-oauthlib
 oauth2client
 
 pyarrow==14.0.2
+python-docx>=1.1.2
+reportlab>=4.2.2
