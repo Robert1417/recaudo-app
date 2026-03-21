@@ -139,7 +139,7 @@ def _file_version(path: Path) -> str:
         return f"{stat.st_mtime_ns}-{stat.st_size}"
     except FileNotFoundError:
         return "missing"
-        
+########################################################################################################################        
 def _sum_rounded_parts(values, digits=2):
     rounded = [round(float(v), digits) for v in values]
     if rounded:
@@ -184,6 +184,20 @@ def _rebalance_group_amounts(df_group: pd.DataFrame, total_objetivo: float) -> p
         df_group.at[ultimo_idx, "Cantidad"] = round(max(total_objetivo - otros, 0.0), 2)
 
     return df_group
+
+
+def _parse_amount_input(value) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    cleaned = re.sub(r"[^\d-]", "", text)
+    if cleaned in {"", "-"}:
+        return 0.0
+    return float(cleaned)
 
 
 def construir_cronograma_pagos(
@@ -273,7 +287,7 @@ def aplicar_overrides_cronograma(
                 advertencias.append(f"No pude interpretar la fecha editada de {row_key}.")
         if "Cantidad" in cambios:
             try:
-                df.at[idx, "Cantidad"] = max(float(cambios["Cantidad"]), 0.0)
+                df.at[idx, "Cantidad"] = max(_parse_amount_input(cambios["Cantidad"]), 0.0)
                 df.at[idx, "cantidad_editada"] = True
             except Exception:
                 advertencias.append(f"No pude interpretar el monto editado de {row_key}.")
@@ -322,6 +336,7 @@ def aplicar_overrides_cronograma(
 
     df = df.sort_values(by=["Fecha", "orden"]).reset_index(drop=True)
     return df, advertencias
+######################################################################################################################################    
 
 def _model_version() -> str:
     return _file_version(MODEL_PATH)
@@ -1112,7 +1127,7 @@ with c4:
 
 if st.session_state.get("comision_exito_overridden", False):
     st.caption("🔒 Comisión de éxito fijada manualmente: no se recalcula con cambios en PAGO BANCO/N PaB.")
-
+############################################################################################################################################################################
 st.markdown("### 6.1) Flujo sugerido de pagos")
 
 fecha_cfg_1, fecha_cfg_2, fecha_cfg_3, fecha_cfg_4, fecha_cfg_5 = st.columns([1.2, 1, 1.2, 1, 1])
@@ -1199,7 +1214,13 @@ for advertencia in advertencias_cronograma:
 cronograma_view = cronograma_editado[cronograma_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
 if not cronograma_view.empty:
     cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
-    cronograma_view["Cantidad"] = pd.to_numeric(cronograma_view["Cantidad"], errors="coerce").fillna(0.0).round(0).astype(int)
+    cronograma_view["Cantidad"] = (
+        pd.to_numeric(cronograma_view["Cantidad"], errors="coerce")
+        .fillna(0.0)
+        .round(0)
+        .astype(int)
+        .map(lambda x: f"$ {x:,}")
+    )
     cronograma_view.index = range(1, len(cronograma_view) + 1)
     st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
     st.data_editor(
@@ -1210,13 +1231,14 @@ if not cronograma_view.empty:
         hide_index=False,
         column_config={
             "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-            "Cantidad": st.column_config.NumberColumn("Cantidad", format="$ %d"),
+            "Cantidad": st.column_config.TextColumn("Cantidad"),
             "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
         },
         disabled=["Concepto"],
     )
 else:
     st.info("Aún no hay valores suficientes para construir el cronograma.")
+#############################################################################################################################################################################    
 # =================== 7) Predicción con el modelo ===================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
 
