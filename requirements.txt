@@ -17,3 +17,5 @@ matplotlib
 seaborn
 statsmodels
 oauth2client
+python-docx>=1.1.2
+reportlab>=4.2.2
