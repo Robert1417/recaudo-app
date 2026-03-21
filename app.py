@@ -1199,7 +1199,7 @@ for advertencia in advertencias_cronograma:
 cronograma_view = cronograma_editado[cronograma_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
 if not cronograma_view.empty:
     cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
-    cronograma_view["Cantidad"] = pd.to_numeric(cronograma_view["Cantidad"], errors="coerce").fillna(0.0).round(2)
+    cronograma_view["Cantidad"] = pd.to_numeric(cronograma_view["Cantidad"], errors="coerce").fillna(0.0).round(0).astype(int)
     cronograma_view.index = range(1, len(cronograma_view) + 1)
     st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
     st.data_editor(
@@ -1210,7 +1210,7 @@ if not cronograma_view.empty:
         hide_index=False,
         column_config={
             "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-            "Cantidad": st.column_config.NumberColumn("Cantidad", format="$ %.2f"),
+            "Cantidad": st.column_config.NumberColumn("Cantidad", format="$ %d"),
             "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
         },
         disabled=["Concepto"],
