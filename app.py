@@ -217,7 +217,8 @@ def _format_currency_docx(value) -> str:
 
 def _format_currency_pdf(value) -> str:
     amount = int(round(float(value or 0.0)))
-    return f"${amount:,}"
+    formatted = f"{amount:,}".replace(",", ".")
+    return f"${formatted}"
 
 
 def _replace_placeholders_in_xml(xml_bytes: bytes, replacements: dict[str, str]) -> bytes:
@@ -227,31 +228,148 @@ def _replace_placeholders_in_xml(xml_bytes: bytes, replacements: dict[str, str])
     return text.encode("utf-8")
 
 
-def _set_cell_text(cell, text: str):
+def _pdf_escape(text: str) -> str:
+    return str(text).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _extract_template_blocks(
+    template_path: Path,
+    replacements: dict[str, str],
+):
     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-    paragraphs = cell.findall("./w:p", ns)
-    if not paragraphs:
-        paragraphs = [ET.SubElement(cell, "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p")]
-    p = paragraphs[0]
-    for child in list(p):
-        p.remove(child)
-    r = ET.SubElement(p, "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}r")
-    t = ET.SubElement(r, "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
-    if str(text).strip() != str(text):
-        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    t.text = str(text)
+    with ZipFile(template_path, "r") as zin:
+        root = ET.fromstring(_replace_placeholders_in_xml(zin.read("word/document.xml"), replacements))
+
+    body = root.find("./w:body", ns)
+    blocks = []
+    table_idx = 0
+    for child in body:
+        tag = child.tag.split("}")[-1]
+        if tag == "p":
+            text = "".join(node.text or "" for node in child.findall(".//w:t", ns)).strip()
+            if not text:
+                blocks.append({"type": "spacer", "height": 8})
+                continue
+            blocks.append({"type": "paragraph", "text": text})
+        elif tag == "tbl":
+            blocks.append({"type": "table", "index": table_idx})
+            table_idx += 1
+    return blocks
 
 
-def _clone_row_with_values(table, template_row, values: list[str]):
-    row = ET.fromstring(ET.tostring(template_row))
-    cells = row.findall("./w:tc", {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"})
-    for idx, value in enumerate(values):
-        if idx < len(cells):
-            _set_cell_text(cells[idx], value)
-    table.append(row)
+def _estimate_text_width(text: str, font_size: float) -> float:
+    factor = 0.52
+    extra = sum(1 for ch in text if ch in "MW@#%&")
+    return (len(text) * factor + extra * 0.18) * font_size
 
 
-def generar_pagare_docx(
+def _wrap_text(text: str, max_width: float, font_size: float) -> list[str]:
+    words = text.split()
+    if not words:
+        return [""]
+    lines = []
+    current = words[0]
+    for word in words[1:]:
+        trial = f"{current} {word}"
+        if _estimate_text_width(trial, font_size) <= max_width:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+class SimplePDF:
+    def __init__(self, page_width=595, page_height=842, margin=42):
+        self.page_width = page_width
+        self.page_height = page_height
+        self.margin = margin
+        self.pages: list[list[str]] = [[]]
+        self.y = page_height - margin
+
+    def _current(self):
+        return self.pages[-1]
+
+    def new_page(self):
+        self.pages.append([])
+        self.y = self.page_height - self.margin
+
+    def ensure_space(self, height: float):
+        if self.y - height < self.margin:
+            self.new_page()
+
+    def add_line(self, text: str, font="F1", size=11, color=(0, 0, 0), x=None):
+        self.ensure_space(size + 6)
+        x = self.margin if x is None else x
+        self._current().append(f"{color[0]} {color[1]} {color[2]} rg")
+        self._current().append(f"BT /{font} {size} Tf {x} {self.y} Td ({_pdf_escape(text)}) Tj ET")
+        self.y -= size + 4
+
+    def add_paragraph(self, text: str, font="F1", size=11, color=(0, 0, 0), indent=0, spacing_after=4):
+        max_width = self.page_width - self.margin * 2 - indent
+        lines = _wrap_text(text, max_width, size)
+        for line in lines:
+            self.add_line(line, font=font, size=size, color=color, x=self.margin + indent)
+        self.y -= spacing_after
+
+    def add_spacer(self, height=8):
+        self.ensure_space(height)
+        self.y -= height
+
+    def add_table(self, headers: list[str], rows: list[list[str]], col_widths: list[int], title: str | None = None, header_font_size=10, body_font_size=10):
+        blue = (0.05, 0.27, 0.50)
+        table_width = sum(col_widths)
+        row_height = 22
+        if title:
+            self.ensure_space(28)
+            self._current().append(f"{blue[0]} {blue[1]} {blue[2]} rg")
+            self._current().append(f"{self.margin} {self.y - 16} {table_width} 18 re f")
+            self._current().append("1 1 1 rg")
+            self._current().append(f"BT /F2 11 Tf {self.margin + (table_width/2) - 90} {self.y - 11} Td ({_pdf_escape(title)}) Tj ET")
+            self.y -= 28
+
+        total_height = row_height * (1 + len(rows))
+        self.ensure_space(total_height + 6)
+        top = self.y
+        self._current().append(f"{blue[0]} {blue[1]} {blue[2]} rg")
+        self._current().append(f"{self.margin} {top - row_height} {table_width} {row_height} re f")
+        self._current().append("0 0 0 RG 0.8 w")
+
+        for row_idx in range(len(rows) + 2):
+            yy = top - row_idx * row_height
+            self._current().append(f"{self.margin} {yy} m {self.margin + table_width} {yy} l S")
+
+        xpos = self.margin
+        self._current().append(f"{xpos} {top} m {xpos} {top - total_height} l S")
+        for width in col_widths:
+            xpos += width
+            self._current().append(f"{xpos} {top} m {xpos} {top - total_height} l S")
+
+        xpos = self.margin
+        for header, width in zip(headers, col_widths):
+            self._current().append("1 1 1 rg")
+            header_lines = _wrap_text(header, width - 8, header_font_size)
+            for i, line in enumerate(header_lines[:2]):
+                yy = top - 14 - (i * 9)
+                self._current().append(f"BT /F2 {header_font_size} Tf {xpos + 4} {yy} Td ({_pdf_escape(line)}) Tj ET")
+            xpos += width
+
+        ypos = top - row_height
+        for row in rows:
+            xpos = self.margin
+            for cell, width in zip(row, col_widths):
+                self._current().append("0 0 0 rg")
+                cell_lines = _wrap_text(str(cell), width - 8, body_font_size)
+                for i, line in enumerate(cell_lines[:2]):
+                    yy = ypos - 14 - (i * 9)
+                    self._current().append(f"BT /F1 {body_font_size} Tf {xpos + 4} {yy} Td ({_pdf_escape(line)}) Tj ET")
+                xpos += width
+            ypos -= row_height
+        self.y = top - total_height - 10
+
+
+def generar_pagare_pdf(
     template_path: Path,
     cronograma_export: pd.DataFrame,
     plan_export: pd.DataFrame,
@@ -282,111 +400,9 @@ def generar_pagare_docx(
         "{cedula_cliente}": "______________________________",
     }
 
+    blocks = _extract_template_blocks(template_path, replacements)
     cronograma_rows = [
-        [
-            str(idx),
-            pd.to_datetime(row["Fecha"]).strftime("%d/%m/%Y"),
-            _format_currency_docx(row["Cantidad"]),
-            str(row["Concepto"]),
-        ]
-        for idx, (_, row) in enumerate(cronograma_export.iterrows(), start=1)
-    ]
-
-    plan_rows = [
-        [
-            "",
-            pd.to_datetime(row["Fecha Límite de Pago"]).strftime("%d/%m/%Y"),
-            _format_currency_pdf(row["Pago a Banco"]),
-            _format_currency_pdf(row["Comisión de Éxito"]),
-            _format_currency_pdf(row["Comisión Mensual"]),
-            _format_currency_pdf(row["Apartado Requerido"]),
-        ]
-        for _, row in plan_export.iterrows()
-    ]
-
-    out = BytesIO()
-    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-    with ZipFile(template_path, "r") as zin, ZipFile(out, "w") as zout:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if item.filename == "word/document.xml":
-                root = ET.fromstring(_replace_placeholders_in_xml(data, replacements))
-                tables = root.findall(".//w:tbl", ns)
-                if len(tables) >= 2:
-                    for table, rows in [(tables[0], cronograma_rows), (tables[1], plan_rows)]:
-                        existing_rows = table.findall("./w:tr", ns)
-                        if len(existing_rows) >= 2:
-                            template_row = existing_rows[1]
-                            for extra_row in existing_rows[1:]:
-                                table.remove(extra_row)
-                            if rows:
-                                for values in rows:
-                                    _clone_row_with_values(table, template_row, values)
-                            else:
-                                _clone_row_with_values(table, template_row, [""] * len(template_row.findall("./w:tc", ns)))
-                data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-            zout.writestr(item, data)
-    return out.getvalue()
-
-
-def _pdf_escape(text: str) -> str:
-    return str(text).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-
-
-def _draw_pdf_table(commands: list[str], x: int, y: int, col_widths: list[int], headers: list[str], rows: list[list[str]], title: str | None = None):
-    row_height = 22
-    page_width = 595
-    if title:
-        table_width = sum(col_widths)
-        commands.append("0.05 0.27 0.50 rg")
-        commands.append(f"{x} {y - 18} {table_width} 18 re f")
-        commands.append("1 1 1 rg")
-        commands.append(f"BT /F2 11 Tf {x + 6} {y - 13} Td ({_pdf_escape(title)}) Tj ET")
-        commands.append("0 0 0 rg")
-        y -= 28
-    total_rows = 1 + len(rows)
-    table_height = row_height * total_rows
-    commands.append("0.05 0.27 0.50 rg")
-    commands.append(f"{x} {y - row_height} {sum(col_widths)} {row_height} re f")
-    commands.append("0 0 0 RG 0.8 w")
-    commands.append(f"{x} {y} m {x + sum(col_widths)} {y} l S")
-    for r in range(total_rows + 1):
-        yy = y - (r * row_height)
-        commands.append(f"{x} {yy} m {x + sum(col_widths)} {yy} l S")
-    cx = x
-    for width in [0] + col_widths:
-        commands.append(f"{cx} {y} m {cx} {y - table_height} l S")
-        cx += width
-    commands.append(f"{x + sum(col_widths)} {y} m {x + sum(col_widths)} {y - table_height} l S")
-
-    tx = x
-    for header, width in zip(headers, col_widths):
-        commands.append("1 1 1 rg")
-        commands.append(f"BT /F2 10 Tf {tx + 4} {y - 15} Td ({_pdf_escape(header)}) Tj ET")
-        tx += width
-    commands.append("0 0 0 rg")
-
-    current_y = y - row_height
-    for row in rows:
-        tx = x
-        for cell, width in zip(row, col_widths):
-            commands.append(f"BT /F1 10 Tf {tx + 4} {current_y - 15} Td ({_pdf_escape(cell)}) Tj ET")
-            tx += width
-        current_y -= row_height
-    return y - table_height - 18
-
-
-def generar_pagare_pdf(
-    cronograma_export: pd.DataFrame,
-    plan_export: pd.DataFrame,
-    referencia: str,
-    fecha_documento: date,
-    entidad_financiera: str,
-    pago_banco: float,
-    comision_total: float,
-):
-    cronograma_rows = [
-        [str(idx), pd.to_datetime(row["Fecha"]).strftime("%d/%m/%Y"), _format_currency_pdf(row["Cantidad"]), str(row["Concepto"])]
+        [str(idx), pd.to_datetime(row["Fecha"]).strftime("%d/%m/%Y"), _format_currency_docx(row["Cantidad"]), str(row["Concepto"])]
         for idx, (_, row) in enumerate(cronograma_export.iterrows(), start=1)
     ]
     plan_rows = [
@@ -394,40 +410,75 @@ def generar_pagare_pdf(
         for _, row in plan_export.iterrows()
     ]
 
-    commands = [
-        "BT /F2 14 Tf 40 800 Td (Liquidación de Deuda Ref. No. " + _pdf_escape(referencia) + ") Tj ET",
-        "BT /F1 10 Tf 40 784 Td (Fecha del documento: " + _pdf_escape(fecha_documento.isoformat()) + ") Tj ET",
-        "BT /F1 10 Tf 40 770 Td (Entidad financiera: " + _pdf_escape(entidad_financiera or "") + ") Tj ET",
-        "BT /F1 10 Tf 40 756 Td (Pago a la entidad financiera: " + _pdf_escape(_format_currency_pdf(pago_banco)) + ") Tj ET",
-        "BT /F1 10 Tf 40 742 Td (Comisión total: " + _pdf_escape(_format_currency_pdf(comision_total)) + ") Tj ET",
+    pdf = SimplePDF()
+    blue = (0.05, 0.27, 0.50)
+    for block in blocks:
+        if block["type"] == "spacer":
+            pdf.add_spacer(block["height"])
+            continue
+        if block["type"] == "table":
+            if block["index"] == 0:
+                pdf.add_table(
+                    headers=["N°", "Fecha", "Cantidad", "Concepto"],
+                    rows=cronograma_rows or [["", "", "", ""]],
+                    col_widths=[24, 72, 152, 263],
+                    body_font_size=9.5,
+                    header_font_size=9.5,
+                )
+            elif block["index"] == 1:
+                pdf.add_table(
+                    headers=["Fecha de Depósito", "Fecha Límite de Pago", "Pago a Banco", "Comisión de Éxito", "Comisión Mensual", "Apartado Requerido"],
+                    rows=plan_rows or [["", "", "", "", "", ""]],
+                    col_widths=[90, 102, 86, 102, 102, 113],
+                    title="PLAN DE LIQUIDACIÓN ESTRUCTURADA",
+                    body_font_size=9.3,
+                    header_font_size=8.4,
+                )
+            continue
+
+        text = block["text"]
+        stripped = text.strip()
+        is_major_heading = stripped.isupper() and len(stripped) < 45
+        is_clause_heading = stripped.startswith(("Primera:", "Segunda:", "Tercera:", "Cuarta:", "Quinta:", "Sexta:", "Séptima:", "Octava:", "Novena:", "Décima:"))
+
+        if is_major_heading:
+            pdf.add_paragraph(stripped, font="F2", size=13, color=blue, spacing_after=6)
+        elif is_clause_heading:
+            pdf.add_paragraph(stripped, font="F2", size=11, color=blue, spacing_after=3)
+        else:
+            pdf.add_paragraph(stripped, font="F1", size=10.5, color=(0, 0, 0), spacing_after=3)
+
+    page_objects = []
+    for page_commands in pdf.pages:
+        stream = "\n".join(page_commands).encode("latin-1", errors="replace")
+        page_objects.append(stream)
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{' '.join(f'{3 + idx * 2} 0 R' for idx in range(len(page_objects)))}] /Count {len(page_objects)} >>".encode("latin-1"),
     ]
-    y = 710
-    y = _draw_pdf_table(commands, 40, y, [28, 90, 110, 287], ["N°", "Fecha", "Cantidad", "Concepto"], cronograma_rows)
-    _draw_pdf_table(commands, 40, y - 8, [85, 95, 85, 95, 95, 100], ["Fecha Depósito", "Fecha Límite", "Pago Banco", "Comisión Éxito", "Comisión Mensual", "Apartado Req."], plan_rows, title="PLAN DE LIQUIDACIÓN ESTRUCTURADA")
+    for idx, stream in enumerate(page_objects):
+        page_obj_num = 3 + idx * 2
+        content_obj_num = page_obj_num + 1
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pdf.page_width} {pdf.page_height}] /Resources << /Font << /F1 {3 + len(page_objects) * 2} 0 R /F2 {4 + len(page_objects) * 2} 0 R >> >> /Contents {content_obj_num} 0 R >>".encode("latin-1"))
+        objects.append(f"<< /Length {len(stream)} >>\nstream\n".encode("latin-1") + stream + b"\nendstream")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Times-Bold >>")
 
-    stream = "\n".join(commands).encode("latin-1", errors="replace")
-    objects = []
-    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
-    objects.append(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
-    objects.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>")
-    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
-    objects.append(f"<< /Length {len(stream)} >>\nstream\n".encode("latin-1") + stream + b"\nendstream")
-
-    pdf = bytearray(b"%PDF-1.4\n")
+    raw = bytearray(b"%PDF-1.4\n")
     offsets = [0]
     for idx, obj in enumerate(objects, start=1):
-        offsets.append(len(pdf))
-        pdf.extend(f"{idx} 0 obj\n".encode("latin-1"))
-        pdf.extend(obj)
-        pdf.extend(b"\nendobj\n")
-    xref_start = len(pdf)
-    pdf.extend(f"xref\n0 {len(objects)+1}\n".encode("latin-1"))
-    pdf.extend(b"0000000000 65535 f \n")
+        offsets.append(len(raw))
+        raw.extend(f"{idx} 0 obj\n".encode("latin-1"))
+        raw.extend(obj)
+        raw.extend(b"\nendobj\n")
+    xref_start = len(raw)
+    raw.extend(f"xref\n0 {len(objects)+1}\n".encode("latin-1"))
+    raw.extend(b"0000000000 65535 f \n")
     for off in offsets[1:]:
-        pdf.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
-    pdf.extend(f"trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode("latin-1"))
-    return bytes(pdf)
+        raw.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
+    raw.extend(f"trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode("latin-1"))
+    return bytes(raw)
 #######################################################################################################################################################
 #######################################################################################################################################################
 def construir_plan_liquidacion(cronograma_df: pd.DataFrame, comision_mensual: float) -> pd.DataFrame:
@@ -1581,7 +1632,7 @@ if cronograma_export.empty or plan_export.empty:
     st.info("Completa primero el cronograma y el plan de liquidación para habilitar la descarga del documento.")
 else:
     try:
-        docx_bytes = generar_pagare_docx(
+        pdf_bytes = generar_pagare_pdf(
             template_path=DOCX_TEMPLATE_PATH,
             cronograma_export=cronograma_export,
             plan_export=plan_export,
@@ -1591,33 +1642,14 @@ else:
             pago_banco=pago_banco,
             comision_total=comision_exito,
         )
-        pdf_bytes = generar_pagare_pdf(
-            cronograma_export=cronograma_export,
-            plan_export=plan_export,
-            referencia=str(ref_input),
-            fecha_documento=date.today(),
-            entidad_financiera=entidad_financiera_doc,
-            pago_banco=pago_banco,
-            comision_total=comision_exito,
+        st.download_button(
+            "⬇️ Descargar pagaré en PDF",
+            data=pdf_bytes,
+            file_name=f"{nombre_archivo_base}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
         )
-        d1, d2 = st.columns(2)
-        with d1:
-            st.download_button(
-                "⬇️ Descargar DOCX",
-                data=docx_bytes,
-                file_name=f"{nombre_archivo_base}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
-        with d2:
-            st.download_button(
-                "⬇️ Descargar PDF",
-                data=pdf_bytes,
-                file_name=f"{nombre_archivo_base}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        st.caption("Por ahora el documento llena y exporta las dos tablas con la referencia y montos calculados; los demás datos del cliente quedan listos para conectarlos en el siguiente paso.")
+        st.caption("La descarga genera un único PDF con el contenido completo del pagaré y las tablas armadas sobre la estructura de la plantilla.")
     except Exception as exc:
         st.error(f"No pude generar el documento de salida: {exc}")
 
