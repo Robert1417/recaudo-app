@@ -139,7 +139,7 @@ def _file_version(path: Path) -> str:
         return f"{stat.st_mtime_ns}-{stat.st_size}"
     except FileNotFoundError:
         return "missing"
-########################################################################################################################        
+##################################################################################################################################################################################        
 def _sum_rounded_parts(values, digits=2):
     rounded = [round(float(v), digits) for v in values]
     if rounded:
@@ -198,6 +198,45 @@ def _parse_amount_input(value) -> float:
     if cleaned in {"", "-"}:
         return 0.0
     return float(cleaned)
+
+
+def _format_currency0(value) -> str:
+    return f"$ {int(round(float(value or 0.0))):,}"
+
+
+def construir_plan_liquidacion(cronograma_df: pd.DataFrame, comision_mensual: float) -> pd.DataFrame:
+    if cronograma_df.empty:
+        return pd.DataFrame(columns=[
+            "plan_key",
+            "Fecha de Depósito",
+            "Fecha Límite de Pago",
+            "Pago a Banco",
+            "Comisión de Éxito",
+            "Comisión Mensual",
+            "Apartado Requerido",
+        ])
+
+    df = cronograma_df[cronograma_df["Cantidad"] > 0.005].copy()
+    df["Fecha"] = pd.to_datetime(df["Fecha"])
+    df["periodo"] = df["Fecha"].dt.to_period("M").astype(str)
+
+    filas = []
+    for periodo, group in df.groupby("periodo", sort=True):
+        fecha_limite = group["Fecha"].min().date()
+        pago_banco_mes = float(group.loc[group["Concepto"].str.contains("Entidad Financiera", na=False), "Cantidad"].sum())
+        comision_exito_mes = float(group.loc[group["Concepto"].str.contains("Comisión Resuelve", na=False), "Cantidad"].sum())
+        comision_mensual_mes = float(comision_mensual or 0.0)
+        filas.append({
+            "plan_key": periodo,
+            "Fecha de Depósito": "",
+            "Fecha Límite de Pago": fecha_limite,
+            "Pago a Banco": pago_banco_mes,
+            "Comisión de Éxito": comision_exito_mes,
+            "Comisión Mensual": comision_mensual_mes,
+            "Apartado Requerido": pago_banco_mes + comision_exito_mes + comision_mensual_mes,
+        })
+
+    return pd.DataFrame(filas)
 
 
 def construir_cronograma_pagos(
@@ -336,7 +375,7 @@ def aplicar_overrides_cronograma(
 
     df = df.sort_values(by=["Fecha", "orden"]).reset_index(drop=True)
     return df, advertencias
-######################################################################################################################################    
+#####################################################################################################################################################################################    
 
 def _model_version() -> str:
     return _file_version(MODEL_PATH)
@@ -1238,6 +1277,64 @@ if not cronograma_view.empty:
     )
 else:
     st.info("Aún no hay valores suficientes para construir el cronograma.")
+
+st.markdown("### PLAN DE LIQUIDACIÓN ESTRUCTURADA")
+
+if st.session_state.get("_plan_comision_mensual_ref") != comision_mensual:
+    st.session_state["_plan_comision_mensual_ref"] = comision_mensual
+    st.session_state.pop("plan_liquidacion_overrides", None)
+    st.session_state.pop("plan_liquidacion_editor", None)
+
+plan_df = construir_plan_liquidacion(cronograma_editado, comision_mensual)
+plan_overrides = st.session_state.get("plan_liquidacion_overrides", {})
+plan_editor_state = st.session_state.get("plan_liquidacion_editor", {})
+
+for row_position_str, cambios in (plan_editor_state.get("edited_rows", {}) or {}).items():
+    try:
+        row_position = int(row_position_str)
+    except (TypeError, ValueError):
+        continue
+    if row_position < 0 or row_position >= len(plan_df):
+        continue
+    plan_key = str(plan_df.iloc[row_position]["plan_key"])
+    if "Apartado Requerido" in cambios:
+        plan_overrides[plan_key] = _parse_amount_input(cambios["Apartado Requerido"])
+
+st.session_state["plan_liquidacion_overrides"] = plan_overrides
+
+if not plan_df.empty:
+    plan_df["Apartado Requerido"] = plan_df.apply(
+        lambda row: float(plan_overrides.get(str(row["plan_key"]), row["Pago a Banco"] + row["Comisión de Éxito"] + row["Comisión Mensual"])),
+        axis=1,
+    )
+
+    plan_view = plan_df.copy()
+    plan_view["Fecha Límite de Pago"] = pd.to_datetime(plan_view["Fecha Límite de Pago"])
+    plan_view["Pago a Banco"] = plan_view["Pago a Banco"].map(_format_currency0)
+    plan_view["Comisión de Éxito"] = plan_view["Comisión de Éxito"].map(_format_currency0)
+    plan_view["Comisión Mensual"] = plan_view["Comisión Mensual"].map(_format_currency0)
+    plan_view["Apartado Requerido"] = plan_view["Apartado Requerido"].map(_format_currency0)
+    plan_view = plan_view.drop(columns=["plan_key"])
+    plan_view.index = range(1, len(plan_view) + 1)
+
+    st.data_editor(
+        plan_view,
+        key="plan_liquidacion_editor",
+        use_container_width=True,
+        num_rows="fixed",
+        hide_index=False,
+        column_config={
+            "Fecha de Depósito": st.column_config.TextColumn("Fecha de Depósito"),
+            "Fecha Límite de Pago": st.column_config.DateColumn("Fecha Límite de Pago", format="DD/MM/YYYY"),
+            "Pago a Banco": st.column_config.TextColumn("Pago a Banco", disabled=True),
+            "Comisión de Éxito": st.column_config.TextColumn("Comisión de Éxito", disabled=True),
+            "Comisión Mensual": st.column_config.TextColumn("Comisión Mensual", disabled=True),
+            "Apartado Requerido": st.column_config.TextColumn("Apartado Requerido"),
+        },
+        disabled=["Pago a Banco", "Comisión de Éxito", "Comisión Mensual"],
+    )
+else:
+    st.info("Aún no hay datos suficientes para construir el plan de liquidación.")
 #############################################################################################################################################################################    
 # =================== 7) Predicción con el modelo ===================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
