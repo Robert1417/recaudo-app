@@ -256,25 +256,42 @@ def aplicar_overrides_cronograma(
 
     banco_future_mask = (df["tipo"] == "banco") & (df["months_ahead"] > 0)
     banco_ocupados = set()
+    banco_offsets_by_key = {}
     for idx in df.index[banco_future_mask]:
         if bool(df.at[idx, "fecha_editada"]):
             fecha_banco = pd.to_datetime(df.at[idx, "Fecha"]).date()
             offset = max(1, _month_offset(fecha_inicial, fecha_banco))
             banco_ocupados.add(offset)
+            banco_offsets_by_key[str(df.at[idx, "row_key"])] = offset
         else:
             offset = int(df.at[idx, "months_ahead"])
             banco_ocupados.add(offset)
+            banco_offsets_by_key[str(df.at[idx, "row_key"])] = offset
             df.at[idx, "Fecha"] = _day_of_month(fecha_inicial, offset, dia_pago_banco)
 
     comision_future_mask = (df["tipo"] == "comision") & (df["months_ahead"] > 0)
+    comision_linked_mask = comision_future_mask & df["linked_bank_key"].notna()
     offsets_comision_fijos = set()
+    for idx in df.index[comision_linked_mask]:
+        linked_bank_key = str(df.at[idx, "linked_bank_key"])
+        linked_offset = banco_offsets_by_key.get(linked_bank_key)
+        if linked_offset is None:
+            continue
+        if bool(df.at[idx, "fecha_editada"]):
+            fecha_comision = pd.to_datetime(df.at[idx, "Fecha"]).date()
+            offsets_comision_fijos.add(max(1, _month_offset(fecha_inicial, fecha_comision)))
+        else:
+            df.at[idx, "months_ahead"] = linked_offset
+            df.at[idx, "Fecha"] = _day_of_month(fecha_inicial, linked_offset, dia_pago_comision)
+
     for idx in df.index[comision_future_mask]:
         if bool(df.at[idx, "fecha_editada"]):
             fecha_comision = pd.to_datetime(df.at[idx, "Fecha"]).date()
             offsets_comision_fijos.add(max(1, _month_offset(fecha_inicial, fecha_comision)))
 
     siguiente_offset = 1
-    for idx in df.index[comision_future_mask]:
+    comision_regular_mask = comision_future_mask & df["linked_bank_key"].isna()
+    for idx in df.index[comision_regular_mask]:
         if bool(df.at[idx, "fecha_editada"]):
             continue
         while siguiente_offset in banco_ocupados or siguiente_offset in offsets_comision_fijos:
@@ -296,6 +313,7 @@ def construir_cronograma_pagos(
     primer_pago_banco: float,
     comision_total: float,
     comision_inicial: float,
+    apartado_mensual: float,
     dia_pago_banco: int | None = None,
     dia_pago_comision: int | None = None,
 ):
@@ -318,10 +336,24 @@ def construir_cronograma_pagos(
             [banco_restante / meses_banco_restantes] * meses_banco_restantes
         )
 
+    complementos_objetivo = []
+    for valor_banco in pagos_banco[1:]:
+        diferencia = max(float(apartado_mensual or 0.0) - float(valor_banco or 0.0), 0.0)
+        complementos_objetivo.append(diferencia if diferencia >= 10_000 else 0.0)
+
+    total_complementos_objetivo = sum(complementos_objetivo)
+    if total_complementos_objetivo > 0 and comision_restante > 0:
+        factor_complemento = min(1.0, comision_restante / total_complementos_objetivo)
+        complementos_banco = _sum_rounded_parts([valor * factor_complemento for valor in complementos_objetivo])
+    else:
+        complementos_banco = [0.0] * len(complementos_objetivo)
+
+    comision_restante_regular = max(0.0, comision_restante - sum(complementos_banco))
+
     pagos_comision = [comision_inicial]
     if meses_comision_restantes > 0:
         pagos_comision += _sum_rounded_parts(
-            [comision_restante / meses_comision_restantes] * meses_comision_restantes
+            [comision_restante_regular / meses_comision_restantes] * meses_comision_restantes
         )
 
     filas = []
@@ -336,6 +368,7 @@ def construir_cronograma_pagos(
                 "orden": len(filas),
                 "months_ahead": 0,
                 "row_key": "banco_0",
+                "linked_bank_key": None,
             }
         )
     if pagos_comision[0] > 0:
@@ -348,6 +381,7 @@ def construir_cronograma_pagos(
                 "orden": len(filas),
                 "months_ahead": 0,
                 "row_key": "comision_0",
+                "linked_bank_key": None,
             }
         )
 
@@ -363,8 +397,24 @@ def construir_cronograma_pagos(
                 "orden": len(filas),
                 "months_ahead": idx,
                 "row_key": f"banco_{idx}",
+                "linked_bank_key": None,
             }
         )
+
+        complemento = complementos_banco[idx - 1] if (idx - 1) < len(complementos_banco) else 0.0
+        if complemento > 0:
+            filas.append(
+                {
+                    "Fecha": _day_of_month(fecha_inicial, idx, dia_pago_comision),
+                    "Cantidad": complemento,
+                    "Concepto": "Comisión Resuelve",
+                    "tipo": "comision",
+                    "orden": len(filas),
+                    "months_ahead": idx,
+                    "row_key": f"comision_gap_{idx}",
+                    "linked_bank_key": f"banco_{idx}",
+                }
+            )
 
     for idx, valor in enumerate(pagos_comision[1:], start=1):
         if valor <= 0:
@@ -379,18 +429,20 @@ def construir_cronograma_pagos(
                 "orden": len(filas),
                 "months_ahead": offset_meses,
                 "row_key": f"comision_{idx}",
+                "linked_bank_key": None,
             }
         )
 
     cronograma = pd.DataFrame(filas)
     if cronograma.empty:
-        cronograma = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto", "tipo", "orden", "months_ahead", "row_key"])
+        cronograma = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto", "tipo", "orden", "months_ahead", "row_key", "linked_bank_key"])
     return cronograma, {
         "meses_banco_restantes": meses_banco_restantes,
         "meses_comision_restantes": meses_comision_restantes,
         "banco_restante": banco_restante,
         "comision_restante": comision_restante,
     }
+
 
 def _model_version() -> str:
     return _file_version(MODEL_PATH)
@@ -1243,6 +1295,7 @@ cronograma_df, cronograma_meta = construir_cronograma_pagos(
     primer_pago_banco=primer_pago_banco,
     comision_total=comision_exito,
     comision_inicial=ce_inicial,
+    apartado_mensual=apartado_mensual,
     dia_pago_banco=dia_pago_banco,
     dia_pago_comision=dia_pago_comision,
 )
@@ -1281,14 +1334,16 @@ cronograma_base_editado, _ = aplicar_overrides_cronograma(
     comision_inicial_input=ce_inicial,
 )
 
+cronograma_base_visible = cronograma_base_editado[cronograma_base_editado["Cantidad"] > 0.005].reset_index(drop=True)
+
 for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {}) or {}).items():
     try:
         row_position = int(row_position_str)
     except (TypeError, ValueError):
         continue
-    if row_position < 0 or row_position >= len(cronograma_base_editado):
+    if row_position < 0 or row_position >= len(cronograma_base_visible):
         continue
-    row = cronograma_base_editado.iloc[row_position]
+    row = cronograma_base_visible.iloc[row_position]
     if int(row["months_ahead"]) == 0:
         continue
     row_key = str(row["row_key"])
@@ -1312,7 +1367,7 @@ cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
 for advertencia in advertencias_cronograma:
     st.warning(advertencia)
 
-cronograma_view = cronograma_editado[["Fecha", "Cantidad", "Concepto"]].copy()
+cronograma_view = cronograma_editado[cronograma_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
 
 if not cronograma_view.empty:
     cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
