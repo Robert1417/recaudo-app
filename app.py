@@ -11,6 +11,9 @@ from joblib import load
 import re  # ✅ NUEVO
 from datetime import datetime
 import os
+from io import BytesIO
+from zipfile import ZipFile
+import xml.etree.ElementTree as ET
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -109,6 +112,7 @@ DATA_CSV     = Path("data/cartera_asignada_filtrada.csv")
 MODEL_PATH   = Path("mlp_recaudo_pipeline.joblib")
 META_PATH    = Path("mlp_recaudo_meta.json")
 LOG_PATH     = Path("data/logs/logs_calculadora.csv")
+DOCX_TEMPLATE_PATH = Path("data/Documento Estructurados en Blanco.docx")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB = "Historico Calculadora"
 GOOGLE_SHEETS_SCOPES = [
@@ -203,7 +207,229 @@ def _parse_amount_input(value) -> float:
 def _format_currency0(value) -> str:
     return f"$ {int(round(float(value or 0.0))):,}"
 
+#######################################################################################################################################################
+#######################################################################################################################################################
+def _format_currency_docx(value) -> str:
+    amount = float(value or 0.0)
+    formatted = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"${formatted} COP"
 
+
+def _format_currency_pdf(value) -> str:
+    amount = int(round(float(value or 0.0)))
+    return f"${amount:,}"
+
+
+def _replace_placeholders_in_xml(xml_bytes: bytes, replacements: dict[str, str]) -> bytes:
+    text = xml_bytes.decode("utf-8")
+    for key, value in replacements.items():
+        text = text.replace(key, str(value))
+    return text.encode("utf-8")
+
+
+def _set_cell_text(cell, text: str):
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    paragraphs = cell.findall("./w:p", ns)
+    if not paragraphs:
+        paragraphs = [ET.SubElement(cell, "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p")]
+    p = paragraphs[0]
+    for child in list(p):
+        p.remove(child)
+    r = ET.SubElement(p, "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}r")
+    t = ET.SubElement(r, "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
+    if str(text).strip() != str(text):
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    t.text = str(text)
+
+
+def _clone_row_with_values(table, template_row, values: list[str]):
+    row = ET.fromstring(ET.tostring(template_row))
+    cells = row.findall("./w:tc", {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"})
+    for idx, value in enumerate(values):
+        if idx < len(cells):
+            _set_cell_text(cells[idx], value)
+    table.append(row)
+
+
+def generar_pagare_docx(
+    template_path: Path,
+    cronograma_export: pd.DataFrame,
+    plan_export: pd.DataFrame,
+    referencia: str,
+    fecha_documento: date,
+    entidad_financiera: str,
+    pago_banco: float,
+    comision_total: float,
+):
+    if not template_path.exists():
+        raise FileNotFoundError(f"No encontré la plantilla {template_path}.")
+
+    replacements = {
+        "{dia_firma}": fecha_documento.strftime("%d"),
+        "{mes_firma}": fecha_documento.strftime("%m"),
+        "{anio_firma}": fecha_documento.strftime("%Y"),
+        "{referencia}": str(referencia),
+        "{entidad_financiera}": str(entidad_financiera or ""),
+        "{pago_banco}": _format_currency_docx(pago_banco),
+        "{comision_total}": _format_currency_docx(comision_total),
+        "{nombre_cliente}": "______________________________",
+        "{numero_producto}": "______________________________",
+        "{vehiculo}": "______________________________",
+        "{direccion_cliente}": "______________________________",
+        "{ciudad_cliente}": "______________________________",
+        "{correo_cliente}": "______________________________",
+        "{telefono_cliente}": "______________________________",
+        "{cedula_cliente}": "______________________________",
+    }
+
+    cronograma_rows = [
+        [
+            str(idx),
+            pd.to_datetime(row["Fecha"]).strftime("%d/%m/%Y"),
+            _format_currency_docx(row["Cantidad"]),
+            str(row["Concepto"]),
+        ]
+        for idx, (_, row) in enumerate(cronograma_export.iterrows(), start=1)
+    ]
+
+    plan_rows = [
+        [
+            "",
+            pd.to_datetime(row["Fecha Límite de Pago"]).strftime("%d/%m/%Y"),
+            _format_currency_pdf(row["Pago a Banco"]),
+            _format_currency_pdf(row["Comisión de Éxito"]),
+            _format_currency_pdf(row["Comisión Mensual"]),
+            _format_currency_pdf(row["Apartado Requerido"]),
+        ]
+        for _, row in plan_export.iterrows()
+    ]
+
+    out = BytesIO()
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    with ZipFile(template_path, "r") as zin, ZipFile(out, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "word/document.xml":
+                root = ET.fromstring(_replace_placeholders_in_xml(data, replacements))
+                tables = root.findall(".//w:tbl", ns)
+                if len(tables) >= 2:
+                    for table, rows in [(tables[0], cronograma_rows), (tables[1], plan_rows)]:
+                        existing_rows = table.findall("./w:tr", ns)
+                        if len(existing_rows) >= 2:
+                            template_row = existing_rows[1]
+                            for extra_row in existing_rows[1:]:
+                                table.remove(extra_row)
+                            if rows:
+                                for values in rows:
+                                    _clone_row_with_values(table, template_row, values)
+                            else:
+                                _clone_row_with_values(table, template_row, [""] * len(template_row.findall("./w:tc", ns)))
+                data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+            zout.writestr(item, data)
+    return out.getvalue()
+
+
+def _pdf_escape(text: str) -> str:
+    return str(text).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _draw_pdf_table(commands: list[str], x: int, y: int, col_widths: list[int], headers: list[str], rows: list[list[str]], title: str | None = None):
+    row_height = 22
+    page_width = 595
+    if title:
+        table_width = sum(col_widths)
+        commands.append("0.05 0.27 0.50 rg")
+        commands.append(f"{x} {y - 18} {table_width} 18 re f")
+        commands.append("1 1 1 rg")
+        commands.append(f"BT /F2 11 Tf {x + 6} {y - 13} Td ({_pdf_escape(title)}) Tj ET")
+        commands.append("0 0 0 rg")
+        y -= 28
+    total_rows = 1 + len(rows)
+    table_height = row_height * total_rows
+    commands.append("0.05 0.27 0.50 rg")
+    commands.append(f"{x} {y - row_height} {sum(col_widths)} {row_height} re f")
+    commands.append("0 0 0 RG 0.8 w")
+    commands.append(f"{x} {y} m {x + sum(col_widths)} {y} l S")
+    for r in range(total_rows + 1):
+        yy = y - (r * row_height)
+        commands.append(f"{x} {yy} m {x + sum(col_widths)} {yy} l S")
+    cx = x
+    for width in [0] + col_widths:
+        commands.append(f"{cx} {y} m {cx} {y - table_height} l S")
+        cx += width
+    commands.append(f"{x + sum(col_widths)} {y} m {x + sum(col_widths)} {y - table_height} l S")
+
+    tx = x
+    for header, width in zip(headers, col_widths):
+        commands.append("1 1 1 rg")
+        commands.append(f"BT /F2 10 Tf {tx + 4} {y - 15} Td ({_pdf_escape(header)}) Tj ET")
+        tx += width
+    commands.append("0 0 0 rg")
+
+    current_y = y - row_height
+    for row in rows:
+        tx = x
+        for cell, width in zip(row, col_widths):
+            commands.append(f"BT /F1 10 Tf {tx + 4} {current_y - 15} Td ({_pdf_escape(cell)}) Tj ET")
+            tx += width
+        current_y -= row_height
+    return y - table_height - 18
+
+
+def generar_pagare_pdf(
+    cronograma_export: pd.DataFrame,
+    plan_export: pd.DataFrame,
+    referencia: str,
+    fecha_documento: date,
+    entidad_financiera: str,
+    pago_banco: float,
+    comision_total: float,
+):
+    cronograma_rows = [
+        [str(idx), pd.to_datetime(row["Fecha"]).strftime("%d/%m/%Y"), _format_currency_pdf(row["Cantidad"]), str(row["Concepto"])]
+        for idx, (_, row) in enumerate(cronograma_export.iterrows(), start=1)
+    ]
+    plan_rows = [
+        ["", pd.to_datetime(row["Fecha Límite de Pago"]).strftime("%d/%m/%Y"), _format_currency_pdf(row["Pago a Banco"]), _format_currency_pdf(row["Comisión de Éxito"]), _format_currency_pdf(row["Comisión Mensual"]), _format_currency_pdf(row["Apartado Requerido"])]
+        for _, row in plan_export.iterrows()
+    ]
+
+    commands = [
+        "BT /F2 14 Tf 40 800 Td (Liquidación de Deuda Ref. No. " + _pdf_escape(referencia) + ") Tj ET",
+        "BT /F1 10 Tf 40 784 Td (Fecha del documento: " + _pdf_escape(fecha_documento.isoformat()) + ") Tj ET",
+        "BT /F1 10 Tf 40 770 Td (Entidad financiera: " + _pdf_escape(entidad_financiera or "") + ") Tj ET",
+        "BT /F1 10 Tf 40 756 Td (Pago a la entidad financiera: " + _pdf_escape(_format_currency_pdf(pago_banco)) + ") Tj ET",
+        "BT /F1 10 Tf 40 742 Td (Comisión total: " + _pdf_escape(_format_currency_pdf(comision_total)) + ") Tj ET",
+    ]
+    y = 710
+    y = _draw_pdf_table(commands, 40, y, [28, 90, 110, 287], ["N°", "Fecha", "Cantidad", "Concepto"], cronograma_rows)
+    _draw_pdf_table(commands, 40, y - 8, [85, 95, 85, 95, 95, 100], ["Fecha Depósito", "Fecha Límite", "Pago Banco", "Comisión Éxito", "Comisión Mensual", "Apartado Req."], plan_rows, title="PLAN DE LIQUIDACIÓN ESTRUCTURADA")
+
+    stream = "\n".join(commands).encode("latin-1", errors="replace")
+    objects = []
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    objects.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+    objects.append(f"<< /Length {len(stream)} >>\nstream\n".encode("latin-1") + stream + b"\nendstream")
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for idx, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{idx} 0 obj\n".encode("latin-1"))
+        pdf.extend(obj)
+        pdf.extend(b"\nendobj\n")
+    xref_start = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects)+1}\n".encode("latin-1"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        pdf.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
+    pdf.extend(f"trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode("latin-1"))
+    return bytes(pdf)
+#######################################################################################################################################################
+#######################################################################################################################################################
 def construir_plan_liquidacion(cronograma_df: pd.DataFrame, comision_mensual: float) -> pd.DataFrame:
     if cronograma_df.empty:
         return pd.DataFrame(columns=[
@@ -1329,6 +1555,75 @@ if not plan_df.empty:
 else:
     st.info("Aún no hay datos suficientes para construir el plan de liquidación.")
 #############################################################################################################################################################################    
+
+#######################################################################################################################################################
+#######################################################################################################################################################
+st.markdown("### 6.2) Generar documento")
+entidad_financiera_doc = str(fila_primera[col_banco]) if col_banco and pd.notna(fila_primera[col_banco]) else ""
+nombre_archivo_base = f"Pagare{date.today().isoformat()} ref {ref_input}"
+
+cronograma_export = cronograma_editado[cronograma_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
+plan_export = plan_df[[
+    "Fecha Límite de Pago",
+    "Pago a Banco",
+    "Comisión de Éxito",
+    "Comisión Mensual",
+    "Apartado Requerido",
+]].copy() if not plan_df.empty else pd.DataFrame(columns=[
+    "Fecha Límite de Pago",
+    "Pago a Banco",
+    "Comisión de Éxito",
+    "Comisión Mensual",
+    "Apartado Requerido",
+])
+
+if cronograma_export.empty or plan_export.empty:
+    st.info("Completa primero el cronograma y el plan de liquidación para habilitar la descarga del documento.")
+else:
+    try:
+        docx_bytes = generar_pagare_docx(
+            template_path=DOCX_TEMPLATE_PATH,
+            cronograma_export=cronograma_export,
+            plan_export=plan_export,
+            referencia=str(ref_input),
+            fecha_documento=date.today(),
+            entidad_financiera=entidad_financiera_doc,
+            pago_banco=pago_banco,
+            comision_total=comision_exito,
+        )
+        pdf_bytes = generar_pagare_pdf(
+            cronograma_export=cronograma_export,
+            plan_export=plan_export,
+            referencia=str(ref_input),
+            fecha_documento=date.today(),
+            entidad_financiera=entidad_financiera_doc,
+            pago_banco=pago_banco,
+            comision_total=comision_exito,
+        )
+        d1, d2 = st.columns(2)
+        with d1:
+            st.download_button(
+                "⬇️ Descargar DOCX",
+                data=docx_bytes,
+                file_name=f"{nombre_archivo_base}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        with d2:
+            st.download_button(
+                "⬇️ Descargar PDF",
+                data=pdf_bytes,
+                file_name=f"{nombre_archivo_base}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        st.caption("Por ahora el documento llena y exporta las dos tablas con la referencia y montos calculados; los demás datos del cliente quedan listos para conectarlos en el siguiente paso.")
+    except Exception as exc:
+        st.error(f"No pude generar el documento de salida: {exc}")
+
+
+#######################################################################################################################################################
+#######################################################################################################################################################
 # =================== 7) Predicción con el modelo ===================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
 
