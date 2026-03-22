@@ -129,6 +129,7 @@ MODEL_PATH   = Path("mlp_recaudo_pipeline.joblib")
 META_PATH    = Path("mlp_recaudo_meta.json")
 LOG_PATH     = Path("data/logs/logs_calculadora.csv")
 DOCX_TEMPLATE_PATH = Path("data/Documento Estructurados en Blanco.docx")
+CLIENTES_LOOKUP_PATH = Path("data/Consulta_F_Clientes_Parte_1.csv")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB = "Historico Calculadora"
 GOOGLE_SHEETS_SCOPES = [
@@ -312,6 +313,9 @@ def _build_document_context(
     vehiculo="",
     cedula_cliente="",
     correo_cliente="",
+    telefono_cliente="",
+    ciudad_cliente="",
+    direccion_cliente="",
 ) -> dict[str, str]:
     today = date.today()
     bancos_unicos = _join_unique_values(bancos)
@@ -330,6 +334,9 @@ def _build_document_context(
         "vehiculo": _smart_title_case(vehiculo),
         "cedula_cliente": str(cedula_cliente or ""),
         "correo_cliente": str(correo_cliente or ""),
+        "telefono_cliente": str(telefono_cliente or ""),
+        "ciudad_cliente": str(ciudad_cliente or ""),
+        "direccion_cliente": str(direccion_cliente or ""),
         "suma_comisiones": comision_total_text,
         "Suma_comisiones": comision_total_text,
         "suma comisiones": comision_total_text,
@@ -986,6 +993,57 @@ def load_repo_base(_version: str) -> pd.DataFrame | None:
     except Exception:
         # Si algo falla leyendo, permitimos fallback a subida manual
         return None
+
+@st.cache_data(show_spinner=False)
+def load_clientes_lookup() -> pd.DataFrame | None:
+    try:
+        if not CLIENTES_LOOKUP_PATH.exists():
+            return None
+        return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=";", encoding="latin-1")
+    except Exception:
+        return None
+
+
+def _format_city_department(ciudad, departamento) -> str:
+    ciudad_text = _smart_title_case(ciudad)
+    departamento_text = _smart_title_case(departamento)
+    normalized_city = _norm(ciudad_text)
+    if normalized_city in {"bogota d c", "bogota dc", "bogota"}:
+        return "Bogotá D.C."
+    if ciudad_text and departamento_text:
+        return f"{ciudad_text}, {departamento_text}"
+    return ciudad_text or departamento_text
+
+
+def _lookup_cliente_info(referencia, cedula_cliente) -> dict[str, str]:
+    clientes_df = load_clientes_lookup()
+    if clientes_df is None or clientes_df.empty:
+        return {}
+
+    col_ref = _find_col(clientes_df, ["Referencia"])
+    col_doc = _find_col(clientes_df, ["Documento"])
+    col_cel = _find_col(clientes_df, ["Celular"])
+    col_ciu = _find_col(clientes_df, ["Ciudad"])
+    col_dep = _find_col(clientes_df, ["Departamento"])
+    col_dir = _find_col(clientes_df, ["Direccion", "Dirección"])
+
+    match = pd.DataFrame()
+    ref_text = str(referencia or "").strip()
+    cedula_text = str(cedula_cliente or "").strip()
+
+    if col_ref and ref_text:
+        match = clientes_df[clientes_df[col_ref].astype(str).str.strip() == ref_text]
+    if match.empty and col_doc and cedula_text:
+        match = clientes_df[clientes_df[col_doc].astype(str).str.strip() == cedula_text]
+    if match.empty:
+        return {}
+
+    row = match.iloc[0]
+    return {
+        "telefono_cliente": str(row[col_cel]).strip() if col_cel and pd.notna(row[col_cel]) else "",
+        "ciudad_cliente": _format_city_department(row[col_ciu] if col_ciu else "", row[col_dep] if col_dep else ""),
+        "direccion_cliente": str(row[col_dir]).strip() if col_dir and pd.notna(row[col_dir]) else "",
+    }
 
 # =================== LOG LOCAL ===================
 def _get_writable_log_path() -> Path:
@@ -1694,10 +1752,13 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
             entidad_financiera_doc = st.text_input("Entidad financiera", value=str(default_context.get("entidad_financiera", "")), key="doc_entidad_financiera")
             nombre_cliente_doc = st.text_input("Nombre cliente", value=str(default_context.get("nombre_cliente", "")), key="doc_nombre_cliente")
             correo_cliente_doc = st.text_input("Correo cliente", value=str(default_context.get("correo_cliente", "")), key="doc_correo_cliente")
+            telefono_cliente_doc = st.text_input("Teléfono cliente", value=str(default_context.get("telefono_cliente", "")), key="doc_telefono_cliente")
         with col2:
             numero_producto_doc = st.text_input("Número producto", value=str(default_context.get("numero_producto", "")), key="doc_numero_producto")
             vehiculo_doc = st.text_input("Vehículo", value=str(default_context.get("vehiculo", "")), key="doc_vehiculo")
             cedula_cliente_doc = st.text_input("Cédula cliente", value=str(default_context.get("cedula_cliente", "")), key="doc_cedula_cliente")
+            ciudad_cliente_doc = st.text_input("Ciudad cliente", value=str(default_context.get("ciudad_cliente", "")), key="doc_ciudad_cliente")
+            direccion_cliente_doc = st.text_input("Dirección cliente", value=str(default_context.get("direccion_cliente", "")), key="doc_direccion_cliente")
             pago_banco_doc = st.text_input("Pago banco documento", value=str(default_context.get("pago_banco", "")), key="doc_pago_banco", disabled=True)
             comision_total_doc = st.text_input("Comisión total documento", value=str(default_context.get("comision_total", "")), key="doc_comision_total", disabled=True)
 
@@ -1710,9 +1771,12 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
         "entidad_financiera": entidad_financiera_doc,
         "nombre_cliente": nombre_cliente_doc,
         "correo_cliente": correo_cliente_doc,
+        "telefono_cliente": telefono_cliente_doc,
         "numero_producto": numero_producto_doc,
         "vehiculo": vehiculo_doc,
         "cedula_cliente": cedula_cliente_doc,
+        "ciudad_cliente": ciudad_cliente_doc,
+        "direccion_cliente": direccion_cliente_doc,
         "pago_banco": pago_banco_doc,
         "comision_total": comision_total_doc,
         "suma_comisiones": comision_total_doc,
@@ -1737,6 +1801,9 @@ if not cronograma_editado.empty and not plan_df.empty:
         col_cedula_cliente = _find_col(sel, ["Cedula", "Cédula"]) or _find_col_contains(sel, ["cedula"])
         col_correo_cliente = _find_col(sel, ["correo", "Correo"]) or _find_col_contains(sel, ["correo"])
 
+        cedula_cliente_value = _join_unique_values(sel[col_cedula_cliente].tolist()) if col_cedula_cliente else ""
+        cliente_lookup = _lookup_cliente_info(ref_input, cedula_cliente_value)
+
         template_context_default = _build_document_context(
             referencia=ref_input,
             bancos=sel[col_banco].astype(str).tolist(),
@@ -1745,8 +1812,11 @@ if not cronograma_editado.empty and not plan_df.empty:
             nombre_cliente=_join_unique_values(sel[col_nombre_cliente].tolist()) if col_nombre_cliente else "",
             numero_producto=_join_unique_values(sel[col_numero_producto].tolist()) if col_numero_producto else "",
             vehiculo=_join_unique_values(sel[col_vehiculo].tolist()) if col_vehiculo else "",
-            cedula_cliente=_join_unique_values(sel[col_cedula_cliente].tolist()) if col_cedula_cliente else "",
+            cedula_cliente=cedula_cliente_value,
             correo_cliente=_join_unique_values(sel[col_correo_cliente].tolist()) if col_correo_cliente else "",
+            telefono_cliente=cliente_lookup.get("telefono_cliente", ""),
+            ciudad_cliente=cliente_lookup.get("ciudad_cliente", ""),
+            direccion_cliente=cliente_lookup.get("direccion_cliente", ""),
         )
         template_context = _build_document_context_inputs(template_context_default)
         export_docx_bytes = build_recaudo_docx(
