@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import gettempdir
 import json
 import ast
+import csv
 from joblib import load
 import re  # ✅ NUEVO
 from datetime import datetime
@@ -999,9 +1000,21 @@ def load_clientes_lookup() -> pd.DataFrame | None:
     try:
         if not CLIENTES_LOOKUP_PATH.exists():
             return None
-        return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=";", encoding="latin-1")
+        sample = CLIENTES_LOOKUP_PATH.read_text(encoding="latin-1", errors="ignore")[:4096]
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;")
+        return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=dialect.delimiter, encoding="latin-1")
     except Exception:
-        return None
+        try:
+            return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=None, engine="python", encoding="latin-1")
+        except Exception:
+            return None
+
+
+def _normalize_lookup_key(value) -> str:
+    text_value = str(value or "").strip()
+    if text_value.endswith(".0"):
+        text_value = text_value[:-2]
+    return text_value
 
 
 def _format_city_department(ciudad, departamento) -> str:
@@ -1028,13 +1041,13 @@ def _lookup_cliente_info(referencia, cedula_cliente) -> dict[str, str]:
     col_dir = _find_col(clientes_df, ["Direccion", "Dirección"])
 
     match = pd.DataFrame()
-    ref_text = str(referencia or "").strip()
-    cedula_text = str(cedula_cliente or "").strip()
+    ref_text = _normalize_lookup_key(referencia)
+    cedula_text = _normalize_lookup_key(cedula_cliente)
 
     if col_ref and ref_text:
-        match = clientes_df[clientes_df[col_ref].astype(str).str.strip() == ref_text]
+        match = clientes_df[clientes_df[col_ref].map(_normalize_lookup_key) == ref_text]
     if match.empty and col_doc and cedula_text:
-        match = clientes_df[clientes_df[col_doc].astype(str).str.strip() == cedula_text]
+        match = clientes_df[clientes_df[col_doc].map(_normalize_lookup_key) == cedula_text]
     if match.empty:
         return {}
 
@@ -1044,7 +1057,6 @@ def _lookup_cliente_info(referencia, cedula_cliente) -> dict[str, str]:
         "ciudad_cliente": _format_city_department(row[col_ciu] if col_ciu else "", row[col_dep] if col_dep else ""),
         "direccion_cliente": str(row[col_dir]).strip() if col_dir and pd.notna(row[col_dir]) else "",
     }
-
 # =================== LOG LOCAL ===================
 def _get_writable_log_path() -> Path:
     """
@@ -1786,6 +1798,31 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
     return context
 
 
+def _missing_document_fields(context: dict[str, str]) -> list[str]:
+    required_labels = {
+        "referencia": "Referencia documento",
+        "dia_firma": "Día firma",
+        "mes_firma": "Mes firma",
+        "anio_firma": "Año firma",
+        "entidad_financiera": "Entidad financiera",
+        "nombre_cliente": "Nombre cliente",
+        "correo_cliente": "Correo cliente",
+        "telefono_cliente": "Teléfono cliente",
+        "numero_producto": "Número producto",
+        "vehiculo": "Vehículo",
+        "cedula_cliente": "Cédula cliente",
+        "ciudad_cliente": "Ciudad cliente",
+        "direccion_cliente": "Dirección cliente",
+        "pago_banco": "Pago banco documento",
+        "comision_total": "Comisión total documento",
+    }
+    missing = []
+    for key, label in required_labels.items():
+        if not str(context.get(key, "")).strip():
+            missing.append(label)
+    return missing
+
+
 st.markdown("### 6.2) Exportar documento estructurado")
 st.caption(
     "La plantilla Word de `data/` se rellena con las dos tablas visibles en pantalla. "
@@ -1829,14 +1866,18 @@ if not cronograma_editado.empty and not plan_df.empty:
         st.error(f"No pude preparar el documento Word: {export_exc}")
 
 if export_docx_bytes:
+    missing_document_fields = _missing_document_fields(template_context)
     referencia_export = re.sub(r"[^A-Za-z0-9._-]+", " ", str(ref_input or "sin referencia")).strip() or "sin referencia"
     export_filename = f"{date.today().isoformat()} - ref {referencia_export}.docx"
+    if missing_document_fields:
+        st.warning("Completa estos campos antes de descargar el Word: " + ", ".join(missing_document_fields))
     st.download_button(
         "⬇️ Descargar Word con tablas",
         data=export_docx_bytes,
         file_name=export_filename,
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         use_container_width=True,
+        disabled=bool(missing_document_fields),
     )
 else:
     st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el documento.")
