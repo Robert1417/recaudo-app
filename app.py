@@ -233,6 +233,50 @@ def _format_currency_cop(value) -> str:
     return f"${formatted} COP"
 
 
+def _number_to_words_es(value: int) -> str:
+    units = ["cero", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve"]
+    teens = {
+        10: "diez", 11: "once", 12: "doce", 13: "trece", 14: "catorce", 15: "quince",
+        16: "dieciseis", 17: "diecisiete", 18: "dieciocho", 19: "diecinueve",
+    }
+    tens = {20: "veinte", 30: "treinta", 40: "cuarenta", 50: "cincuenta", 60: "sesenta", 70: "setenta", 80: "ochenta", 90: "noventa"}
+    hundreds = {100: "cien", 200: "doscientos", 300: "trescientos", 400: "cuatrocientos", 500: "quinientos", 600: "seiscientos", 700: "setecientos", 800: "ochocientos", 900: "novecientos"}
+
+    def convert(n: int) -> str:
+        if n < 10:
+            return units[n]
+        if n < 20:
+            return teens[n]
+        if n < 30:
+            return "veinte" if n == 20 else f"veinti{convert(n - 20)}"
+        if n < 100:
+            return tens[(n // 10) * 10] if n % 10 == 0 else f"{tens[(n // 10) * 10]} y {convert(n % 10)}"
+        if n == 100:
+            return "cien"
+        if n < 1000:
+            base = hundreds.get((n // 100) * 100, "ciento")
+            if (n // 100) * 100 == 100:
+                base = "ciento"
+            return base if n % 100 == 0 else f"{base} {convert(n % 100)}"
+        if n < 1_000_000:
+            thousands = n // 1000
+            remainder = n % 1000
+            prefix = "mil" if thousands == 1 else f"{convert(thousands)} mil"
+            return prefix if remainder == 0 else f"{prefix} {convert(remainder)}"
+        if n < 1_000_000_000:
+            millions = n // 1_000_000
+            remainder = n % 1_000_000
+            prefix = "un millon" if millions == 1 else f"{convert(millions)} millones"
+            return prefix if remainder == 0 else f"{prefix} {convert(remainder)}"
+        return str(n)
+
+    return convert(max(int(value), 0))
+
+
+def _format_currency_cop_words(value) -> str:
+    return _number_to_words_es(int(round(float(value or 0.0)))).upper()
+
+
 def _format_date_ddmmyyyy(value) -> str:
     if pd.isna(value):
         return ""
@@ -316,10 +360,13 @@ def _build_document_context(
     telefono_cliente="",
     ciudad_cliente="",
     direccion_cliente="",
+    suma_comisiones_total=None,
 ) -> dict[str, str]:
     today = date.today()
     bancos_unicos = _join_unique_values(bancos)
     comision_total_text = _format_currency_cop(comision_total)
+    suma_comisiones_value = float(suma_comisiones_total if suma_comisiones_total is not None else comision_total)
+    suma_comisiones_text = _format_currency_cop(suma_comisiones_value)
 
     return {
         "referencia": str(referencia or ""),
@@ -337,9 +384,10 @@ def _build_document_context(
         "telefono_cliente": str(telefono_cliente or ""),
         "ciudad_cliente": str(ciudad_cliente or ""),
         "direccion_cliente": str(direccion_cliente or ""),
-        "suma_comisiones": comision_total_text,
-        "Suma_comisiones": comision_total_text,
-        "suma comisiones": comision_total_text,
+        "suma_comisiones": suma_comisiones_text,
+        "Suma_comisiones": suma_comisiones_text,
+        "suma comisiones": suma_comisiones_text,
+        "suma_comisiones_letras": _format_currency_cop_words(suma_comisiones_value),
     }
 
 
