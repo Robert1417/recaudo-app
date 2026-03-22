@@ -319,7 +319,6 @@ def _render_html_table(headers: list[str], rows: list[list[str]], table_class: s
       <thead><tr>{thead}</tr></thead>
       <tbody>{''.join(tbody)}</tbody>
     </table>
-    """
 
 
 def generar_pagare_html(
