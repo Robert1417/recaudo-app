@@ -1041,6 +1041,19 @@ def _find_col(df: pd.DataFrame, candidates):
             return cols[_norm(cand)]
     return None
 
+####################################################
+###################################################
+
+def _find_col_contains(df: pd.DataFrame, required_terms: list[str]):
+    normalized_terms = [_norm(term) for term in required_terms]
+    for col in df.columns:
+        normalized_col = _norm(col)
+        if all(term in normalized_col for term in normalized_terms):
+            return col
+    return None
+#####################################################
+####################################################
+
 @st.cache_data(ttl=900, show_spinner=False)
 def _read_file(file):
     if file.name.lower().endswith(".csv"):
@@ -1634,24 +1647,23 @@ else:
 #############################################################################################################################################################################
 
 def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str, str]:
-    st.markdown("#### Campos editables del documento")
-    st.caption("Antes de descargar el Word, puedes revisar y corregir aquí los datos que se van a escribir en la plantilla.")
+    with st.expander("Campos editables del documento", expanded=False):
+        st.caption("Antes de descargar el Word, puedes revisar y corregir aquí los datos que se van a escribir en la plantilla.")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        referencia_doc = st.text_input("Referencia documento", value=str(default_context.get("referencia", "")), key="doc_referencia")
-        dia_firma_doc = st.text_input("Día firma", value=str(default_context.get("dia_firma", "")), key="doc_dia_firma")
-        mes_firma_doc = st.text_input("Mes firma", value=str(default_context.get("mes_firma", "")), key="doc_mes_firma")
-        anio_firma_doc = st.text_input("Año firma", value=str(default_context.get("anio_firma", "")), key="doc_anio_firma")
-        entidad_financiera_doc = st.text_input("Entidad financiera", value=str(default_context.get("entidad_financiera", "")), key="doc_entidad_financiera")
-        nombre_cliente_doc = st.text_input("Nombre cliente", value=str(default_context.get("nombre_cliente", "")), key="doc_nombre_cliente")
-    with col2:
-        numero_producto_doc = st.text_input("Número producto", value=str(default_context.get("numero_producto", "")), key="doc_numero_producto")
-        vehiculo_doc = st.text_input("Vehículo", value=str(default_context.get("vehiculo", "")), key="doc_vehiculo")
-        cedula_cliente_doc = st.text_input("Cédula cliente", value=str(default_context.get("cedula_cliente", "")), key="doc_cedula_cliente")
-        pago_banco_doc = st.text_input("Pago banco documento", value=str(default_context.get("pago_banco", "")), key="doc_pago_banco")
-        comision_total_doc = st.text_input("Comisión total documento", value=str(default_context.get("comision_total", "")), key="doc_comision_total")
-        suma_comisiones_doc = st.text_input("Suma comisiones documento", value=str(default_context.get("suma_comisiones", "")), key="doc_suma_comisiones")
+        col1, col2 = st.columns(2)
+        with col1:
+            referencia_doc = st.text_input("Referencia documento", value=str(default_context.get("referencia", "")), key="doc_referencia")
+            dia_firma_doc = st.text_input("Día firma", value=str(default_context.get("dia_firma", "")), key="doc_dia_firma", disabled=True)
+            mes_firma_doc = st.text_input("Mes firma", value=str(default_context.get("mes_firma", "")), key="doc_mes_firma", disabled=True)
+            anio_firma_doc = st.text_input("Año firma", value=str(default_context.get("anio_firma", "")), key="doc_anio_firma", disabled=True)
+            entidad_financiera_doc = st.text_input("Entidad financiera", value=str(default_context.get("entidad_financiera", "")), key="doc_entidad_financiera")
+            nombre_cliente_doc = st.text_input("Nombre cliente", value=str(default_context.get("nombre_cliente", "")), key="doc_nombre_cliente")
+        with col2:
+            numero_producto_doc = st.text_input("Número producto", value=str(default_context.get("numero_producto", "")), key="doc_numero_producto")
+            vehiculo_doc = st.text_input("Vehículo", value=str(default_context.get("vehiculo", "")), key="doc_vehiculo")
+            cedula_cliente_doc = st.text_input("Cédula cliente", value=str(default_context.get("cedula_cliente", "")), key="doc_cedula_cliente")
+            pago_banco_doc = st.text_input("Pago banco documento", value=str(default_context.get("pago_banco", "")), key="doc_pago_banco", disabled=True)
+            comision_total_doc = st.text_input("Comisión total documento", value=str(default_context.get("comision_total", "")), key="doc_comision_total", disabled=True)
 
     context = default_context.copy()
     context.update({
@@ -1666,9 +1678,9 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
         "cedula_cliente": cedula_cliente_doc,
         "pago_banco": pago_banco_doc,
         "comision_total": comision_total_doc,
-        "suma_comisiones": suma_comisiones_doc,
-        "Suma_comisiones": suma_comisiones_doc,
-        "suma comisiones": suma_comisiones_doc,
+        "suma_comisiones": comision_total_doc,
+        "Suma_comisiones": comision_total_doc,
+        "suma comisiones": comision_total_doc,
     })
     return context
 
@@ -1682,10 +1694,10 @@ st.caption(
 export_docx_bytes = None
 if not cronograma_editado.empty and not plan_df.empty:
     try:
-        col_nombre_cliente = _find_col(sel, ["Nombre del cliente", "Nombre Cliente", "Nombre"])
-        col_numero_producto = _find_col(sel, ["Número de Crédito", "Numero de Credito", "Número Crédito", "Numero Producto"])
-        col_vehiculo = _find_col(sel, ["vehiculo", "Vehículo"])
-        col_cedula_cliente = _find_col(sel, ["Cedula", "Cédula"])
+        col_nombre_cliente = _find_col(sel, ["Nombre del cliente", "Nombre Cliente", "Nombre"]) or _find_col_contains(sel, ["nombre", "cliente"])
+        col_numero_producto = _find_col(sel, ["Número de Crédito", "Numero de Credito", "Número Crédito", "Numero Producto"]) or _find_col_contains(sel, ["numero", "credito"])
+        col_vehiculo = _find_col(sel, ["vehiculo", "Vehículo"]) or _find_col_contains(sel, ["vehiculo"])
+        col_cedula_cliente = _find_col(sel, ["Cedula", "Cédula"]) or _find_col_contains(sel, ["cedula"])
 
         template_context_default = _build_document_context(
             referencia=ref_input,
