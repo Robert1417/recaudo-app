@@ -11,6 +11,7 @@ from joblib import load
 import re  # ✅ NUEVO
 from datetime import datetime
 import os
+import html as html_lib
 from io import BytesIO
 from zipfile import ZipFile
 import xml.etree.ElementTree as ET
@@ -18,6 +19,7 @@ import zlib
 
 import gspread
 from google.oauth2.service_account import Credentials
+import streamlit.components.v1 as components
 
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -276,6 +278,176 @@ def _pdf_multiline_text(
         rows.append((x, current_y, line, font_name, font_size, 0.0))
         current_y -= line_gap
     return rows
+
+
+def _extract_docx_template_blocks(docx_path: Path) -> list[dict]:
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    with ZipFile(docx_path) as docx_zip:
+        root = ET.fromstring(docx_zip.read("word/document.xml"))
+
+    body = root.find("w:body", ns)
+    if body is None:
+        return []
+
+    blocks: list[dict] = []
+    for child in body:
+        tag = child.tag.split("}")[-1]
+        if tag == "p":
+            text = "".join(t.text or "" for t in child.findall(".//w:t", ns)).strip()
+            if not text:
+                continue
+            blocks.append({"type": "paragraph", "text": text})
+        elif tag == "tbl":
+            rows = []
+            for tr in child.findall("w:tr", ns):
+                row = []
+                for tc in tr.findall("w:tc", ns):
+                    cell_text = "".join(t.text or "" for t in tc.findall(".//w:t", ns)).strip()
+                    row.append(cell_text)
+                rows.append(row)
+            blocks.append({"type": "table", "rows": rows})
+    return blocks
+
+
+def _render_html_table(headers: list[str], rows: list[list[str]], table_class: str) -> str:
+    thead = "".join(f"<th>{html_lib.escape(col)}</th>" for col in headers)
+    tbody = []
+    for row in rows:
+        tbody.append("<tr>" + "".join(f"<td>{html_lib.escape(str(cell))}</td>" for cell in row) + "</tr>")
+    return f"""
+    <table class="{table_class}">
+      <thead><tr>{thead}</tr></thead>
+      <tbody>{''.join(tbody)}</tbody>
+    </table>
+    """
+
+
+def generar_pagare_html(
+    referencia: str,
+    cronograma_df: pd.DataFrame,
+    plan_df: pd.DataFrame,
+    fecha_documento: date,
+    entidad_financiera: str,
+    numero_producto: str,
+    pago_banco_total: float,
+    comision_total: float,
+    vehiculo: str = "COINK",
+):
+    blocks = _extract_docx_template_blocks(DOCX_TEMPLATE_PATH)
+
+    cronograma_visible = cronograma_df[cronograma_df["Cantidad"] > 0.005].copy()
+    cronograma_visible["Fecha"] = pd.to_datetime(cronograma_visible["Fecha"])
+    cronograma_rows = [
+        [
+            str(idx),
+            row.Fecha.strftime("%d/%m/%Y"),
+            f"{_format_currency_pdf(row.Cantidad)} COP",
+            str(row.Concepto),
+        ]
+        for idx, row in enumerate(cronograma_visible.itertuples(index=False), start=1)
+    ]
+
+    plan_visible = plan_df.copy()
+    plan_rows = [
+        [
+            "",
+            _format_date_pdf(row["Fecha Límite de Pago"]),
+            _format_currency_pdf(row["Pago a Banco"]),
+            _format_currency_pdf(row["Comisión de Éxito"]),
+            _format_currency_pdf(row["Comisión Mensual"]),
+            _format_currency_pdf(row["Apartado Requerido"]),
+        ]
+        for _, row in plan_visible.iterrows()
+    ]
+
+    replacements = {
+        "{dia_firma}": f"{fecha_documento.day:02d}",
+        "{mes_firma}": f"{fecha_documento.month:02d}",
+        "{anio_firma}": str(fecha_documento.year),
+        "{referencia}": str(referencia),
+        "{entidad_financiera}": entidad_financiera,
+        "{numero_producto}": numero_producto,
+        "{pago_banco}": f"{_format_currency_pdf(pago_banco_total)} COP",
+        "{comision_total}": f"{_format_currency_pdf(comision_total)} COP",
+        "{vehiculo}": vehiculo,
+    }
+
+    page_break_texts = {
+        "CONTRATO DE LIQUIDACIÓN ESTRUCTURADA",
+        "PAGARÉ LIQUIDACIÓN ESTRUCTURADA",
+        "CARTA DE INSTRUCCIONES PAGARÉ LIQUIDACIÓN ESTRUCTURADA.",
+        "AUTORIZACIÓN REPORTE Y CONSULTA A LAS CENTRALES DE RIESGO: -AUTORIZACIÓN EXPRESA PARA REPORTAR, CONSULTAR Y COMPARTIR INFORMACIÓN Y DOCUMENTOS CON LAS CENTRALES DE RIESGO-",
+    }
+
+    html_parts = []
+    current_page = []
+    inserted_cronograma = False
+    inserted_plan = False
+
+    for block in blocks:
+        if block["type"] == "paragraph":
+            text = block["text"]
+            for placeholder, value in replacements.items():
+                text = text.replace(placeholder, value)
+
+            if text in page_break_texts and current_page:
+                html_parts.append('<section class="page">' + "".join(current_page) + "</section>")
+                current_page = []
+
+            css_class = "paragraph"
+            if text in {
+                "Liquidación de DeudaRef. No. " + str(referencia),
+                "CONTRATO DE LIQUIDACIÓN ESTRUCTURADA",
+                "PAGARÉ LIQUIDACIÓN ESTRUCTURADA",
+                "CARTA DE INSTRUCCIONES PAGARÉ LIQUIDACIÓN ESTRUCTURADA.",
+            }:
+                css_class = "section-title"
+            elif text in {"CONSIDERACIONES", "CLÁUSULAS", "PLAN DE LIQUIDACIÓN ESTRUCTURADA"}:
+                css_class = "center-title"
+
+            current_page.append(f'<p class="{css_class}">{html_lib.escape(text)}</p>')
+        elif block["type"] == "table":
+            headers = [cell for cell in block["rows"][0] if cell]
+            if headers == ["Nº", "Fecha", "Cantidad", "Concepto"] and not inserted_cronograma:
+                current_page.append(_render_html_table(headers, cronograma_rows, "doc-table first-table"))
+                inserted_cronograma = True
+            elif headers[:6] == ["Fecha de Depósito", "Fecha Límite de Pago", "Pago a Banco", "Comisión de Éxito", "Comisión Mensual", "Apartado Requerido"] and not inserted_plan:
+                current_page.append(_render_html_table(headers[:6], plan_rows, "doc-table plan-table"))
+                inserted_plan = True
+
+    if current_page:
+        html_parts.append('<section class="page">' + "".join(current_page) + "</section>")
+
+    html_document = f"""
+    <!doctype html>
+    <html lang="es">
+    <head>
+      <meta charset="utf-8" />
+      <title>Pagare{fecha_documento.isoformat()} ref: {html_lib.escape(str(referencia))}</title>
+      <style>
+        @page {{ size: letter; margin: 16mm; }}
+        body {{ font-family: "Times New Roman", serif; background: #f3f4f6; margin: 0; padding: 24px 0; color: #111; }}
+        .page {{ width: 816px; min-height: 1056px; margin: 0 auto 24px auto; background: white; padding: 36px 42px; box-sizing: border-box; page-break-after: always; }}
+        .paragraph {{ font-size: 14px; line-height: 1.35; margin: 0 0 10px 0; white-space: pre-wrap; }}
+        .section-title {{ font-size: 22px; font-weight: 700; text-align: center; margin: 0 0 14px 0; }}
+        .center-title {{ font-size: 16px; font-weight: 700; text-align: center; margin: 16px 0 10px 0; }}
+        .doc-table {{ width: 100%; border-collapse: collapse; margin: 14px 0 16px 0; table-layout: fixed; }}
+        .doc-table th {{ background: #0b3f75; color: white; border: 2px solid #0b1a2a; padding: 8px 6px; font-size: 14px; }}
+        .doc-table td {{ border: 1px solid #202020; padding: 6px; font-size: 13px; vertical-align: top; }}
+        .first-table th:nth-child(1), .first-table td:nth-child(1) {{ width: 6%; text-align: center; }}
+        .first-table th:nth-child(2), .first-table td:nth-child(2) {{ width: 18%; }}
+        .first-table th:nth-child(3), .first-table td:nth-child(3) {{ width: 26%; }}
+        .first-table th:nth-child(4), .first-table td:nth-child(4) {{ width: 50%; }}
+        .plan-table th, .plan-table td {{ font-size: 12px; }}
+      </style>
+    </head>
+    <body>
+      {''.join(html_parts)}
+    </body>
+    </html>
+
+    file_name = f"Pagare{fecha_documento.isoformat()} ref: {referencia}.html"
+    return html_document, file_name
 
 
 def _replace_page_contents_with_overlay(pdf_bytes: bytes, page_overlays: dict[int, bytes]) -> bytes:
@@ -1634,12 +1806,12 @@ else:
 #########################################################################################################################################################################
 ##########################################################################################################################################################################
 
-st.markdown("### 6.2) Descargar borrador del pagaré en PDF")
+st.markdown("### 6.2) Descargar borrador del pagaré")
 entidad_financiera_pdf = ", ".join(sorted({str(x).strip() for x in sel[col_banco].dropna().tolist() if str(x).strip()})) or "Por definir"
 numero_producto_pdf = " - ".join(sorted({str(x).strip() for x in ids_sel if str(x).strip()})) or str(ref_input)
 
 if not cronograma_editado.empty and not plan_df.empty:
-    pdf_bytes, pdf_file_name = generar_pagare_pdf(
+    html_document, html_file_name = generar_pagare_html(
         referencia=str(ref_input),
         cronograma_df=cronograma_editado,
         plan_df=plan_df,
@@ -1650,16 +1822,19 @@ if not cronograma_editado.empty and not plan_df.empty:
         comision_total=float(comision_exito),
     )
     st.download_button(
-        "📄 Descargar pagaré en PDF",
-        data=pdf_bytes,
-        file_name=pdf_file_name,
-        mime="application/pdf",
+        "📄 Descargar pagaré en HTML",
+        data=html_document,
+        file_name=html_file_name,
+        mime="text/html",
         use_container_width=True,
-        help="Genera un borrador con las dos tablas ya embebidas en el documento final.",
+        help="Genera un borrador HTML completo del pagaré, armado a partir del documento inicial y con ambas tablas insertadas.",
     )
-    st.caption(f"Nombre sugerido del archivo: `{pdf_file_name}`")
+    st.caption(f"Nombre sugerido del archivo: `{html_file_name}`")
+    with st.expander("Vista previa del pagaré HTML", expanded=False):
+        components.html(html_document, height=900, scrolling=True)
+    st.info("Siguiente paso recomendado: cuando confirmemos que el HTML ya quedó perfecto, conectamos su exportación final a PDF con un renderizador dedicado.")
 else:
-    st.info("Completa el cronograma y el plan de liquidación para habilitar la descarga del pagaré en PDF.")
+    st.info("Completa el cronograma y el plan de liquidación para habilitar la descarga del pagaré.")
 
 
 #########################################################################################################################################################################
