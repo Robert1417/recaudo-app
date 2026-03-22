@@ -996,17 +996,43 @@ def load_repo_base(_version: str) -> pd.DataFrame | None:
 
 @st.cache_data(show_spinner=False)
 def load_clientes_lookup() -> pd.DataFrame | None:
+    if not CLIENTES_LOOKUP_PATH.exists():
+        return None
+
+    def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df.columns = [str(col).replace("﻿", "").strip() for col in df.columns]
+        for col in df.columns:
+            df[col] = df[col].map(lambda value: str(value).replace("﻿", "").strip() if value is not None else "")
+        return df
+
+    def _read_with_sep(sep, engine=None):
+        kwargs = {"encoding": "latin-1", "dtype": str, "keep_default_na": False}
+        if sep is not None:
+            kwargs["sep"] = sep
+        if engine is not None:
+            kwargs["engine"] = engine
+        return pd.read_csv(CLIENTES_LOOKUP_PATH, **kwargs)
+
     try:
-        if not CLIENTES_LOOKUP_PATH.exists():
-            return None
         sample = CLIENTES_LOOKUP_PATH.read_text(encoding="latin-1", errors="ignore")[:4096]
         dialect = csv.Sniffer().sniff(sample, delimiters=",;")
-        return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=dialect.delimiter, encoding="latin-1", dtype=str, keep_default_na=False)
+        df = _read_with_sep(dialect.delimiter)
     except Exception:
         try:
-            return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=None, engine="python", encoding="latin-1", dtype=str, keep_default_na=False)
+            df = _read_with_sep(None, engine="python")
         except Exception:
             return None
+
+    if len(df.columns) == 1:
+        only_col = str(df.columns[0])
+        fallback_sep = ";" if ";" in only_col else ","
+        try:
+            df = _read_with_sep(fallback_sep)
+        except Exception:
+            return _clean_df(df)
+
+    return _clean_df(df)
 
 
 def _normalize_lookup_key(value) -> str:
