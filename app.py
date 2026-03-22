@@ -27,7 +27,6 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
-
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
 
@@ -1002,10 +1001,10 @@ def load_clientes_lookup() -> pd.DataFrame | None:
             return None
         sample = CLIENTES_LOOKUP_PATH.read_text(encoding="latin-1", errors="ignore")[:4096]
         dialect = csv.Sniffer().sniff(sample, delimiters=",;")
-        return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=dialect.delimiter, encoding="latin-1")
+        return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=dialect.delimiter, encoding="latin-1", dtype=str, keep_default_na=False)
     except Exception:
         try:
-            return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=None, engine="python", encoding="latin-1")
+            return pd.read_csv(CLIENTES_LOOKUP_PATH, sep=None, engine="python", encoding="latin-1", dtype=str, keep_default_na=False)
         except Exception:
             return None
 
@@ -1014,6 +1013,9 @@ def _normalize_lookup_key(value) -> str:
     text_value = str(value or "").strip()
     if text_value.endswith(".0"):
         text_value = text_value[:-2]
+    digits_only = re.sub(r"\D", "", text_value)
+    if digits_only and len(digits_only) >= max(6, len(text_value.replace(" ", "")) - 2):
+        return digits_only
     return text_value
 
 
