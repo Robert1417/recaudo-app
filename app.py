@@ -266,6 +266,26 @@ def _set_table_cell_no_wrap(cell):
         tc_pr.append(no_wrap)
 
 
+def _set_cell_width(cell, width_inches: float):
+    cell.width = Inches(width_inches)
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_w = tc_pr.find(qn("w:tcW"))
+    if tc_w is None:
+        tc_w = OxmlElement("w:tcW")
+        tc_pr.append(tc_w)
+    tc_w.set(qn("w:type"), "dxa")
+    tc_w.set(qn("w:w"), str(int(Inches(width_inches).emu / 635)))
+
+
+def _apply_cronograma_table_layout(table):
+    table.autofit = False
+    column_widths = [0.32, 1.05, 1.95, 3.10]
+    for row in table.rows:
+        for idx, width in enumerate(column_widths):
+            if idx < len(row.cells):
+                _set_cell_width(row.cells[idx], width)
+
+
 def _apply_table_text_style(paragraph, run, *, bold=None):
     paragraph.paragraph_format.space_after = Pt(0)
     paragraph.paragraph_format.space_before = Pt(0)
@@ -362,6 +382,7 @@ def build_recaudo_docx(template_path: Path, cronograma_df: pd.DataFrame, plan_df
         ])
 
     _populate_docx_table(document.tables[0], cronograma_rows)
+    _apply_cronograma_table_layout(document.tables[0])
     _populate_docx_table(document.tables[1], plan_rows)
 
     output = BytesIO()
