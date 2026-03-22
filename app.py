@@ -1819,9 +1819,10 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
         "direccion_cliente": direccion_cliente_doc,
         "pago_banco": pago_banco_doc,
         "comision_total": comision_total_doc,
-        "suma_comisiones": comision_total_doc,
-        "Suma_comisiones": comision_total_doc,
-        "suma comisiones": comision_total_doc,
+        "suma_comisiones": default_context.get("suma_comisiones", comision_total_doc),
+        "Suma_comisiones": default_context.get("suma_comisiones", comision_total_doc),
+        "suma comisiones": default_context.get("suma_comisiones", comision_total_doc),
+        "suma_comisiones_letras": default_context.get("suma_comisiones_letras", ""),
     })
     return context
 
@@ -1869,6 +1870,8 @@ if not cronograma_editado.empty and not plan_df.empty:
         cedula_cliente_value = _join_unique_values(sel[col_cedula_cliente].tolist()) if col_cedula_cliente else ""
         cliente_lookup = _lookup_cliente_info(ref_input, cedula_cliente_value)
 
+        suma_comisiones_total = float(comision_exito) + float(plan_df["Comisión Mensual"].sum())
+
         template_context_default = _build_document_context(
             referencia=ref_input,
             bancos=sel[col_banco].astype(str).tolist(),
@@ -1882,6 +1885,7 @@ if not cronograma_editado.empty and not plan_df.empty:
             telefono_cliente=cliente_lookup.get("telefono_cliente", ""),
             ciudad_cliente=cliente_lookup.get("ciudad_cliente", ""),
             direccion_cliente=cliente_lookup.get("direccion_cliente", ""),
+            suma_comisiones_total=suma_comisiones_total,
         )
         template_context = _build_document_context_inputs(template_context_default)
         export_docx_bytes = build_recaudo_docx(
