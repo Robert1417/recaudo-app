@@ -374,7 +374,7 @@ def generar_pagare_pdf(
     cronograma_visible["Fecha"] = pd.to_datetime(cronograma_visible["Fecha"])
     plan_visible = plan_df.copy()
 
-    page5_ops = ["q", "1 1 1 rg", "45 300 500 190 re f", "Q", "q", "0 0 0 RG", "0.6 w"]
+    page5_ops = ["q", "1 1 1 rg", "45 250 520 240 re f", "Q", "q", "0 0 0 RG", "0.6 w"]
     # Tabla de transferencias: usa el encabezado del PDF base y extiende filas debajo.
     first_table_x = [83.064, 94.104, 139.01, 222.07, 331.08]
     first_row_top = 502.73
@@ -394,26 +394,59 @@ def generar_pagare_pdf(
     for idx, row in enumerate(cronograma_visible.itertuples(index=False), start=1):
         text_y = 494.2 - ((idx - 1) * row_height)
         first_table_text.extend([
-            (85.8, text_y, str(idx), "F2", 8.8, 0.0),
-            (97.6, text_y, row.Fecha.strftime("%d/%m/%Y"), "F2", 8.8, 0.0),
-            (141.9, text_y, f"{_format_currency_pdf(row.Cantidad)} COP", "F2", 8.8, 0.0),
-            (225.2, text_y, str(row.Concepto), "F2", 8.8, 0.0),
+            (85.8, text_y, str(idx), "F2", 8.2, 0.0),
+            (95.8, text_y, row.Fecha.strftime("%d/%m/%Y"), "F2", 8.0, 0.0),
+            (140.2, text_y, f"{_format_currency_pdf(row.Cantidad)} COP", "F2", 7.1, 0.0),
+            (224.6, text_y, str(row.Concepto), "F2", 8.0, 0.0),
         ])
 
-    paragraph3_y = max(260.0, 470.0 - (len(cronograma_visible) * row_height) - 18.0)
+    paragraph3_y = max(360.0, 470.0 - (len(cronograma_visible) * row_height) - 16.0)
     first_table_text.extend(
         _pdf_multiline_text(
-            70.584,
+            54.024,
             paragraph3_y,
             (
                 f"3. Me comprometo a realizar los apartados mensuales descritos en el siguiente cuadro y así mismo a enviar "
-                f"los soportes de pago correspondientes, con asunto 'Soporte Pago Referencia {referencia}' en las fechas y por "
-                "los montos estipulados:"
+                f"los soportes de pago correspondientes, a los correos soportesdepagonegociacion@resuelvetudeuda.co y "
+                f"acuerdosrtd@resuelvetudeuda.com con asunto 'Soporte Pago Referencia {referencia}' en las fechas y por los "
+                "montos estipulados."
             ),
             font_name="F2",
             font_size=9.6,
             line_gap=11.2,
-            max_chars=110,
+            max_chars=120,
+        )
+    )
+    first_table_text.extend(
+        _pdf_multiline_text(
+            54.024,
+            315.0,
+            (
+                "4. Comprendo que si no sigo las instrucciones brindadas en el presente escrito, no se procederá a la "
+                "liquidación de la deuda. En caso de que esto aplique, se perderá el acuerdo de liquidación vigente en esta "
+                "carta. Debido a esto, se buscará generar una nueva negociación para liquidar la deuda, la cual tendrá que ser "
+                "nuevamente autorizada por el cliente."
+            ),
+            font_name="F2",
+            font_size=9.6,
+            line_gap=11.2,
+            max_chars=120,
+        )
+    )
+    first_table_text.extend(
+        _pdf_multiline_text(
+            54.024,
+            258.0,
+            (
+                f"5. Una vez completado el pago de la obligación {numero_producto}, entiendo que está bajo mi responsabilidad "
+                "la cancelación del producto ante la Entidad Financiera para que esta expida el paz y salvo. En caso de no "
+                "generar la cancelación del producto, libero a Bravo de cualquier responsabilidad de pago sobre los costos "
+                "adicionales que se llegaren a generar."
+            ),
+            font_name="F2",
+            font_size=9.6,
+            line_gap=11.2,
+            max_chars=120,
         )
     )
     page5_ops.extend(_pdf_text_ops(first_table_text))
