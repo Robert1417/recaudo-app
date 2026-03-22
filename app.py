@@ -937,16 +937,22 @@ def load_meta(_version: str):
 @st.cache_data(show_spinner=False)
 def load_repo_base(_version: str) -> pd.DataFrame | None:
     """
-    Carga la base que deja el workflow (prefiere Parquet, luego CSV).
+    Carga la base que deja el workflow.
+    Si existen Parquet y CSV, usa el CSV cuando trae más columnas que el Parquet
+    (por ejemplo, campos enriquecidos para poblar el documento Word).
     _version se usa solo para invalidar cache cuando cambian los archivos.
     Devuelve None si no existe.
     """
     try:
-        if DATA_PARQUET.exists():
-            df = pd.read_parquet(DATA_PARQUET)
-            return df
-        if DATA_CSV.exists():
-            return pd.read_csv(DATA_CSV)
+        df_parquet = pd.read_parquet(DATA_PARQUET) if DATA_PARQUET.exists() else None
+        df_csv = pd.read_csv(DATA_CSV) if DATA_CSV.exists() else None
+
+        if df_parquet is not None and df_csv is not None:
+            return df_csv if len(df_csv.columns) > len(df_parquet.columns) else df_parquet
+        if df_parquet is not None:
+            return df_parquet
+        if df_csv is not None:
+            return df_csv
         return None
     except Exception:
         # Si algo falla leyendo, permitimos fallback a subida manual
