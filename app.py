@@ -5,15 +5,13 @@ from copy import deepcopy
 from datetime import date
 from calendar import monthrange
 from pathlib import Path
-from tempfile import TemporaryDirectory, gettempdir
+from tempfile import gettempdir
 import json
 import ast
 from joblib import load
 import re  # ✅ NUEVO
-import subprocess
 from datetime import datetime
 import os
-import shutil
 import html as html_lib
 from io import BytesIO
 from zipfile import ZipFile
@@ -24,6 +22,12 @@ import gspread
 from google.oauth2.service_account import Credentials
 import streamlit.components.v1 as components
 from docx import Document
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -231,6 +235,66 @@ def _table_cell_text(value) -> str:
     return str(value)
 
 
+def _format_month_name_es(value) -> str:
+    month_names = {
+        1: "enero",
+        2: "febrero",
+        3: "marzo",
+        4: "abril",
+        5: "mayo",
+        6: "junio",
+        7: "julio",
+        8: "agosto",
+        9: "septiembre",
+        10: "octubre",
+        11: "noviembre",
+        12: "diciembre",
+    }
+    dt_value = pd.to_datetime(value)
+    return month_names.get(int(dt_value.month), "")
+
+
+def _normalize_template_value(value) -> str:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return ""
+    return str(value)
+
+
+def _render_template_text(text: str, context: dict[str, str]) -> str:
+    rendered = str(text)
+    for key, value in context.items():
+        rendered = rendered.replace(f"{{{key}}}", _normalize_template_value(value))
+    return rendered
+
+
+def _build_document_context(
+    referencia,
+    ids,
+    bancos,
+    nombre_cliente,
+    pago_banco,
+    comision_total,
+    deposito,
+):
+    today = date.today()
+    bancos_limpios = [str(b).strip() for b in bancos if str(b).strip()]
+    entidad_financiera = ", ".join(dict.fromkeys(bancos_limpios))
+    numero_producto = ", ".join(map(str, ids))
+
+    return {
+        "dia_firma": str(today.day),
+        "mes_firma": _format_month_name_es(today),
+        "anio_firma": str(today.year),
+        "referencia": str(referencia or ""),
+        "entidad_financiera": entidad_financiera,
+        "nombre_cliente": str(nombre_cliente or ""),
+        "numero_producto": numero_producto,
+        "pago_banco": _format_currency0(pago_banco),
+        "comision_total": _format_currency0(comision_total),
+        "vehiculo": "Bancolombia" if deposito else "",
+    }
+
+
 def _replace_cell_text_preserving_style(cell, text: str):
     paragraph = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
     template_run = paragraph.runs[0] if paragraph.runs else None
@@ -316,26 +380,112 @@ def build_recaudo_docx(template_path: Path, cronograma_df: pd.DataFrame, plan_df
     return output.getvalue()
 
 
-def convert_docx_to_pdf(docx_bytes: bytes, output_stem: str) -> tuple[bytes | None, str | None]:
-    converter = shutil.which("soffice") or shutil.which("libreoffice")
-    if not converter:
-        return None, "No encontré LibreOffice en el servidor para convertir Word a PDF."
+def build_recaudo_pdf(
+    template_path: Path,
+    cronograma_df: pd.DataFrame,
+    plan_df: pd.DataFrame,
+    template_context: dict[str, str],
+) -> bytes:
+    if not template_path.exists():
+        raise FileNotFoundError(f"No encontré la plantilla Word: {template_path}")
 
-    with TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        docx_path = tmp_path / f"{output_stem}.docx"
-        pdf_path = tmp_path / f"{output_stem}.pdf"
-        docx_path.write_bytes(docx_bytes)
+    document = Document(str(template_path))
+    styles = getSampleStyleSheet()
+    style_body = ParagraphStyle(
+        "body_custom",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=10,
+        leading=14,
+        alignment=TA_JUSTIFY,
+        spaceAfter=10,
+    )
+    style_title = ParagraphStyle(
+        "title_custom",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=16,
+        alignment=TA_CENTER,
+        spaceAfter=12,
+    )
 
-        result = subprocess.run(
-            [converter, "--headless", "--convert-to", "pdf", "--outdir", str(tmp_path), str(docx_path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0 or not pdf_path.exists():
-            return None, "LibreOffice no logró convertir el documento a PDF."
+    story = []
+    table_counter = 0
+    for paragraph in document.paragraphs:
+        raw_text = "".join(run.text for run in paragraph.runs).strip()
+        if raw_text:
+            rendered = _render_template_text(raw_text, template_context).replace("\n", "<br/>")
+            style = style_title if raw_text.lower().startswith("liquidación de deuda") else style_body
+            story.append(Paragraph(rendered, style))
+            story.append(Spacer(1, 0.08 * inch))
 
-        return pdf_path.read_bytes(), None
+        next_element = paragraph._p.getnext()
+        if next_element is not None and next_element.tag.endswith("tbl") and table_counter < 2:
+            if table_counter == 0:
+                cronograma_table_data = [["Nº", "Fecha", "Cantidad", "Concepto"]]
+                for idx, row in cronograma_df[cronograma_df["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].reset_index(drop=True).iterrows():
+                    cronograma_table_data.append([
+                        str(idx + 1),
+                        _format_date_ddmmyyyy(row["Fecha"]),
+                        _format_currency0(row["Cantidad"]),
+                        str(row["Concepto"]),
+                    ])
+                table = Table(cronograma_table_data, repeatRows=1, colWidths=[0.55 * inch, 1.2 * inch, 1.2 * inch, 3.45 * inch])
+            else:
+                plan_table_data = [[
+                    "Fecha de Depósito",
+                    "Fecha Límite de Pago",
+                    "Pago a Banco",
+                    "Comisión de Éxito",
+                    "Comisión Mensual",
+                    "Apartado Requerido",
+                ]]
+                for _, row in plan_df.iterrows():
+                    plan_table_data.append([
+                        _format_date_ddmmyyyy(date.today()),
+                        _format_date_ddmmyyyy(row["Fecha Límite de Pago"]),
+                        _table_cell_text(row["Pago a Banco"]),
+                        _table_cell_text(row["Comisión de Éxito"]),
+                        _table_cell_text(row["Comisión Mensual"]),
+                        _table_cell_text(row["Apartado Requerido"]),
+                    ])
+                table = Table(
+                    plan_table_data,
+                    repeatRows=1,
+                    colWidths=[1.0 * inch, 1.05 * inch, 1.0 * inch, 1.05 * inch, 1.05 * inch, 1.2 * inch],
+                )
+
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9e2f3")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("LEADING", (0, 0), (-1, -1), 10),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f9fc")]),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]))
+            story.append(table)
+            story.append(Spacer(1, 0.18 * inch))
+            table_counter += 1
+
+    output = BytesIO()
+    pdf_doc = SimpleDocTemplate(
+        output,
+        pagesize=LETTER,
+        leftMargin=0.55 * inch,
+        rightMargin=0.55 * inch,
+        topMargin=0.55 * inch,
+        bottomMargin=0.55 * inch,
+    )
+    pdf_doc.build(story)
+    return output.getvalue()
 
 
 #############################################################################################################################################################################
@@ -1476,18 +1626,28 @@ st.caption(
 
 export_docx_bytes = None
 export_pdf_bytes = None
-export_pdf_warning = None
 
 if not cronograma_editado.empty and not plan_df.empty:
     try:
+        template_context = _build_document_context(
+            referencia=ref_input,
+            ids=ids_sel,
+            bancos=sel[col_banco].astype(str).tolist(),
+            nombre_cliente=fila_primera.get("Nombre", "") if isinstance(fila_primera, pd.Series) else "",
+            pago_banco=pago_banco,
+            comision_total=comision_exito,
+            deposito=st.session_state.get("deposito_edit", 0.0),
+        )
         export_docx_bytes = build_recaudo_docx(
             template_path=DOCX_TEMPLATE_PATH,
             cronograma_df=cronograma_editado,
             plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
         )
-        export_pdf_bytes, export_pdf_warning = convert_docx_to_pdf(
-            export_docx_bytes,
-            output_stem="documento_estructurado",
+        export_pdf_bytes = build_recaudo_pdf(
+            template_path=DOCX_TEMPLATE_PATH,
+            cronograma_df=cronograma_editado,
+            plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
+            template_context=template_context,
         )
     except Exception as export_exc:
         st.error(f"No pude preparar el documento Word/PDF: {export_exc}")
@@ -1503,24 +1663,16 @@ if export_docx_bytes:
             use_container_width=True,
         )
     with export_col2:
-        if export_pdf_bytes:
-            st.download_button(
-                "⬇️ Descargar PDF convertido",
-                data=export_pdf_bytes,
-                file_name="documento_estructurado.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        else:
-            st.button("⬇️ Descargar PDF convertido", disabled=True, use_container_width=True)
-            if export_pdf_warning:
-                st.info(
-                    "Se generó el Word correctamente, pero el PDF automático no está disponible en este servidor. "
-                    f"{export_pdf_warning}"
-                )
+        st.download_button(
+            "⬇️ Descargar PDF completo",
+            data=export_pdf_bytes,
+            file_name="documento_estructurado.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            disabled=not bool(export_pdf_bytes),
+        )
 else:
     st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el documento.")
-
 #############################################################################################################################################################################
 #############################################################################################################################################################################
 
