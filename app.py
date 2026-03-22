@@ -1,16 +1,19 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from copy import deepcopy
 from datetime import date
 from calendar import monthrange
 from pathlib import Path
-from tempfile import gettempdir
+from tempfile import TemporaryDirectory, gettempdir
 import json
 import ast
 from joblib import load
 import re  # ✅ NUEVO
+import subprocess
 from datetime import datetime
 import os
+import shutil
 import html as html_lib
 from io import BytesIO
 from zipfile import ZipFile
@@ -20,6 +23,7 @@ import zlib
 import gspread
 from google.oauth2.service_account import Credentials
 import streamlit.components.v1 as components
+from docx import Document
 
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -209,6 +213,133 @@ def _parse_amount_input(value) -> float:
 
 def _format_currency0(value) -> str:
     return f"$ {int(round(float(value or 0.0))):,}"
+
+
+#############################################################################################################################################################################
+#############################################################################################################################################################################
+def _format_date_ddmmyyyy(value) -> str:
+    if pd.isna(value):
+        return ""
+    return pd.to_datetime(value).strftime("%d/%m/%Y")
+
+
+def _table_cell_text(value) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return _format_currency0(value)
+    return str(value)
+
+
+def _replace_cell_text_preserving_style(cell, text: str):
+    paragraph = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
+    template_run = paragraph.runs[0] if paragraph.runs else None
+
+    for extra_paragraph in cell.paragraphs[1:]:
+        extra_paragraph._element.getparent().remove(extra_paragraph._element)
+
+    for run in list(paragraph.runs):
+        paragraph._element.remove(run._element)
+
+    new_run = paragraph.add_run(text)
+    if template_run is not None:
+        new_run.bold = template_run.bold
+        new_run.italic = template_run.italic
+        new_run.underline = template_run.underline
+        if template_run.font is not None:
+            new_run.font.name = template_run.font.name
+            new_run.font.size = template_run.font.size
+            new_run.font.bold = template_run.font.bold
+            new_run.font.italic = template_run.font.italic
+            new_run.font.underline = template_run.font.underline
+
+
+def _populate_docx_table(table, rows: list[list[str]]):
+    if len(table.rows) < 2:
+        raise ValueError("La plantilla Word debe tener encabezado + una fila de muestra por tabla.")
+
+    template_row = table.rows[1]
+    while len(table.rows) > 2:
+        table._tbl.remove(table.rows[-1]._tr)
+
+    first_data_row = table.rows[1]
+    if not rows:
+        rows = [[""] * len(first_data_row.cells)]
+
+    for row_idx, values in enumerate(rows):
+        target_row = first_data_row if row_idx == 0 else None
+        if target_row is None:
+            new_tr = deepcopy(template_row._tr)
+            table._tbl.append(new_tr)
+            target_row = table.rows[-1]
+
+        for col_idx, value in enumerate(values):
+            if col_idx < len(target_row.cells):
+                _replace_cell_text_preserving_style(target_row.cells[col_idx], value)
+
+
+def build_recaudo_docx(template_path: Path, cronograma_df: pd.DataFrame, plan_df: pd.DataFrame) -> bytes:
+    if not template_path.exists():
+        raise FileNotFoundError(f"No encontré la plantilla Word: {template_path}")
+
+    document = Document(str(template_path))
+    if len(document.tables) < 2:
+        raise ValueError("La plantilla Word debe tener al menos dos tablas para reemplazar.")
+
+    cronograma_export = cronograma_df[cronograma_df["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
+    cronograma_rows = []
+    for idx, row in cronograma_export.reset_index(drop=True).iterrows():
+        cronograma_rows.append([
+            str(idx + 1),
+            _format_date_ddmmyyyy(row["Fecha"]),
+            _format_currency0(row["Cantidad"]),
+            str(row["Concepto"]),
+        ])
+
+    plan_export = plan_df.copy()
+    plan_rows = []
+    for _, row in plan_export.iterrows():
+        plan_rows.append([
+            "",
+            _format_date_ddmmyyyy(row["Fecha Límite de Pago"]),
+            _table_cell_text(row["Pago a Banco"]),
+            _table_cell_text(row["Comisión de Éxito"]),
+            _table_cell_text(row["Comisión Mensual"]),
+            _table_cell_text(row["Apartado Requerido"]),
+        ])
+
+    _populate_docx_table(document.tables[0], cronograma_rows)
+    _populate_docx_table(document.tables[1], plan_rows)
+
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def convert_docx_to_pdf(docx_bytes: bytes, output_stem: str) -> tuple[bytes | None, str | None]:
+    converter = shutil.which("soffice") or shutil.which("libreoffice")
+    if not converter:
+        return None, "No encontré LibreOffice en el servidor para convertir Word a PDF."
+
+    with TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        docx_path = tmp_path / f"{output_stem}.docx"
+        pdf_path = tmp_path / f"{output_stem}.pdf"
+        docx_path.write_bytes(docx_bytes)
+
+        result = subprocess.run(
+            [converter, "--headless", "--convert-to", "pdf", "--outdir", str(tmp_path), str(docx_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not pdf_path.exists():
+            return None, "LibreOffice no logró convertir el documento a PDF."
+
+        return pdf_path.read_bytes(), None
+
+
+#############################################################################################################################################################################
+#############################################################################################################################################################################
 
 def construir_plan_liquidacion(cronograma_df: pd.DataFrame, comision_mensual: float) -> pd.DataFrame:
     if cronograma_df.empty:
@@ -1334,6 +1465,64 @@ if not plan_df.empty:
     )
 else:
     st.info("Aún no hay datos suficientes para construir el plan de liquidación.")
+
+#############################################################################################################################################################################
+
+st.markdown("### 6.2) Exportar documento estructurado")
+st.caption(
+    "La plantilla Word de `data/` se rellena con las dos tablas visibles en pantalla: "
+    "la primera tabla del documento recibe el cronograma y la segunda recibe el plan de liquidación."
+)
+
+export_docx_bytes = None
+export_pdf_bytes = None
+export_pdf_warning = None
+
+if not cronograma_editado.empty and not plan_df.empty:
+    try:
+        export_docx_bytes = build_recaudo_docx(
+            template_path=DOCX_TEMPLATE_PATH,
+            cronograma_df=cronograma_editado,
+            plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
+        )
+        export_pdf_bytes, export_pdf_warning = convert_docx_to_pdf(
+            export_docx_bytes,
+            output_stem="documento_estructurado",
+        )
+    except Exception as export_exc:
+        st.error(f"No pude preparar el documento Word/PDF: {export_exc}")
+
+if export_docx_bytes:
+    export_col1, export_col2 = st.columns(2)
+    with export_col1:
+        st.download_button(
+            "⬇️ Descargar Word con tablas",
+            data=export_docx_bytes,
+            file_name="documento_estructurado.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+    with export_col2:
+        if export_pdf_bytes:
+            st.download_button(
+                "⬇️ Descargar PDF convertido",
+                data=export_pdf_bytes,
+                file_name="documento_estructurado.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            st.button("⬇️ Descargar PDF convertido", disabled=True, use_container_width=True)
+            if export_pdf_warning:
+                st.info(
+                    "Se generó el Word correctamente, pero el PDF automático no está disponible en este servidor. "
+                    f"{export_pdf_warning}"
+                )
+else:
+    st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el documento.")
+
+#############################################################################################################################################################################
+#############################################################################################################################################################################
 
 #############################################################################################################################################################################    
 # =================== 7) Predicción con el modelo ===================
