@@ -279,21 +279,46 @@ def _render_template_text(text: str, context: dict[str, str]) -> str:
     return rendered
 
 
-def _build_document_context(referencia, bancos, pago_banco, comision_total) -> dict[str, str]:
+def _join_unique_values(values, separator=" - ") -> str:
+    unique_values = []
+    for value in values:
+        text_value = str(value).strip()
+        if not text_value or text_value.lower() == "nan":
+            continue
+        if text_value not in unique_values:
+            unique_values.append(text_value)
+    return separator.join(unique_values)
+
+
+def _build_document_context(
+    referencia,
+    bancos,
+    pago_banco,
+    comision_total,
+    nombre_cliente="",
+    numero_producto="",
+    vehiculo="",
+    cedula_cliente="",
+) -> dict[str, str]:
     today = date.today()
-    bancos_unicos = []
-    for banco in [str(b).strip() for b in bancos if str(b).strip()]:
-        if banco not in bancos_unicos:
-            bancos_unicos.append(banco)
+    bancos_unicos = _join_unique_values(bancos)
+    comision_total_text = _format_currency_cop(comision_total)
 
     return {
         "referencia": str(referencia or ""),
         "dia_firma": str(today.day),
         "mes_firma": _format_month_name_es(today),
         "anio_firma": str(today.year),
-        "entidad_financiera": " - ".join(bancos_unicos),
+        "entidad_financiera": bancos_unicos,
         "pago_banco": _format_currency_cop(pago_banco),
-        "comision_total": _format_currency_cop(comision_total),
+        "comision_total": comision_total_text,
+        "nombre_cliente": str(nombre_cliente or ""),
+        "numero_producto": str(numero_producto or ""),
+        "vehiculo": str(vehiculo or ""),
+        "cedula_cliente": str(cedula_cliente or ""),
+        "suma_comisiones": comision_total_text,
+        "Suma_comisiones": comision_total_text,
+        "suma comisiones": comision_total_text,
     }
 
 
@@ -1608,6 +1633,46 @@ else:
 
 #############################################################################################################################################################################
 
+def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str, str]:
+    st.markdown("#### Campos editables del documento")
+    st.caption("Antes de descargar el Word, puedes revisar y corregir aquí los datos que se van a escribir en la plantilla.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        referencia_doc = st.text_input("Referencia documento", value=str(default_context.get("referencia", "")), key="doc_referencia")
+        dia_firma_doc = st.text_input("Día firma", value=str(default_context.get("dia_firma", "")), key="doc_dia_firma")
+        mes_firma_doc = st.text_input("Mes firma", value=str(default_context.get("mes_firma", "")), key="doc_mes_firma")
+        anio_firma_doc = st.text_input("Año firma", value=str(default_context.get("anio_firma", "")), key="doc_anio_firma")
+        entidad_financiera_doc = st.text_input("Entidad financiera", value=str(default_context.get("entidad_financiera", "")), key="doc_entidad_financiera")
+        nombre_cliente_doc = st.text_input("Nombre cliente", value=str(default_context.get("nombre_cliente", "")), key="doc_nombre_cliente")
+    with col2:
+        numero_producto_doc = st.text_input("Número producto", value=str(default_context.get("numero_producto", "")), key="doc_numero_producto")
+        vehiculo_doc = st.text_input("Vehículo", value=str(default_context.get("vehiculo", "")), key="doc_vehiculo")
+        cedula_cliente_doc = st.text_input("Cédula cliente", value=str(default_context.get("cedula_cliente", "")), key="doc_cedula_cliente")
+        pago_banco_doc = st.text_input("Pago banco documento", value=str(default_context.get("pago_banco", "")), key="doc_pago_banco")
+        comision_total_doc = st.text_input("Comisión total documento", value=str(default_context.get("comision_total", "")), key="doc_comision_total")
+        suma_comisiones_doc = st.text_input("Suma comisiones documento", value=str(default_context.get("suma_comisiones", "")), key="doc_suma_comisiones")
+
+    context = default_context.copy()
+    context.update({
+        "referencia": referencia_doc,
+        "dia_firma": dia_firma_doc,
+        "mes_firma": mes_firma_doc,
+        "anio_firma": anio_firma_doc,
+        "entidad_financiera": entidad_financiera_doc,
+        "nombre_cliente": nombre_cliente_doc,
+        "numero_producto": numero_producto_doc,
+        "vehiculo": vehiculo_doc,
+        "cedula_cliente": cedula_cliente_doc,
+        "pago_banco": pago_banco_doc,
+        "comision_total": comision_total_doc,
+        "suma_comisiones": suma_comisiones_doc,
+        "Suma_comisiones": suma_comisiones_doc,
+        "suma comisiones": suma_comisiones_doc,
+    })
+    return context
+
+
 st.markdown("### 6.2) Exportar documento estructurado")
 st.caption(
     "La plantilla Word de `data/` se rellena con las dos tablas visibles en pantalla. "
@@ -1617,12 +1682,22 @@ st.caption(
 export_docx_bytes = None
 if not cronograma_editado.empty and not plan_df.empty:
     try:
-        template_context = _build_document_context(
+        col_nombre_cliente = _find_col(sel, ["Nombre del cliente", "Nombre Cliente", "Nombre"])
+        col_numero_producto = _find_col(sel, ["Número de Crédito", "Numero de Credito", "Número Crédito", "Numero Producto"])
+        col_vehiculo = _find_col(sel, ["vehiculo", "Vehículo"])
+        col_cedula_cliente = _find_col(sel, ["Cedula", "Cédula"])
+
+        template_context_default = _build_document_context(
             referencia=ref_input,
             bancos=sel[col_banco].astype(str).tolist(),
             pago_banco=pago_banco,
             comision_total=comision_exito,
+            nombre_cliente=_join_unique_values(sel[col_nombre_cliente].tolist()) if col_nombre_cliente else "",
+            numero_producto=_join_unique_values(sel[col_numero_producto].tolist()) if col_numero_producto else "",
+            vehiculo=_join_unique_values(sel[col_vehiculo].tolist()) if col_vehiculo else "",
+            cedula_cliente=_join_unique_values(sel[col_cedula_cliente].tolist()) if col_cedula_cliente else "",
         )
+        template_context = _build_document_context_inputs(template_context_default)
         export_docx_bytes = build_recaudo_docx(
             template_path=DOCX_TEMPLATE_PATH,
             cronograma_df=cronograma_editado,
