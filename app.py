@@ -206,6 +206,183 @@ def _parse_amount_input(value) -> float:
 
 def _format_currency0(value) -> str:
     return f"$ {int(round(float(value or 0.0))):,}"
+#########################################################################################################################################################################
+##########################################################################################################################################################################
+def _format_currency_pdf(value) -> str:
+    amount = int(round(float(value or 0.0)))
+    return f"${amount:,}"
+
+
+def _format_date_pdf(value) -> str:
+    try:
+        dt = pd.to_datetime(value)
+        return dt.strftime("%d/%m/%Y")
+    except Exception:
+        return ""
+
+
+def _pdf_escape(text: str) -> str:
+    return str(text).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _pdf_wrap_text(text: str, max_chars: int) -> list[str]:
+    words = str(text).split()
+    if not words:
+        return ['']
+    lines = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+def _build_simple_pdf(operations: list[str], pagesize=(612, 792)) -> bytes:
+    width, height = pagesize
+    content = "\n".join(operations).encode("latin-1", errors="replace")
+    objects = []
+    def add_object(data: bytes):
+        objects.append(data)
+        return len(objects)
+
+    font_obj = add_object(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+    font_bold_obj = add_object(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>')
+    content_obj = add_object(b"<< /Length %d >>\nstream\n%b\nendstream" % (len(content), content))
+    page_obj = add_object((
+        f"<< /Type /Page /Parent 5 0 R /MediaBox [0 0 {width} {height}] /Resources << /Font << /F1 {font_obj} 0 R /F2 {font_bold_obj} 0 R >> >> /Contents {content_obj} 0 R >>"
+    ).encode('latin-1'))
+    pages_obj = add_object(b'<< /Type /Pages /Kids [4 0 R] /Count 1 >>')
+    catalog_obj = add_object(b'<< /Type /Catalog /Pages 5 0 R >>')
+
+    buffer = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(buffer))
+        buffer.extend(f"{i} 0 obj\n".encode("latin-1"))
+        buffer.extend(obj)
+        buffer.extend(b"\nendobj\n")
+    xref_pos = len(buffer)
+    buffer.extend(f"xref\n0 {len(objects)+1}\n".encode("latin-1"))
+    buffer.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        buffer.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
+    buffer.extend(f"trailer\n<< /Size {len(objects)+1} /Root {catalog_obj} 0 R >>\nstartxref\n{xref_pos}\n%%EOF".encode("latin-1"))
+    return bytes(buffer)
+
+
+def generar_pagare_pdf(
+    referencia: str,
+    cronograma_df: pd.DataFrame,
+    plan_df: pd.DataFrame,
+    fecha_documento: date,
+    entidad_financiera: str,
+    numero_producto: str,
+    pago_banco_total: float,
+    comision_total: float,
+    vehiculo: str = 'COINK',
+):
+    page_w, page_h = 612, 792
+    margin_x = 42
+    y = page_h - 44
+    ops = []
+
+    def add_text(text: str, x: float, y_pos: float, size: int = 10, bold: bool = False):
+        font = '/F2' if bold else '/F1'
+        ops.append('BT')
+        ops.append(f'{font} {size} Tf')
+        ops.append(f'1 0 0 1 {x:.2f} {y_pos:.2f} Tm')
+        ops.append(f'({_pdf_escape(text)}) Tj')
+        ops.append('ET')
+
+    def add_paragraph(text: str, size: int = 10, bold: bool = False, spacing: int = 14, max_chars: int = 104):
+        nonlocal y
+        for line in _pdf_wrap_text(text, max_chars):
+            add_text(line, margin_x, y, size=size, bold=bold)
+            y -= spacing
+
+    def add_table(title: str | None, headers: list[str], rows: list[list[str]], widths: list[float], row_height: float = 22, font_size: int = 9):
+        nonlocal y
+        table_w = sum(widths)
+        x0 = margin_x
+        if title:
+            title_h = 18
+            ops.append('0.043 0.247 0.459 rg')
+            ops.append(f'{x0:.2f} {y - title_h:.2f} {table_w:.2f} {title_h:.2f} re f')
+            add_text(title, x0 + table_w/2 - (len(title) * 2.4), y - 13, size=11, bold=True)
+            y -= title_h + 6
+        total_rows = [headers] + rows
+        table_h = len(total_rows) * row_height
+        top = y
+        ops.append('0 0 0 RG')
+        ops.append('0.6 w')
+        ops.append('0.043 0.247 0.459 rg')
+        ops.append(f'{x0:.2f} {top - row_height:.2f} {table_w:.2f} {row_height:.2f} re f')
+        current_x = x0
+        for w in widths:
+            ops.append(f'{current_x:.2f} {top - table_h:.2f} m {current_x:.2f} {top:.2f} l S')
+            current_x += w
+        ops.append(f'{x0 + table_w:.2f} {top - table_h:.2f} m {x0 + table_w:.2f} {top:.2f} l S')
+        for i in range(len(total_rows) + 1):
+            line_y = top - i * row_height
+            ops.append(f'{x0:.2f} {line_y:.2f} m {x0 + table_w:.2f} {line_y:.2f} l S')
+        for row_idx, row in enumerate(total_rows):
+            text_y = top - (row_idx + 1) * row_height + 7
+            cell_x = x0
+            for col_idx, cell in enumerate(row):
+                max_chars = max(6, int(widths[col_idx] / 5.5))
+                cell_lines = _pdf_wrap_text(cell, max_chars)
+                for line_idx, line in enumerate(cell_lines[:2]):
+                    add_text(line, cell_x + 3, text_y + (len(cell_lines[:2]) - line_idx - 1) * 8, size=font_size, bold=(row_idx == 0))
+                cell_x += widths[col_idx]
+        y = top - table_h - 16
+
+    add_text(f'Pagaré / Liquidación Estructurada Ref. No. {referencia}', margin_x, y, size=14, bold=True)
+    y -= 24
+    add_text(f'Bogotá, {fecha_documento.strftime("%d/%m/%Y")}', margin_x, y, size=10)
+    y -= 20
+    add_paragraph('1. Por medio de la presente autorizo la liquidación del producto señalado a continuación. Este PDF sale con las tablas listas para revisión y deja los demás campos del cliente para ser completados en el siguiente paso.')
+    add_paragraph(f'b. Entidad Financiera: {entidad_financiera}')
+    add_paragraph(f'c. Número de producto: {numero_producto}')
+    add_paragraph(f'd. Pago a la Entidad Financiera: {_format_currency_pdf(pago_banco_total)} COP')
+    add_paragraph(f'e. Comisión: {_format_currency_pdf(comision_total)} COP')
+    y -= 4
+    add_paragraph(f'2. Solicito a {vehiculo} que se realicen las transferencias abajo descritas, de mi depósito {referencia}, con el fin de generar el pago de la comisión a favor de Bravo y el descrito en el numeral 1 del presente documento.')
+
+    cronograma_visible = cronograma_df[cronograma_df['Cantidad'] > 0.005].copy()
+    cronograma_visible['Fecha'] = pd.to_datetime(cronograma_visible['Fecha'])
+    cronograma_rows = []
+    for idx, row in enumerate(cronograma_visible.itertuples(index=False), start=1):
+        cronograma_rows.append([
+            str(idx),
+            row.Fecha.strftime('%d/%m/%Y'),
+            f'{_format_currency_pdf(row.Cantidad)} COP',
+            str(row.Concepto),
+        ])
+    add_table(None, ['N°', 'Fecha', 'Cantidad', 'Concepto'], cronograma_rows, [24, 70, 120, 314], row_height=22, font_size=9)
+    add_paragraph(f"3. Me comprometo a realizar los apartados mensuales descritos en el siguiente cuadro y a enviar los soportes de pago con asunto 'Soporte Pago Referencia {referencia}' en las fechas y por los montos estipulados.")
+
+    plan_rows = []
+    for _, row in plan_df.iterrows():
+        plan_rows.append([
+            '',
+            _format_date_pdf(row['Fecha Límite de Pago']),
+            _format_currency_pdf(row['Pago a Banco']),
+            _format_currency_pdf(row['Comisión de Éxito']),
+            _format_currency_pdf(row['Comisión Mensual']),
+            _format_currency_pdf(row['Apartado Requerido']),
+        ])
+    add_table('PLAN DE LIQUIDACIÓN ESTRUCTURADA', ['Fecha de Depósito', 'Fecha Límite de Pago', 'Pago a Banco', 'Comisión de Éxito', 'Comisión Mensual', 'Apartado Requerido'], plan_rows, [82, 90, 78, 90, 90, 98], row_height=26, font_size=8)
+
+    file_name = f"Pagare{fecha_documento.isoformat()} ref: {referencia}.pdf"
+    return _build_simple_pdf(ops), file_name
+
+#########################################################################################################################################################################
+##########################################################################################################################################################################
 
 def construir_plan_liquidacion(cronograma_df: pd.DataFrame, comision_mensual: float) -> pd.DataFrame:
     if cronograma_df.empty:
@@ -1331,6 +1508,41 @@ if not plan_df.empty:
     )
 else:
     st.info("Aún no hay datos suficientes para construir el plan de liquidación.")
+
+#########################################################################################################################################################################
+##########################################################################################################################################################################
+
+st.markdown("### 6.2) Descargar borrador del pagaré en PDF")
+entidad_financiera_pdf = ", ".join(sorted({str(x).strip() for x in sel[col_banco].dropna().tolist() if str(x).strip()})) or "Por definir"
+numero_producto_pdf = " - ".join(sorted({str(x).strip() for x in ids_sel if str(x).strip()})) or str(ref_input)
+
+if not cronograma_editado.empty and not plan_df.empty:
+    pdf_bytes, pdf_file_name = generar_pagare_pdf(
+        referencia=str(ref_input),
+        cronograma_df=cronograma_editado,
+        plan_df=plan_df,
+        fecha_documento=date.today(),
+        entidad_financiera=entidad_financiera_pdf,
+        numero_producto=numero_producto_pdf,
+        pago_banco_total=float(pago_banco),
+        comision_total=float(comision_exito),
+    )
+    st.download_button(
+        "📄 Descargar pagaré en PDF",
+        data=pdf_bytes,
+        file_name=pdf_file_name,
+        mime="application/pdf",
+        use_container_width=True,
+        help="Genera un borrador con las dos tablas ya embebidas en el documento final.",
+    )
+    st.caption(f"Nombre sugerido del archivo: `{pdf_file_name}`")
+else:
+    st.info("Completa el cronograma y el plan de liquidación para habilitar la descarga del pagaré en PDF.")
+
+
+#########################################################################################################################################################################
+##########################################################################################################################################################################
+
 #############################################################################################################################################################################    
 # =================== 7) Predicción con el modelo ===================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
