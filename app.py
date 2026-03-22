@@ -22,12 +22,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 import streamlit.components.v1 as components
 from docx import Document
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
-from reportlab.lib.pagesizes import LETTER
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Pt
 
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -260,39 +257,33 @@ def _normalize_template_value(value) -> str:
     return str(value)
 
 
-def _render_template_text(text: str, context: dict[str, str]) -> str:
-    rendered = str(text)
-    for key, value in context.items():
-        rendered = rendered.replace(f"{{{key}}}", _normalize_template_value(value))
-    return rendered
+
+def _set_table_cell_no_wrap(cell):
+    tc_pr = cell._tc.get_or_add_tcPr()
+    no_wrap = tc_pr.find(qn("w:noWrap"))
+    if no_wrap is None:
+        no_wrap = OxmlElement("w:noWrap")
+        tc_pr.append(no_wrap)
 
 
-def _build_document_context(
-    referencia,
-    ids,
-    bancos,
-    nombre_cliente,
-    pago_banco,
-    comision_total,
-    deposito,
-):
-    today = date.today()
-    bancos_limpios = [str(b).strip() for b in bancos if str(b).strip()]
-    entidad_financiera = ", ".join(dict.fromkeys(bancos_limpios))
-    numero_producto = ", ".join(map(str, ids))
+def _apply_table_text_style(paragraph, run, *, bold=None):
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.line_spacing = 1
+    paragraph.alignment = paragraph.alignment
 
-    return {
-        "dia_firma": str(today.day),
-        "mes_firma": _format_month_name_es(today),
-        "anio_firma": str(today.year),
-        "referencia": str(referencia or ""),
-        "entidad_financiera": entidad_financiera,
-        "nombre_cliente": str(nombre_cliente or ""),
-        "numero_producto": numero_producto,
-        "pago_banco": _format_currency0(pago_banco),
-        "comision_total": _format_currency0(comision_total),
-        "vehiculo": "Bancolombia" if deposito else "",
-    }
+    run.font.name = "Times New Roman"
+    r_pr = run._element.get_or_add_rPr()
+    r_fonts = r_pr.rFonts
+    if r_fonts is None:
+        r_fonts = OxmlElement("w:rFonts")
+        r_pr.append(r_fonts)
+    r_fonts.set(qn("w:ascii"), "Times New Roman")
+    r_fonts.set(qn("w:hAnsi"), "Times New Roman")
+    r_fonts.set(qn("w:cs"), "Times New Roman")
+    run.font.size = Pt(9.5)
+    if bold is not None:
+        run.bold = bold
 
 
 def _replace_cell_text_preserving_style(cell, text: str):
@@ -305,17 +296,15 @@ def _replace_cell_text_preserving_style(cell, text: str):
     for run in list(paragraph.runs):
         paragraph._element.remove(run._element)
 
-    new_run = paragraph.add_run(text)
+    normalized_text = str(text).replace("\n", " ").strip()
+    new_run = paragraph.add_run(normalized_text)
+    _set_table_cell_no_wrap(cell)
+
+    inherited_bold = template_run.bold if template_run is not None else None
     if template_run is not None:
-        new_run.bold = template_run.bold
         new_run.italic = template_run.italic
         new_run.underline = template_run.underline
-        if template_run.font is not None:
-            new_run.font.name = template_run.font.name
-            new_run.font.size = template_run.font.size
-            new_run.font.bold = template_run.font.bold
-            new_run.font.italic = template_run.font.italic
-            new_run.font.underline = template_run.font.underline
+    _apply_table_text_style(paragraph, new_run, bold=inherited_bold)
 
 
 def _populate_docx_table(table, rows: list[list[str]]):
@@ -378,115 +367,6 @@ def build_recaudo_docx(template_path: Path, cronograma_df: pd.DataFrame, plan_df
     output = BytesIO()
     document.save(output)
     return output.getvalue()
-
-
-def build_recaudo_pdf(
-    template_path: Path,
-    cronograma_df: pd.DataFrame,
-    plan_df: pd.DataFrame,
-    template_context: dict[str, str],
-) -> bytes:
-    if not template_path.exists():
-        raise FileNotFoundError(f"No encontré la plantilla Word: {template_path}")
-
-    document = Document(str(template_path))
-    styles = getSampleStyleSheet()
-    style_body = ParagraphStyle(
-        "body_custom",
-        parent=styles["BodyText"],
-        fontName="Helvetica",
-        fontSize=10,
-        leading=14,
-        alignment=TA_JUSTIFY,
-        spaceAfter=10,
-    )
-    style_title = ParagraphStyle(
-        "title_custom",
-        parent=styles["Title"],
-        fontName="Helvetica-Bold",
-        fontSize=12,
-        leading=16,
-        alignment=TA_CENTER,
-        spaceAfter=12,
-    )
-
-    story = []
-    table_counter = 0
-    for paragraph in document.paragraphs:
-        raw_text = "".join(run.text for run in paragraph.runs).strip()
-        if raw_text:
-            rendered = _render_template_text(raw_text, template_context).replace("\n", "<br/>")
-            style = style_title if raw_text.lower().startswith("liquidación de deuda") else style_body
-            story.append(Paragraph(rendered, style))
-            story.append(Spacer(1, 0.08 * inch))
-
-        next_element = paragraph._p.getnext()
-        if next_element is not None and next_element.tag.endswith("tbl") and table_counter < 2:
-            if table_counter == 0:
-                cronograma_table_data = [["Nº", "Fecha", "Cantidad", "Concepto"]]
-                for idx, row in cronograma_df[cronograma_df["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].reset_index(drop=True).iterrows():
-                    cronograma_table_data.append([
-                        str(idx + 1),
-                        _format_date_ddmmyyyy(row["Fecha"]),
-                        _format_currency0(row["Cantidad"]),
-                        str(row["Concepto"]),
-                    ])
-                table = Table(cronograma_table_data, repeatRows=1, colWidths=[0.55 * inch, 1.2 * inch, 1.2 * inch, 3.45 * inch])
-            else:
-                plan_table_data = [[
-                    "Fecha de Depósito",
-                    "Fecha Límite de Pago",
-                    "Pago a Banco",
-                    "Comisión de Éxito",
-                    "Comisión Mensual",
-                    "Apartado Requerido",
-                ]]
-                for _, row in plan_df.iterrows():
-                    plan_table_data.append([
-                        _format_date_ddmmyyyy(date.today()),
-                        _format_date_ddmmyyyy(row["Fecha Límite de Pago"]),
-                        _table_cell_text(row["Pago a Banco"]),
-                        _table_cell_text(row["Comisión de Éxito"]),
-                        _table_cell_text(row["Comisión Mensual"]),
-                        _table_cell_text(row["Apartado Requerido"]),
-                    ])
-                table = Table(
-                    plan_table_data,
-                    repeatRows=1,
-                    colWidths=[1.0 * inch, 1.05 * inch, 1.0 * inch, 1.05 * inch, 1.05 * inch, 1.2 * inch],
-                )
-
-            table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9e2f3")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("LEADING", (0, 0), (-1, -1), 10),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("ALIGN", (0, 0), (0, -1), "CENTER"),
-                ("ALIGN", (1, 1), (-1, -1), "CENTER"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f9fc")]),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]))
-            story.append(table)
-            story.append(Spacer(1, 0.18 * inch))
-            table_counter += 1
-
-    output = BytesIO()
-    pdf_doc = SimpleDocTemplate(
-        output,
-        pagesize=LETTER,
-        leftMargin=0.55 * inch,
-        rightMargin=0.55 * inch,
-        topMargin=0.55 * inch,
-        bottomMargin=0.55 * inch,
-    )
-    pdf_doc.build(story)
-    return output.getvalue()
-
 
 #############################################################################################################################################################################
 #############################################################################################################################################################################
@@ -1620,57 +1500,29 @@ else:
 
 st.markdown("### 6.2) Exportar documento estructurado")
 st.caption(
-    "La plantilla Word de `data/` se rellena con las dos tablas visibles en pantalla: "
-    "la primera tabla del documento recibe el cronograma y la segunda recibe el plan de liquidación."
+    "La plantilla Word de `data/` se rellena con las dos tablas visibles en pantalla. "
+    "Las celdas exportadas se normalizan en Times New Roman 9.5 para que el estilo interno coincida con el resto del documento."
 )
 
 export_docx_bytes = None
-export_pdf_bytes = None
-
 if not cronograma_editado.empty and not plan_df.empty:
     try:
-        template_context = _build_document_context(
-            referencia=ref_input,
-            ids=ids_sel,
-            bancos=sel[col_banco].astype(str).tolist(),
-            nombre_cliente=fila_primera.get("Nombre", "") if isinstance(fila_primera, pd.Series) else "",
-            pago_banco=pago_banco,
-            comision_total=comision_exito,
-            deposito=st.session_state.get("deposito_edit", 0.0),
-        )
         export_docx_bytes = build_recaudo_docx(
             template_path=DOCX_TEMPLATE_PATH,
             cronograma_df=cronograma_editado,
             plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
         )
-        export_pdf_bytes = build_recaudo_pdf(
-            template_path=DOCX_TEMPLATE_PATH,
-            cronograma_df=cronograma_editado,
-            plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
-            template_context=template_context,
-        )
     except Exception as export_exc:
-        st.error(f"No pude preparar el documento Word/PDF: {export_exc}")
+        st.error(f"No pude preparar el documento Word: {export_exc}")
 
 if export_docx_bytes:
-    export_col1, export_col2 = st.columns(2)
-    with export_col1:
-        st.download_button(
-            "⬇️ Descargar Word con tablas",
-            data=export_docx_bytes,
-            file_name="documento_estructurado.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
-        )
-    with export_col2:
-        st.download_button(
-            "⬇️ Descargar PDF completo",
-            data=export_pdf_bytes,
-            file_name="documento_estructurado.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-            disabled=not bool(export_pdf_bytes),
-        )
+    st.download_button(
+        "⬇️ Descargar Word con tablas",
+        data=export_docx_bytes,
+        file_name="documento_estructurado.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        use_container_width=True,
+    )
 else:
     st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el documento.")
 #############################################################################################################################################################################
