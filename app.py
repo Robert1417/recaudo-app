@@ -26,6 +26,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
+
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
 
@@ -84,7 +85,14 @@ class Winsorizer(BaseEstimator, TransformerMixin):
 
 # ------------------ Ajustes globales ------------------
 pd.set_option("mode.copy_on_write", True)
-st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
+def _configure_streamlit_page():
+    try:
+        st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
+    except Exception:
+        return
+
+
+_configure_streamlit_page()
 st.title("💸 Calculadora de Recaudo [SANDBOX]")
 
 import sklearn, numpy, joblib
@@ -264,6 +272,74 @@ def _normalize_template_value(value) -> str:
 
 
 
+def _render_template_text(text: str, context: dict[str, str]) -> str:
+    rendered = str(text)
+    for key, value in context.items():
+        rendered = rendered.replace(f"{{{key}}}", _normalize_template_value(value))
+    return rendered
+
+
+def _build_document_context(referencia, bancos, pago_banco, comision_total) -> dict[str, str]:
+    today = date.today()
+    bancos_unicos = []
+    for banco in [str(b).strip() for b in bancos if str(b).strip()]:
+        if banco not in bancos_unicos:
+            bancos_unicos.append(banco)
+
+    return {
+        "referencia": str(referencia or ""),
+        "dia_firma": str(today.day),
+        "mes_firma": _format_month_name_es(today),
+        "anio_firma": str(today.year),
+        "entidad_financiera": " - ".join(bancos_unicos),
+        "pago_banco": _format_currency_cop(pago_banco),
+        "comision_total": _format_currency_cop(comision_total),
+    }
+
+
+def _replace_paragraph_text_preserving_style(paragraph, new_text: str):
+    if not paragraph.runs:
+        paragraph.add_run(new_text)
+        return
+
+    first_run = paragraph.runs[0]
+    first_run.text = new_text
+    for run in paragraph.runs[1:]:
+        run.text = ""
+
+
+def _apply_context_to_paragraph(paragraph, context: dict[str, str]):
+    full_text = "".join(run.text for run in paragraph.runs) if paragraph.runs else paragraph.text
+    rendered_text = _render_template_text(full_text, context)
+    if rendered_text != full_text:
+        _replace_paragraph_text_preserving_style(paragraph, rendered_text)
+
+
+def _apply_context_to_table(table, context: dict[str, str]):
+    for row in table.rows:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                _apply_context_to_paragraph(paragraph, context)
+            for nested_table in cell.tables:
+                _apply_context_to_table(nested_table, context)
+
+
+def _apply_context_to_document(document, context: dict[str, str]):
+    for paragraph in document.paragraphs:
+        _apply_context_to_paragraph(paragraph, context)
+    for table in document.tables:
+        _apply_context_to_table(table, context)
+    for section in document.sections:
+        for paragraph in section.header.paragraphs:
+            _apply_context_to_paragraph(paragraph, context)
+        for table in section.header.tables:
+            _apply_context_to_table(table, context)
+        for paragraph in section.footer.paragraphs:
+            _apply_context_to_paragraph(paragraph, context)
+        for table in section.footer.tables:
+            _apply_context_to_table(table, context)
+
+
 def _set_table_cell_no_wrap(cell):
     tc_pr = cell._tc.get_or_add_tcPr()
     no_wrap = tc_pr.find(qn("w:noWrap"))
@@ -358,11 +434,17 @@ def _populate_docx_table(table, rows: list[list[str]]):
                 _replace_cell_text_preserving_style(target_row.cells[col_idx], value)
 
 
-def build_recaudo_docx(template_path: Path, cronograma_df: pd.DataFrame, plan_df: pd.DataFrame) -> bytes:
+def build_recaudo_docx(
+    template_path: Path,
+    cronograma_df: pd.DataFrame,
+    plan_df: pd.DataFrame,
+    template_context: dict[str, str],
+) -> bytes:
     if not template_path.exists():
         raise FileNotFoundError(f"No encontré la plantilla Word: {template_path}")
 
     document = Document(str(template_path))
+    _apply_context_to_document(document, template_context)
     if len(document.tables) < 2:
         raise ValueError("La plantilla Word debe tener al menos dos tablas para reemplazar.")
 
@@ -1535,10 +1617,17 @@ st.caption(
 export_docx_bytes = None
 if not cronograma_editado.empty and not plan_df.empty:
     try:
+        template_context = _build_document_context(
+            referencia=ref_input,
+            bancos=sel[col_banco].astype(str).tolist(),
+            pago_banco=pago_banco,
+            comision_total=comision_exito,
+        )
         export_docx_bytes = build_recaudo_docx(
             template_path=DOCX_TEMPLATE_PATH,
             cronograma_df=cronograma_editado,
             plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
+            template_context=template_context,
         )
     except Exception as export_exc:
         st.error(f"No pude preparar el documento Word: {export_exc}")
