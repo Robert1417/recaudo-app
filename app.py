@@ -419,7 +419,7 @@ def generar_pagare_pdf(
     page5_ops.extend(_pdf_text_ops(first_table_text))
 
     # Página 6: rellenar las dos tablas del plan usando la plantilla base.
-    page6_ops = ["q", "1 1 1 rg", "30 350 555 250 re f", "30 720 555 130 re f", "Q", "q", "0 0 0 RG", "0.6 w"]
+    page6_ops = ["q", "0 0 0 RG", "0.6 w"]
     plan_rows: list[list[str]] = []
     for _, row in plan_visible.iterrows():
         plan_rows.append([
@@ -449,11 +449,16 @@ def generar_pagare_pdf(
 
     top_plan_rows = plan_rows[:1]
     bottom_plan_rows = plan_rows[1:]
-    top_ops, top_text = draw_plan_table_rows(808.0, top_plan_rows)
-    bottom_ops, bottom_text = draw_plan_table_rows(523.0, bottom_plan_rows)
-    page6_ops.extend(top_ops + bottom_ops)
+    top_ops, top_text = draw_plan_table_rows(187.25, top_plan_rows, row_h=16.56)
+    page6_ops.extend(top_ops)
     page6_ops.append("Q")
-    page6_ops.extend(_pdf_text_ops(top_text + bottom_text))
+    page6_ops.extend(_pdf_text_ops(top_text))
+
+    page7_ops = ["q", "1 1 1 rg", "30 515 555 240 re f", "Q", "q", "0 0 0 RG", "0.6 w"]
+    bottom_ops, bottom_text = draw_plan_table_rows(748.0, bottom_plan_rows)
+    page7_ops.extend(bottom_ops)
+    page7_ops.append("Q")
+    page7_ops.extend(_pdf_text_ops(bottom_text))
 
     file_name = f"Pagare{fecha_documento.isoformat()} ref: {referencia}.pdf"
     final_pdf = _replace_page_contents_with_overlay(
@@ -461,6 +466,7 @@ def generar_pagare_pdf(
         {
             39: _pdf_stream_join(page5_ops),
             111: _pdf_stream_join(page6_ops),
+            232: _pdf_stream_join(page7_ops),
         },
     )
     return final_pdf, file_name
