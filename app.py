@@ -218,6 +218,12 @@ def _format_currency0(value) -> str:
 
 #############################################################################################################################################################################
 #############################################################################################################################################################################
+def _format_currency_cop(value) -> str:
+    amount = float(value or 0.0)
+    formatted = f"{amount:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"${formatted} COP"
+
+
 def _format_date_ddmmyyyy(value) -> str:
     if pd.isna(value):
         return ""
@@ -280,7 +286,7 @@ def _set_cell_width(cell, width_inches: float):
 
 def _apply_cronograma_table_layout(table):
     table.autofit = False
-    column_widths = [0.32, 1.05, 1.95, 3.10]
+    column_widths = [0.32, 0.95, 1.35, 3.15]
     for row in table.rows:
         for idx, width in enumerate(column_widths):
             if idx < len(row.cells):
@@ -366,7 +372,7 @@ def build_recaudo_docx(template_path: Path, cronograma_df: pd.DataFrame, plan_df
         cronograma_rows.append([
             str(idx + 1),
             _format_date_ddmmyyyy(row["Fecha"]),
-            _format_currency0(row["Cantidad"]),
+            _format_currency_cop(row["Cantidad"]),
             str(row["Concepto"]),
         ])
 
@@ -388,7 +394,7 @@ def build_recaudo_docx(template_path: Path, cronograma_df: pd.DataFrame, plan_df
 
     output = BytesIO()
     document.save(output)
-    return output.getvalue()
+    return output.getvalue()getvalue()
 #############################################################################################################################################################################
 #############################################################################################################################################################################
 
