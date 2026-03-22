@@ -267,14 +267,15 @@ def _set_table_cell_no_wrap(cell):
 
 
 def _set_cell_width(cell, width_inches: float):
-    cell.width = Inches(width_inches)
+    width_twips = int(width_inches * 1440)
+    cell.width = width_twips
     tc_pr = cell._tc.get_or_add_tcPr()
     tc_w = tc_pr.find(qn("w:tcW"))
     if tc_w is None:
         tc_w = OxmlElement("w:tcW")
         tc_pr.append(tc_w)
     tc_w.set(qn("w:type"), "dxa")
-    tc_w.set(qn("w:w"), str(int(Inches(width_inches).emu / 635)))
+    tc_w.set(qn("w:w"), str(width_twips))
 
 
 def _apply_cronograma_table_layout(table):
@@ -388,7 +389,6 @@ def build_recaudo_docx(template_path: Path, cronograma_df: pd.DataFrame, plan_df
     output = BytesIO()
     document.save(output)
     return output.getvalue()
-
 #############################################################################################################################################################################
 #############################################################################################################################################################################
 
