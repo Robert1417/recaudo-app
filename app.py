@@ -242,37 +242,117 @@ def _pdf_wrap_text(text: str, max_chars: int) -> list[str]:
     return lines
 
 
-def _build_simple_pdf(operations: list[str], pagesize=(612, 792)) -> bytes:
-    width, height = pagesize
-    content = "\n".join(operations).encode("latin-1", errors="replace")
-    objects = []
-    def add_object(data: bytes):
-        objects.append(data)
-        return len(objects)
+def _pdf_stream_join(lines: list[str]) -> bytes:
+    return "\n".join(lines).encode("latin-1", errors="replace")
 
-    font_obj = add_object(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
-    font_bold_obj = add_object(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>')
-    content_obj = add_object(b"<< /Length %d >>\nstream\n%b\nendstream" % (len(content), content))
-    page_obj = add_object((
-        f"<< /Type /Page /Parent 5 0 R /MediaBox [0 0 {width} {height}] /Resources << /Font << /F1 {font_obj} 0 R /F2 {font_bold_obj} 0 R >> >> /Contents {content_obj} 0 R >>"
-    ).encode('latin-1'))
-    pages_obj = add_object(b'<< /Type /Pages /Kids [4 0 R] /Count 1 >>')
-    catalog_obj = add_object(b'<< /Type /Catalog /Pages 5 0 R >>')
 
-    buffer = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = [0]
-    for i, obj in enumerate(objects, start=1):
-        offsets.append(len(buffer))
-        buffer.extend(f"{i} 0 obj\n".encode("latin-1"))
-        buffer.extend(obj)
-        buffer.extend(b"\nendobj\n")
-    xref_pos = len(buffer)
-    buffer.extend(f"xref\n0 {len(objects)+1}\n".encode("latin-1"))
-    buffer.extend(b"0000000000 65535 f \n")
-    for off in offsets[1:]:
-        buffer.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
-    buffer.extend(f"trailer\n<< /Size {len(objects)+1} /Root {catalog_obj} 0 R >>\nstartxref\n{xref_pos}\n%%EOF".encode("latin-1"))
-    return bytes(buffer)
+def _pdf_text_ops(lines: list[tuple[float, float, str, str, float, float]]) -> list[str]:
+    ops: list[str] = []
+    for x, y, text, font_name, font_size, gray in lines:
+        ops.extend([
+            "BT",
+            f"/{font_name} {font_size:.2f} Tf",
+            f"{gray:.3f} g",
+            f"1 0 0 1 {x:.3f} {y:.3f} Tm",
+            f"({_pdf_escape(text)}) Tj",
+            "ET",
+        ])
+    return ops
+
+
+def _pdf_multiline_text(
+    x: float,
+    y: float,
+    text: str,
+    font_name: str = "F2",
+    font_size: float = 9.6,
+    line_gap: float = 11.4,
+    max_chars: int = 115,
+) -> list[tuple[float, float, str, str, float, float]]:
+    rows: list[tuple[float, float, str, str, float, float]] = []
+    current_y = y
+    for line in _pdf_wrap_text(text, max_chars):
+        rows.append((x, current_y, line, font_name, font_size, 0.0))
+        current_y -= line_gap
+    return rows
+
+
+def _replace_page_contents_with_overlay(pdf_bytes: bytes, page_overlays: dict[int, bytes]) -> bytes:
+    trailer_match = re.search(
+        br"trailer\s*<<(?P<trailer>.*?)>>\s*startxref\s*(?P<startxref>\d+)\s*%%EOF\s*$",
+        pdf_bytes,
+        re.S,
+    )
+    if not trailer_match:
+        raise RuntimeError("No pude leer el trailer del PDF base.")
+
+    trailer_body = trailer_match.group("trailer").decode("latin-1", errors="ignore")
+    prev_xref = int(trailer_match.group("startxref"))
+
+    size_match = re.search(r"/Size\s+(\d+)", trailer_body)
+    root_match = re.search(r"/Root\s+(\d+\s+\d+\s+R)", trailer_body)
+    info_match = re.search(r"/Info\s+(\d+\s+\d+\s+R)", trailer_body)
+    id_match = re.search(r"/ID\s+\[(.*?)\]", trailer_body, re.S)
+    if not size_match or not root_match:
+        raise RuntimeError("No pude leer el tamaño o root del PDF base.")
+
+    base_size = int(size_match.group(1))
+    next_obj = base_size
+    objects_to_write: list[tuple[int, bytes]] = []
+
+    def read_object(obj_num: int) -> bytes:
+        obj_match = re.search(fr"{obj_num} 0 obj\s*(.*?)\s*endobj".encode(), pdf_bytes, re.S)
+        if not obj_match:
+            raise RuntimeError(f"No pude leer el objeto {obj_num} del PDF base.")
+        return obj_match.group(1)
+
+    for page_obj_num, overlay_stream in page_overlays.items():
+        stream_obj_num = next_obj
+        next_obj += 1
+        stream_obj = b"<< /Length %d >>\nstream\n%b\nendstream" % (len(overlay_stream), overlay_stream)
+        objects_to_write.append((stream_obj_num, stream_obj))
+
+        page_obj = read_object(page_obj_num)
+        updated_page = re.sub(
+            br"/Contents\s+(\d+)\s+0\s+R",
+            f"/Contents [\\1 0 R {stream_obj_num} 0 R]".encode("latin-1"),
+            page_obj,
+            count=1,
+        )
+        objects_to_write.append((page_obj_num, updated_page))
+
+    result = bytearray(pdf_bytes.rstrip())
+    if not result.endswith(b"\n"):
+        result.extend(b"\n")
+
+    offsets: dict[int, int] = {}
+    for obj_num, obj_body in objects_to_write:
+        offsets[obj_num] = len(result)
+        result.extend(f"{obj_num} 0 obj\n".encode("latin-1"))
+        result.extend(obj_body)
+        result.extend(b"\nendobj\n")
+
+    xref_start = len(result)
+    grouped: dict[int, list[tuple[int, int]]] = {}
+    for obj_num, offset in sorted(offsets.items()):
+        grouped.setdefault(obj_num, []).append((obj_num, offset))
+
+    result.extend(b"xref\n")
+    for obj_num, offset in sorted(offsets.items()):
+        result.extend(f"{obj_num} 1\n{offset:010d} 00000 n \n".encode("latin-1"))
+
+    trailer_parts = [
+        f"/Size {max(next_obj, base_size)}",
+        f"/Root {root_match.group(1)}",
+        f"/Prev {prev_xref}",
+    ]
+    if info_match:
+        trailer_parts.append(f"/Info {info_match.group(1)}")
+    if id_match:
+        trailer_parts.append(f"/ID [{id_match.group(1).strip()}]")
+    trailer_text = " ".join(trailer_parts)
+    result.extend(f"trailer\n<< {trailer_text} >>\nstartxref\n{xref_start}\n%%EOF".encode("latin-1"))
+    return bytes(result)
 
 
 def generar_pagare_pdf(
@@ -286,101 +366,102 @@ def generar_pagare_pdf(
     comision_total: float,
     vehiculo: str = 'COINK',
 ):
-    page_w, page_h = 612, 792
-    margin_x = 42
-    y = page_h - 44
-    ops = []
+    base_pdf = Path("data/Documento Estructurados en Blanco.pdf").read_bytes()
 
-    def add_text(text: str, x: float, y_pos: float, size: int = 10, bold: bool = False):
-        font = '/F2' if bold else '/F1'
-        ops.append('BT')
-        ops.append(f'{font} {size} Tf')
-        ops.append(f'1 0 0 1 {x:.2f} {y_pos:.2f} Tm')
-        ops.append(f'({_pdf_escape(text)}) Tj')
-        ops.append('ET')
+    cronograma_visible = cronograma_df[cronograma_df["Cantidad"] > 0.005].copy()
+    cronograma_visible["Fecha"] = pd.to_datetime(cronograma_visible["Fecha"])
+    plan_visible = plan_df.copy()
 
-    def add_paragraph(text: str, size: int = 10, bold: bool = False, spacing: int = 14, max_chars: int = 104):
-        nonlocal y
-        for line in _pdf_wrap_text(text, max_chars):
-            add_text(line, margin_x, y, size=size, bold=bold)
-            y -= spacing
+    page5_ops = ["q", "1 1 1 rg", "45 300 500 190 re f", "Q", "q", "0 0 0 RG", "0.6 w"]
+    # Tabla de transferencias: usa el encabezado del PDF base y extiende filas debajo.
+    first_table_x = [83.064, 94.104, 139.01, 222.07, 331.08]
+    first_row_top = 502.73
+    row_height = 12.99
+    for idx, row in enumerate(cronograma_visible.itertuples(index=False), start=0):
+        top = first_row_top - (idx * row_height)
+        bottom = top - row_height
+        page5_ops.extend([
+            f"{first_table_x[0]:.3f} {bottom:.3f} m {first_table_x[-1]:.3f} {bottom:.3f} l S",
+        ])
+        for x_line in first_table_x:
+            page5_ops.append(f"{x_line:.3f} {bottom:.3f} m {x_line:.3f} {top:.3f} l S")
+    page5_ops.append(f"{first_table_x[-1]:.3f} {first_row_top - (len(cronograma_visible) * row_height):.3f} m {first_table_x[-1]:.3f} {first_row_top:.3f} l S")
+    page5_ops.append("Q")
 
-    def add_table(title: str | None, headers: list[str], rows: list[list[str]], widths: list[float], row_height: float = 22, font_size: int = 9):
-        nonlocal y
-        table_w = sum(widths)
-        x0 = margin_x
-        if title:
-            title_h = 18
-            ops.append('0.043 0.247 0.459 rg')
-            ops.append(f'{x0:.2f} {y - title_h:.2f} {table_w:.2f} {title_h:.2f} re f')
-            add_text(title, x0 + table_w/2 - (len(title) * 2.4), y - 13, size=11, bold=True)
-            y -= title_h + 6
-        total_rows = [headers] + rows
-        table_h = len(total_rows) * row_height
-        top = y
-        ops.append('0 0 0 RG')
-        ops.append('0.6 w')
-        ops.append('0.043 0.247 0.459 rg')
-        ops.append(f'{x0:.2f} {top - row_height:.2f} {table_w:.2f} {row_height:.2f} re f')
-        current_x = x0
-        for w in widths:
-            ops.append(f'{current_x:.2f} {top - table_h:.2f} m {current_x:.2f} {top:.2f} l S')
-            current_x += w
-        ops.append(f'{x0 + table_w:.2f} {top - table_h:.2f} m {x0 + table_w:.2f} {top:.2f} l S')
-        for i in range(len(total_rows) + 1):
-            line_y = top - i * row_height
-            ops.append(f'{x0:.2f} {line_y:.2f} m {x0 + table_w:.2f} {line_y:.2f} l S')
-        for row_idx, row in enumerate(total_rows):
-            text_y = top - (row_idx + 1) * row_height + 7
-            cell_x = x0
-            for col_idx, cell in enumerate(row):
-                max_chars = max(6, int(widths[col_idx] / 5.5))
-                cell_lines = _pdf_wrap_text(cell, max_chars)
-                for line_idx, line in enumerate(cell_lines[:2]):
-                    add_text(line, cell_x + 3, text_y + (len(cell_lines[:2]) - line_idx - 1) * 8, size=font_size, bold=(row_idx == 0))
-                cell_x += widths[col_idx]
-        y = top - table_h - 16
-
-    add_text(f'Pagaré / Liquidación Estructurada Ref. No. {referencia}', margin_x, y, size=14, bold=True)
-    y -= 24
-    add_text(f'Bogotá, {fecha_documento.strftime("%d/%m/%Y")}', margin_x, y, size=10)
-    y -= 20
-    add_paragraph('1. Por medio de la presente autorizo la liquidación del producto señalado a continuación. Este PDF sale con las tablas listas para revisión y deja los demás campos del cliente para ser completados en el siguiente paso.')
-    add_paragraph(f'b. Entidad Financiera: {entidad_financiera}')
-    add_paragraph(f'c. Número de producto: {numero_producto}')
-    add_paragraph(f'd. Pago a la Entidad Financiera: {_format_currency_pdf(pago_banco_total)} COP')
-    add_paragraph(f'e. Comisión: {_format_currency_pdf(comision_total)} COP')
-    y -= 4
-    add_paragraph(f'2. Solicito a {vehiculo} que se realicen las transferencias abajo descritas, de mi depósito {referencia}, con el fin de generar el pago de la comisión a favor de Bravo y el descrito en el numeral 1 del presente documento.')
-
-    cronograma_visible = cronograma_df[cronograma_df['Cantidad'] > 0.005].copy()
-    cronograma_visible['Fecha'] = pd.to_datetime(cronograma_visible['Fecha'])
-    cronograma_rows = []
+    first_table_text: list[tuple[float, float, str, str, float, float]] = []
     for idx, row in enumerate(cronograma_visible.itertuples(index=False), start=1):
-        cronograma_rows.append([
-            str(idx),
-            row.Fecha.strftime('%d/%m/%Y'),
-            f'{_format_currency_pdf(row.Cantidad)} COP',
-            str(row.Concepto),
+        text_y = 494.2 - ((idx - 1) * row_height)
+        first_table_text.extend([
+            (85.8, text_y, str(idx), "F2", 8.8, 0.0),
+            (97.6, text_y, row.Fecha.strftime("%d/%m/%Y"), "F2", 8.8, 0.0),
+            (141.9, text_y, f"{_format_currency_pdf(row.Cantidad)} COP", "F2", 8.8, 0.0),
+            (225.2, text_y, str(row.Concepto), "F2", 8.8, 0.0),
         ])
-    add_table(None, ['N°', 'Fecha', 'Cantidad', 'Concepto'], cronograma_rows, [24, 70, 120, 314], row_height=22, font_size=9)
-    add_paragraph(f"3. Me comprometo a realizar los apartados mensuales descritos en el siguiente cuadro y a enviar los soportes de pago con asunto 'Soporte Pago Referencia {referencia}' en las fechas y por los montos estipulados.")
 
-    plan_rows = []
-    for _, row in plan_df.iterrows():
+    paragraph3_y = max(260.0, 470.0 - (len(cronograma_visible) * row_height) - 18.0)
+    first_table_text.extend(
+        _pdf_multiline_text(
+            70.584,
+            paragraph3_y,
+            (
+                f"3. Me comprometo a realizar los apartados mensuales descritos en el siguiente cuadro y así mismo a enviar "
+                f"los soportes de pago correspondientes, con asunto 'Soporte Pago Referencia {referencia}' en las fechas y por "
+                "los montos estipulados:"
+            ),
+            font_name="F2",
+            font_size=9.6,
+            line_gap=11.2,
+            max_chars=110,
+        )
+    )
+    page5_ops.extend(_pdf_text_ops(first_table_text))
+
+    # Página 6: rellenar las dos tablas del plan usando la plantilla base.
+    page6_ops = ["q", "1 1 1 rg", "30 350 555 250 re f", "30 720 555 130 re f", "Q", "q", "0 0 0 RG", "0.6 w"]
+    plan_rows: list[list[str]] = []
+    for _, row in plan_visible.iterrows():
         plan_rows.append([
-            '',
-            _format_date_pdf(row['Fecha Límite de Pago']),
-            _format_currency_pdf(row['Pago a Banco']),
-            _format_currency_pdf(row['Comisión de Éxito']),
-            _format_currency_pdf(row['Comisión Mensual']),
-            _format_currency_pdf(row['Apartado Requerido']),
+            "",
+            _format_date_pdf(row["Fecha Límite de Pago"]),
+            _format_currency_pdf(row["Pago a Banco"]),
+            _format_currency_pdf(row["Comisión de Éxito"]),
+            _format_currency_pdf(row["Comisión Mensual"]),
+            _format_currency_pdf(row["Apartado Requerido"]),
         ])
-    add_table('PLAN DE LIQUIDACIÓN ESTRUCTURADA', ['Fecha de Depósito', 'Fecha Límite de Pago', 'Pago a Banco', 'Comisión de Éxito', 'Comisión Mensual', 'Apartado Requerido'], plan_rows, [82, 90, 78, 90, 90, 98], row_height=26, font_size=8)
+
+    def draw_plan_table_rows(top_y: float, rows_subset: list[list[str]], row_h: float = 31.0):
+        x_edges = [36.024, 124.0, 210.0, 301.0, 392.0, 485.0, 576.214]
+        ops: list[str] = []
+        text_rows: list[tuple[float, float, str, str, float, float]] = []
+        for idx, row in enumerate(rows_subset):
+            row_top = top_y - (idx * row_h)
+            row_bottom = row_top - row_h
+            ops.append(f"{x_edges[0]:.3f} {row_bottom:.3f} m {x_edges[-1]:.3f} {row_bottom:.3f} l S")
+            for x_line in x_edges:
+                ops.append(f"{x_line:.3f} {row_bottom:.3f} m {x_line:.3f} {row_top:.3f} l S")
+            text_y = row_bottom + 11.0
+            for col_idx, cell in enumerate(row):
+                text_rows.append((x_edges[col_idx] + 4.0, text_y, cell, "F2", 8.8, 0.0))
+        ops.append(f"{x_edges[-1]:.3f} {top_y - (len(rows_subset) * row_h):.3f} m {x_edges[-1]:.3f} {top_y:.3f} l S")
+        return ops, text_rows
+
+    top_plan_rows = plan_rows[:1]
+    bottom_plan_rows = plan_rows[1:]
+    top_ops, top_text = draw_plan_table_rows(808.0, top_plan_rows)
+    bottom_ops, bottom_text = draw_plan_table_rows(523.0, bottom_plan_rows)
+    page6_ops.extend(top_ops + bottom_ops)
+    page6_ops.append("Q")
+    page6_ops.extend(_pdf_text_ops(top_text + bottom_text))
 
     file_name = f"Pagare{fecha_documento.isoformat()} ref: {referencia}.pdf"
-    return _build_simple_pdf(ops), file_name
-
+    final_pdf = _replace_page_contents_with_overlay(
+        base_pdf,
+        {
+            5: _pdf_stream_join(page5_ops),
+            6: _pdf_stream_join(page6_ops),
+        },
+    )
+    return final_pdf, file_name
 #########################################################################################################################################################################
 ##########################################################################################################################################################################
 
