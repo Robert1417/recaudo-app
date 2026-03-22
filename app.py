@@ -1543,10 +1543,12 @@ if not cronograma_editado.empty and not plan_df.empty:
         st.error(f"No pude preparar el documento Word: {export_exc}")
 
 if export_docx_bytes:
+    referencia_export = re.sub(r"[^A-Za-z0-9._-]+", " ", str(ref_input or "sin referencia")).strip() or "sin referencia"
+    export_filename = f"{date.today().isoformat()} - ref {referencia_export}.docx"
     st.download_button(
         "⬇️ Descargar Word con tablas",
         data=export_docx_bytes,
-        file_name="documento_estructurado.docx",
+        file_name=export_filename,
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         use_container_width=True,
     )
