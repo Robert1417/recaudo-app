@@ -211,7 +211,7 @@ def _format_currency0(value) -> str:
 ##########################################################################################################################################################################
 def _format_currency_pdf(value) -> str:
     amount = int(round(float(value or 0.0)))
-    return f"${amount:,}"
+    return f"$ {amount:,}"
 
 
 def _format_date_pdf(value) -> str:
@@ -396,7 +396,7 @@ def generar_pagare_pdf(
         first_table_text.extend([
             (85.8, text_y, str(idx), "F2", 8.2, 0.0),
             (95.8, text_y, row.Fecha.strftime("%d/%m/%Y"), "F2", 8.0, 0.0),
-            (140.2, text_y, f"{_format_currency_pdf(row.Cantidad)} COP", "F2", 7.1, 0.0),
+            (139.6, text_y, f"{_format_currency_pdf(row.Cantidad)} COP", "F4", 7.4, 0.0),
             (224.6, text_y, str(row.Concepto), "F2", 8.0, 0.0),
         ])
 
