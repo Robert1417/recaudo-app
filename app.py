@@ -14,6 +14,7 @@ import os
 from io import BytesIO
 from zipfile import ZipFile
 import xml.etree.ElementTree as ET
+import zlib
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -306,20 +307,25 @@ def _replace_page_contents_with_overlay(pdf_bytes: bytes, page_overlays: dict[in
             raise RuntimeError(f"No pude leer el objeto {obj_num} del PDF base.")
         return obj_match.group(1)
 
-    for page_obj_num, overlay_stream in page_overlays.items():
-        stream_obj_num = next_obj
-        next_obj += 1
-        stream_obj = b"<< /Length %d >>\nstream\n%b\nendstream" % (len(overlay_stream), overlay_stream)
-        objects_to_write.append((stream_obj_num, stream_obj))
+    for stream_obj_num, overlay_stream in page_overlays.items():
+        stream_obj = read_object(stream_obj_num)
+        stream_match = re.search(br"stream\r?\n(.*)\r?\nendstream", stream_obj, re.S)
+        if not stream_match:
+            raise RuntimeError(f"No pude leer el stream del objeto {stream_obj_num}.")
 
-        page_obj = read_object(page_obj_num)
-        updated_page = re.sub(
-            br"/Contents\s+(\d+)\s+0\s+R",
-            f"/Contents [\\1 0 R {stream_obj_num} 0 R]".encode("latin-1"),
-            page_obj,
-            count=1,
-        )
-        objects_to_write.append((page_obj_num, updated_page))
+        raw_stream = stream_match.group(1)
+        header = stream_obj[: stream_match.start()]
+        try:
+            if b"/FlateDecode" in header:
+                base_stream = zlib.decompress(raw_stream)
+            else:
+                base_stream = raw_stream
+        except Exception as exc:
+            raise RuntimeError(f"No pude descomprimir el stream {stream_obj_num} del PDF base.") from exc
+
+        merged_stream = base_stream.rstrip(b"\r\n") + b"\n" + overlay_stream
+        updated_stream_obj = b"<< /Length %d >>\nstream\n%b\nendstream" % (len(merged_stream), merged_stream)
+        objects_to_write.append((stream_obj_num, updated_stream_obj))
 
     result = bytearray(pdf_bytes.rstrip())
     if not result.endswith(b"\n"):
@@ -333,10 +339,6 @@ def _replace_page_contents_with_overlay(pdf_bytes: bytes, page_overlays: dict[in
         result.extend(b"\nendobj\n")
 
     xref_start = len(result)
-    grouped: dict[int, list[tuple[int, int]]] = {}
-    for obj_num, offset in sorted(offsets.items()):
-        grouped.setdefault(obj_num, []).append((obj_num, offset))
-
     result.extend(b"xref\n")
     for obj_num, offset in sorted(offsets.items()):
         result.extend(f"{obj_num} 1\n{offset:010d} 00000 n \n".encode("latin-1"))
@@ -457,8 +459,8 @@ def generar_pagare_pdf(
     final_pdf = _replace_page_contents_with_overlay(
         base_pdf,
         {
-            5: _pdf_stream_join(page5_ops),
-            6: _pdf_stream_join(page6_ops),
+            39: _pdf_stream_join(page5_ops),
+            111: _pdf_stream_join(page6_ops),
         },
     )
     return final_pdf, file_name
