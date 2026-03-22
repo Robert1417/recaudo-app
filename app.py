@@ -290,6 +290,18 @@ def _join_unique_values(values, separator=" - ") -> str:
     return separator.join(unique_values)
 
 
+def _smart_title_case(value: str) -> str:
+    words = []
+    for word in str(value or "").split():
+        parts = [part.capitalize() for part in word.split("-")]
+        words.append("-".join(parts))
+    return " ".join(words)
+
+
+def _paragraph_has_column_break(paragraph) -> bool:
+    return 'w:br w:type="column"' in paragraph._p.xml
+
+
 def _build_document_context(
     referencia,
     bancos,
@@ -299,6 +311,7 @@ def _build_document_context(
     numero_producto="",
     vehiculo="",
     cedula_cliente="",
+    correo_cliente="",
 ) -> dict[str, str]:
     today = date.today()
     bancos_unicos = _join_unique_values(bancos)
@@ -312,10 +325,11 @@ def _build_document_context(
         "entidad_financiera": bancos_unicos,
         "pago_banco": _format_currency_cop(pago_banco),
         "comision_total": comision_total_text,
-        "nombre_cliente": str(nombre_cliente or ""),
+        "nombre_cliente": _smart_title_case(nombre_cliente),
         "numero_producto": str(numero_producto or ""),
-        "vehiculo": str(vehiculo or ""),
+        "vehiculo": _smart_title_case(vehiculo),
         "cedula_cliente": str(cedula_cliente or ""),
+        "correo_cliente": str(correo_cliente or ""),
         "suma_comisiones": comision_total_text,
         "Suma_comisiones": comision_total_text,
         "suma comisiones": comision_total_text,
@@ -325,6 +339,21 @@ def _build_document_context(
 def _replace_paragraph_text_preserving_style(paragraph, new_text: str):
     if not paragraph.runs:
         paragraph.add_run(new_text)
+        return
+
+    template_run = next((run for run in paragraph.runs if run.text), paragraph.runs[0])
+
+    if _paragraph_has_column_break(paragraph):
+        for run in paragraph.runs:
+            if run.text:
+                run.text = ""
+        new_run = paragraph.add_run(new_text)
+        new_run.bold = template_run.bold
+        new_run.italic = template_run.italic
+        new_run.underline = template_run.underline
+        if template_run.font is not None:
+            new_run.font.name = template_run.font.name
+            new_run.font.size = template_run.font.size
         return
 
     first_run = paragraph.runs[0]
@@ -1664,6 +1693,7 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
             anio_firma_doc = st.text_input("Año firma", value=str(default_context.get("anio_firma", "")), key="doc_anio_firma", disabled=True)
             entidad_financiera_doc = st.text_input("Entidad financiera", value=str(default_context.get("entidad_financiera", "")), key="doc_entidad_financiera")
             nombre_cliente_doc = st.text_input("Nombre cliente", value=str(default_context.get("nombre_cliente", "")), key="doc_nombre_cliente")
+            correo_cliente_doc = st.text_input("Correo cliente", value=str(default_context.get("correo_cliente", "")), key="doc_correo_cliente")
         with col2:
             numero_producto_doc = st.text_input("Número producto", value=str(default_context.get("numero_producto", "")), key="doc_numero_producto")
             vehiculo_doc = st.text_input("Vehículo", value=str(default_context.get("vehiculo", "")), key="doc_vehiculo")
@@ -1679,6 +1709,7 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
         "anio_firma": anio_firma_doc,
         "entidad_financiera": entidad_financiera_doc,
         "nombre_cliente": nombre_cliente_doc,
+        "correo_cliente": correo_cliente_doc,
         "numero_producto": numero_producto_doc,
         "vehiculo": vehiculo_doc,
         "cedula_cliente": cedula_cliente_doc,
@@ -1704,6 +1735,7 @@ if not cronograma_editado.empty and not plan_df.empty:
         col_numero_producto = _find_col(sel, ["Número de Crédito", "Numero de Credito", "Número Crédito", "Numero Producto"]) or _find_col_contains(sel, ["numero", "credito"])
         col_vehiculo = _find_col(sel, ["vehiculo", "Vehículo"]) or _find_col_contains(sel, ["vehiculo"])
         col_cedula_cliente = _find_col(sel, ["Cedula", "Cédula"]) or _find_col_contains(sel, ["cedula"])
+        col_correo_cliente = _find_col(sel, ["correo", "Correo"]) or _find_col_contains(sel, ["correo"])
 
         template_context_default = _build_document_context(
             referencia=ref_input,
@@ -1714,6 +1746,7 @@ if not cronograma_editado.empty and not plan_df.empty:
             numero_producto=_join_unique_values(sel[col_numero_producto].tolist()) if col_numero_producto else "",
             vehiculo=_join_unique_values(sel[col_vehiculo].tolist()) if col_vehiculo else "",
             cedula_cliente=_join_unique_values(sel[col_cedula_cliente].tolist()) if col_cedula_cliente else "",
+            correo_cliente=_join_unique_values(sel[col_correo_cliente].tolist()) if col_correo_cliente else "",
         )
         template_context = _build_document_context_inputs(template_context_default)
         export_docx_bytes = build_recaudo_docx(
