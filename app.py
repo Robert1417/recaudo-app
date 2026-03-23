@@ -449,32 +449,6 @@ def _apply_context_to_document(document, context: dict[str, str]):
             _apply_context_to_table(table, context)
 
 
-def _optimize_generated_docx_layout(docx_bytes: bytes) -> bytes:
-    in_buffer = BytesIO(docx_bytes)
-    out_buffer = BytesIO()
-
-    with ZipFile(in_buffer, "r") as zin, ZipFile(out_buffer, "w") as zout:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if item.filename == "word/document.xml":
-                xml = data.decode("utf-8", errors="ignore")
-                xml = xml.replace("<w:lastRenderedPageBreak/>", "")
-                xml = re.sub(
-                    r'<w:p[^>]*/><w:sectPr',
-                    '<w:sectPr',
-                    xml,
-                )
-                xml = re.sub(
-                    r'<w:p[^>]*><w:pPr>[\s\S]*?<w:sectPr[\s\S]*?</w:sectPr></w:pPr></w:p>(?=<w:p[^>]*>[\s\S]*?<w:pStyle w:val="Ttulo1")',
-                    '',
-                    xml,
-                )
-                data = xml.encode("utf-8")
-            zout.writestr(item, data)
-
-    return out_buffer.getvalue()
-
-
 def _set_table_cell_no_wrap(cell):
     tc_pr = cell._tc.get_or_add_tcPr()
     no_wrap = tc_pr.find(qn("w:noWrap"))
@@ -612,7 +586,7 @@ def build_recaudo_docx(
     output = BytesIO()
     document.save(output)
     output.seek(0)
-    return _optimize_generated_docx_layout(output.getvalue())
+    return output.getvalue()
 #############################################################################################################################################################################
 #############################################################################################################################################################################
 
