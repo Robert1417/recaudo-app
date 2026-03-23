@@ -722,6 +722,40 @@ def construir_cronograma_pagos(
     if cronograma.empty:
         cronograma = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto", "tipo", "orden", "months_ahead", "row_key"])
     return cronograma, {"meses_banco_restantes": meses_banco_restantes, "meses_comision_restantes": meses_comision_restantes}
+    
+def validar_totales_overrides_cronograma(
+    cronograma_df: pd.DataFrame,
+    overrides_map: dict,
+    totales_por_tipo: dict,
+    primer_pago_banco_input: float,
+    comision_inicial_input: float,
+):
+    if cronograma_df.empty:
+        return True, None
+
+    base_inicial = {
+        "banco": max(float(primer_pago_banco_input or 0.0), 0.0),
+        "comision": max(float(comision_inicial_input or 0.0), 0.0),
+    }
+    acumulados = dict(base_inicial)
+
+    for _, row in cronograma_df.iterrows():
+        if int(row.get("months_ahead", 0)) == 0:
+            continue
+        tipo = str(row.get("tipo", ""))
+        cantidad = float(row.get("Cantidad", 0.0) or 0.0)
+        cambios = (overrides_map or {}).get(str(row.get("row_key", "")), {})
+        if "Cantidad" in cambios:
+            try:
+                cantidad = max(_parse_amount_input(cambios["Cantidad"]), 0.0)
+            except Exception:
+                pass
+        acumulados[tipo] = acumulados.get(tipo, 0.0) + cantidad
+        total_objetivo = max(float(totales_por_tipo.get(tipo, 0.0) or 0.0), 0.0)
+        if acumulados[tipo] > total_objetivo + 0.009:
+            return False, tipo
+
+    return True, None
 
 
 def aplicar_overrides_cronograma(
@@ -1731,6 +1765,7 @@ with fecha_cfg_5:
     if st.button("Restablecer cronograma", use_container_width=True):
         st.session_state.pop("cronograma_editor", None)
         st.session_state.pop("cronograma_overrides", None)
+        st.session_state.pop("cronograma_overrides_validos", None)
         st.rerun()
 
 cronograma_df, cronograma_meta = construir_cronograma_pagos(
@@ -1746,8 +1781,9 @@ cronograma_df, cronograma_meta = construir_cronograma_pagos(
 )
 
 totales_por_tipo = {"banco": float(pago_banco), "comision": float(comision_exito)}
-cronograma_overrides = st.session_state.get("cronograma_overrides", {})
+cronograma_overrides = deepcopy(st.session_state.get("cronograma_overrides", {}))
 cronograma_editor_state = st.session_state.get("cronograma_editor", {})
+ultimo_cronograma_valido = deepcopy(st.session_state.get("cronograma_overrides_validos", cronograma_overrides))
 
 cronograma_base_editado, _ = aplicar_overrides_cronograma(
     cronograma_df=cronograma_df,
@@ -1761,21 +1797,47 @@ cronograma_base_editado, _ = aplicar_overrides_cronograma(
 )
 
 cronograma_base_visible = cronograma_base_editado[cronograma_base_editado["Cantidad"] > 0.005].reset_index(drop=True)
+cronograma_filas_editables = cronograma_base_visible[cronograma_base_visible["months_ahead"] > 0].reset_index(drop=True)
+cronograma_overrides_candidato = deepcopy(cronograma_overrides)
 for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {}) or {}).items():
     try:
         row_position = int(row_position_str)
     except (TypeError, ValueError):
         continue
-    if row_position < 0 or row_position >= len(cronograma_base_visible):
+    if row_position < 0 or row_position >= len(cronograma_filas_editables):
         continue
-    row = cronograma_base_visible.iloc[row_position]
-    if int(row["months_ahead"]) == 0:
-        continue
+    row = cronograma_filas_editables.iloc[row_position]    
     row_key = str(row["row_key"])
-    existing = cronograma_overrides.get(row_key, {})
+    existing = cronograma_overrides_candidato.get(row_key, {})
     existing.update(cambios)
-    cronograma_overrides[row_key] = existing
-st.session_state["cronograma_overrides"] = cronograma_overrides
+    cronograma_overrides_candidato[row_key] = existing
+
+es_valido, tipo_excedido = validar_totales_overrides_cronograma(
+    cronograma_df=cronograma_df,
+    overrides_map=cronograma_overrides_candidato,
+    totales_por_tipo=totales_por_tipo,
+    primer_pago_banco_input=primer_pago_banco,
+    comision_inicial_input=ce_inicial,
+)
+
+if es_valido:
+    cronograma_overrides = cronograma_overrides_candidato
+    st.session_state["cronograma_overrides"] = cronograma_overrides
+    st.session_state["cronograma_overrides_validos"] = deepcopy(cronograma_overrides)
+else:
+    respaldo_valido, _ = validar_totales_overrides_cronograma(
+        cronograma_df=cronograma_df,
+        overrides_map=ultimo_cronograma_valido,
+        totales_por_tipo=totales_por_tipo,
+        primer_pago_banco_input=primer_pago_banco,
+        comision_inicial_input=ce_inicial,
+    )
+    cronograma_overrides = deepcopy(ultimo_cronograma_valido if respaldo_valido else {})
+    st.session_state["cronograma_overrides"] = cronograma_overrides
+    st.session_state["cronograma_overrides_validos"] = deepcopy(cronograma_overrides)
+    st.session_state["cronograma_editor"] = {}
+    etiqueta_tipo = "PAGO BANCO" if tipo_excedido == "banco" else "Comisión de éxito total"
+    st.warning(f"La edición supera el total permitido de {etiqueta_tipo}. Se restauró el cronograma al último estado válido.")
 
 cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
     cronograma_df=cronograma_df,
@@ -1791,7 +1853,7 @@ cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
 for advertencia in advertencias_cronograma:
     st.warning(advertencia)
 
-cronograma_view = cronograma_editado[cronograma_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
+cronograma_view = cronograma_editado[cronograma_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto", "months_ahead"]].copy()
 if not cronograma_view.empty:
     cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
     cronograma_view["Cantidad"] = (
@@ -1801,21 +1863,30 @@ if not cronograma_view.empty:
         .astype(int)
         .map(lambda x: f"$ {x:,}")
     )
-    cronograma_view.index = range(1, len(cronograma_view) + 1)
-    st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
-    st.data_editor(
-        cronograma_view,
-        key="cronograma_editor",
-        use_container_width=True,
-        num_rows="fixed",
-        hide_index=False,
-        column_config={
-            "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-            "Cantidad": st.column_config.TextColumn("Cantidad"),
-            "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
-        },
-        disabled=["Concepto"],
-    )
+    cronograma_view_bloqueado = cronograma_view[cronograma_view["months_ahead"] == 0][["Fecha", "Cantidad", "Concepto"]].copy()
+    cronograma_view_editable = cronograma_view[cronograma_view["months_ahead"] > 0][["Fecha", "Cantidad", "Concepto"]].copy()
+
+    if not cronograma_view_bloqueado.empty:
+        cronograma_view_bloqueado.index = range(1, len(cronograma_view_bloqueado) + 1)
+        st.caption("Las primeras filas de Comisión Resuelve y Pago a Entidad Financiera quedan bloqueadas y solo cambian desde los inputs superiores.")
+        st.dataframe(cronograma_view_bloqueado, use_container_width=True, hide_index=False)
+
+    if not cronograma_view_editable.empty:
+        cronograma_view_editable.index = range(1, len(cronograma_view_editable) + 1)
+        st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
+        st.data_editor(
+            cronograma_view_editable,
+            key="cronograma_editor",
+            use_container_width=True,
+            num_rows="fixed",
+            hide_index=False,
+            column_config={
+                "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+                "Cantidad": st.column_config.TextColumn("Cantidad"),
+                "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
+            },
+            disabled=["Concepto"],
+        )
 else:
     st.info("Aún no hay valores suficientes para construir el cronograma.")
 
