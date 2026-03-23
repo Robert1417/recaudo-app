@@ -192,7 +192,16 @@ def _rebalance_group_amounts(df_group: pd.DataFrame, total_objetivo: float) -> p
     df_group = df_group.sort_values("orden").copy()
     total_objetivo = max(float(total_objetivo or 0.0), 0.0)
     override_mask = df_group["cantidad_editada"].fillna(False).astype(bool)
-    total_editado = min(max(float(df_group.loc[override_mask, "Cantidad"].sum()), 0.0), total_objetivo)
+    if override_mask.any():
+        for idx in df_group.index[override_mask]:
+            otros = float(df_group.loc[df_group.index != idx, "Cantidad"].sum())
+            maximo_posible = max(0.0, total_objetivo - otros)
+            df_group.at[idx, "Cantidad"] = round(
+                min(max(float(df_group.at[idx, "Cantidad"]), 0.0), maximo_posible),
+                2,
+            )
+
+    total_editado = float(df_group.loc[override_mask, "Cantidad"].sum()) if override_mask.any() else 0.0
     restantes = df_group.index[~override_mask].tolist()
     restante_disponible = max(0.0, total_objetivo - total_editado)
 
@@ -201,9 +210,13 @@ def _rebalance_group_amounts(df_group: pd.DataFrame, total_objetivo: float) -> p
         for idx, valor in zip(restantes, partes):
             df_group.at[idx, "Cantidad"] = valor
     elif override_mask.any():
-        ultimo_idx = df_group.index[-1]
-        otros = float(df_group.iloc[:-1]["Cantidad"].sum()) if len(df_group) > 1 else 0.0
-        df_group.at[ultimo_idx, "Cantidad"] = round(max(total_objetivo - otros, 0.0), 2)
+        exceso = round(float(df_group["Cantidad"].sum()) - total_objetivo, 2)
+        if exceso > 0:
+            ultimo_idx = df_group.index[-1]
+            df_group.at[ultimo_idx, "Cantidad"] = round(
+                max(float(df_group.at[ultimo_idx, "Cantidad"]) - exceso, 0.0),
+                2,
+            )
 
     return df_group
 
