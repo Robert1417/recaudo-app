@@ -26,6 +26,7 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
+from docx.text.paragraph import Paragraph
 
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -543,17 +544,63 @@ def _populate_docx_table(table, rows: list[list[str]]):
                 _replace_cell_text_preserving_style(target_row.cells[col_idx], value)
 
 
+def _remove_paragraph(paragraph: Paragraph):
+    element = paragraph._element
+    parent = element.getparent()
+    if parent is not None:
+        parent.remove(element)
+
+
+def _remove_graduation_section(document):
+    start_markers = [
+        "mi estatus de Cliente Activo pasa a ser como Cliente Graduado",
+        "Cliente Graduado",
+    ]
+    end_markers = [
+        "Ref No",
+        "C.C.",
+        "Atentamente",
+    ]
+
+    paragraphs = list(document.paragraphs)
+    start_idx = None
+    end_idx = None
+
+    for idx, paragraph in enumerate(paragraphs):
+        text = str(paragraph.text or "").strip()
+        if not text:
+            continue
+        if start_idx is None and any(marker in text for marker in start_markers):
+            start_idx = idx
+        if start_idx is not None and any(marker in text for marker in end_markers):
+            end_idx = idx
+
+    if start_idx is None:
+        return
+
+    if end_idx is None:
+        end_idx = start_idx
+        while end_idx + 1 < len(paragraphs) and not str(paragraphs[end_idx + 1].text or "").strip():
+            end_idx += 1
+
+    for paragraph in paragraphs[start_idx : end_idx + 1]:
+        _remove_paragraph(paragraph)                
+
+
 def build_recaudo_docx(
     template_path: Path,
     cronograma_df: pd.DataFrame,
     plan_df: pd.DataFrame,
     template_context: dict[str, str],
+    include_graduation_section: bool = False,
 ) -> bytes:
     if not template_path.exists():
         raise FileNotFoundError(f"No encontré la plantilla Word: {template_path}")
 
     document = Document(str(template_path))
     _apply_context_to_document(document, template_context)
+    if not include_graduation_section:
+        _remove_graduation_section(document)
     if len(document.tables) < 2:
         raise ValueError("La plantilla Word debe tener al menos dos tablas para reemplazar.")
 
@@ -1905,6 +1952,35 @@ st.caption(
     "La plantilla Word de `data/` se rellena con las dos tablas visibles en pantalla. "
     "Las celdas exportadas se normalizan en Times New Roman 9.5 para que el estilo interno coincida con el resto del documento."
 )
+
+if "doc_graduacion_confirmada" not in st.session_state:
+    st.session_state.doc_graduacion_confirmada = False
+if "doc_graduacion_pendiente" not in st.session_state:
+    st.session_state.doc_graduacion_pendiente = False
+
+col_graduacion_btn, col_graduacion_estado = st.columns([1, 2])
+with col_graduacion_btn:
+    if st.button("🎓 Graduar", use_container_width=True):
+        st.session_state.doc_graduacion_pendiente = True
+with col_graduacion_estado:
+    if st.session_state.doc_graduacion_confirmada:
+        st.success("Se incluirá el punto 6 y la firma de graduación en la primera página.")
+    else:
+        st.info("Sin graduación: la primera página llega solo hasta el punto 5.")
+
+if st.session_state.doc_graduacion_pendiente:
+    st.warning("¿Estás seguro de que el cliente se va a graduar?")
+    col_confirmar_si, col_confirmar_no = st.columns(2)
+    with col_confirmar_si:
+        if st.button("Sí, se gradúa", key="confirmar_graduacion_si", use_container_width=True):
+            st.session_state.doc_graduacion_confirmada = True
+            st.session_state.doc_graduacion_pendiente = False
+            st.rerun()
+    with col_confirmar_no:
+        if st.button("No", key="confirmar_graduacion_no", use_container_width=True):
+            st.session_state.doc_graduacion_confirmada = False
+            st.session_state.doc_graduacion_pendiente = False
+            st.rerun()
 
 export_docx_bytes = None
 if not cronograma_editado.empty and not plan_df.empty:
