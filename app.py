@@ -1761,6 +1761,7 @@ cronograma_base_editado, _ = aplicar_overrides_cronograma(
 )
 
 cronograma_base_visible = cronograma_base_editado[cronograma_base_editado["Cantidad"] > 0.005].reset_index(drop=True)
+cronograma_locked_rows_changed = False
 for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {}) or {}).items():
     try:
         row_position = int(row_position_str)
@@ -1770,12 +1771,17 @@ for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {})
         continue
     row = cronograma_base_visible.iloc[row_position]
     if int(row["months_ahead"]) == 0:
+        cronograma_locked_rows_changed = True
         continue
     row_key = str(row["row_key"])
     existing = cronograma_overrides.get(row_key, {})
     existing.update(cambios)
     cronograma_overrides[row_key] = existing
 st.session_state["cronograma_overrides"] = cronograma_overrides
+
+if cronograma_locked_rows_changed:
+    st.session_state.pop("cronograma_editor", None)
+    st.rerun()
 
 cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
     cronograma_df=cronograma_df,
@@ -2031,10 +2037,27 @@ if not cronograma_editado.empty and not plan_df.empty:
 
 if export_docx_bytes:
     missing_document_fields = _missing_document_fields(template_context)
+    suma_comision_resuelve = float(
+        cronograma_editado.loc[
+            cronograma_editado["Concepto"].str.contains("Comisión Resuelve", na=False),
+            "Cantidad",
+        ].sum()
+    )
+    suma_pago_entidad = float(
+        cronograma_editado.loc[
+            cronograma_editado["Concepto"].str.contains("Entidad Financiera", na=False),
+            "Cantidad",
+        ].sum()
+    )
+
+    if suma_comision_resuelve > float(comision_exito) + 0.01:
+        missing_document_fields.append("Ajustar cronograma: la suma de Comisión Resuelve no puede ser mayor a la Comisión de éxito total")
+    if suma_pago_entidad > float(pago_banco) + 0.01:
+        missing_document_fields.append("Ajustar cronograma: Pago a Entidad Financiera no puede ser mayor a PAGO BANCO")
     referencia_export = re.sub(r"[^A-Za-z0-9._-]+", " ", str(ref_input or "sin referencia")).strip() or "sin referencia"
     export_filename = f"{date.today().isoformat()} - ref {referencia_export}.docx"
     if missing_document_fields:
-        st.warning("Completa estos campos antes de descargar el Word: " + ", ".join(missing_document_fields))
+        st.warning("Completa o corrige estos puntos antes de descargar el Word: " + ", ".join(missing_document_fields))
     st.download_button(
         "⬇️ Descargar Word con tablas",
         data=export_docx_bytes,
