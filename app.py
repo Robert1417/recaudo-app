@@ -584,7 +584,7 @@ def _remove_graduation_section(document):
             end_idx += 1
 
     for paragraph in paragraphs[start_idx : end_idx + 1]:
-        _remove_paragraph(paragraph)                
+        _remove_paragraph(paragraph)              
 
 
 def build_recaudo_docx(
@@ -1957,30 +1957,37 @@ if "doc_graduacion_confirmada" not in st.session_state:
     st.session_state.doc_graduacion_confirmada = False
 if "doc_graduacion_pendiente" not in st.session_state:
     st.session_state.doc_graduacion_pendiente = False
+if "doc_graduacion_check" not in st.session_state:
+    st.session_state.doc_graduacion_check = False
 
-col_graduacion_btn, col_graduacion_estado = st.columns([1, 2])
-with col_graduacion_btn:
-    if st.button("🎓 Graduar", use_container_width=True):
-        st.session_state.doc_graduacion_pendiente = True
-with col_graduacion_estado:
-    if st.session_state.doc_graduacion_confirmada:
-        st.success("Se incluirá el punto 6 y la firma de graduación en la primera página.")
-    else:
-        st.info("Sin graduación: la primera página llega solo hasta el punto 5.")
+st.checkbox(
+    "Graduar cliente",
+    key="doc_graduacion_check",
+    help="Incluye el punto 6 de la primera página solo después de confirmarlo.",
+)
+
+if not st.session_state.doc_graduacion_check:
+    st.session_state.doc_graduacion_confirmada = False
+    st.session_state.doc_graduacion_pendiente = False
+elif not st.session_state.doc_graduacion_confirmada:
+    st.session_state.doc_graduacion_pendiente = True
 
 if st.session_state.doc_graduacion_pendiente:
-    st.warning("¿Estás seguro de que el cliente se va a graduar?")
-    col_confirmar_si, col_confirmar_no = st.columns(2)
+    st.caption("Confirma si el cliente sí se va a graduar.")
+    col_confirmar_si, col_confirmar_no = st.columns([1, 1, 4])[:2]
     with col_confirmar_si:
-        if st.button("Sí, se gradúa", key="confirmar_graduacion_si", use_container_width=True):
+        if st.button("Sí", key="confirmar_graduacion_si"):
             st.session_state.doc_graduacion_confirmada = True
             st.session_state.doc_graduacion_pendiente = False
             st.rerun()
     with col_confirmar_no:
-        if st.button("No", key="confirmar_graduacion_no", use_container_width=True):
+        if st.button("No", key="confirmar_graduacion_no"):
+            st.session_state.doc_graduacion_check = False
             st.session_state.doc_graduacion_confirmada = False
             st.session_state.doc_graduacion_pendiente = False
             st.rerun()
+elif st.session_state.doc_graduacion_check and st.session_state.doc_graduacion_confirmada:
+    st.caption("Graduación confirmada: el Word incluirá el punto 6 en la primera página.")
 
 export_docx_bytes = None
 if not cronograma_editado.empty and not plan_df.empty:
@@ -2017,6 +2024,7 @@ if not cronograma_editado.empty and not plan_df.empty:
             cronograma_df=cronograma_editado,
             plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
             template_context=template_context,
+            include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
         )
     except Exception as export_exc:
         st.error(f"No pude preparar el documento Word: {export_exc}")
