@@ -449,6 +449,69 @@ def _apply_context_to_document(document, context: dict[str, str]):
             _apply_context_to_table(table, context)
 
 
+def _copy_run_style(source_run, target_run):
+    if source_run is None:
+        return
+    target_run.bold = source_run.bold
+    target_run.italic = source_run.italic
+    target_run.underline = source_run.underline
+    if source_run.font is not None:
+        target_run.font.name = source_run.font.name
+        target_run.font.size = source_run.font.size
+        target_run.font.bold = source_run.font.bold
+        target_run.font.italic = source_run.font.italic
+        target_run.font.underline = source_run.font.underline
+
+
+def _insert_paragraph_before(paragraph, text: str = ""):
+    new_p = OxmlElement("w:p")
+    paragraph._p.addprevious(new_p)
+    new_paragraph = Paragraph(new_p, paragraph._parent)
+    if text:
+        new_paragraph.add_run(text)
+    return new_paragraph
+
+
+def _insert_graduado_clause(document, context: dict[str, str]):
+    target_idx = None
+    for idx, paragraph in enumerate(document.paragraphs):
+        joined_text = "".join(run.text for run in paragraph.runs).upper()
+        if "CONTRATO" in joined_text and "LIQUIDACIÓN" in joined_text and "ESTRUCTURADA" in joined_text:
+            target_idx = idx
+            break
+    if target_idx is None:
+        return
+
+    target_paragraph = document.paragraphs[target_idx]
+    template_paragraph = document.paragraphs[target_idx - 1] if target_idx > 0 else target_paragraph
+    template_run = next((run for run in template_paragraph.runs if run.text.strip()), None)
+
+    clause_text = (
+        "6. Entiendo que una vez liquidada la deuda mencionada en este documento y siendo ésta la última obligación por liquidar en "
+        "el programa Bravo, mi estatus de Cliente Activo pasa a ser como Cliente Graduado. De no existir adeudos pendientes con Bravo, "
+        "solicito amablemente la cancelación de mi Fondo de Pensiones Voluntarias No . Así mismo, que el saldo a mi favor sea entregado "
+        "a través de una transferencia bancaria a la cuenta que se encuentra a mi nombre."
+    )
+
+    inserted_paragraphs = [
+        _insert_paragraph_before(target_paragraph, clause_text),
+        _insert_paragraph_before(target_paragraph, ""),
+        _insert_paragraph_before(target_paragraph, "Atentamente"),
+        _insert_paragraph_before(target_paragraph, "_________________________________"),
+        _insert_paragraph_before(target_paragraph, context.get("nombre_cliente", "")),
+        _insert_paragraph_before(target_paragraph, f"C.C. {context.get('cedula_cliente', '')}"),
+        _insert_paragraph_before(target_paragraph, f"Ref No {context.get('referencia', '')}"),
+    ]
+
+    for paragraph in inserted_paragraphs:
+        paragraph.alignment = template_paragraph.alignment
+        paragraph.paragraph_format.space_after = template_paragraph.paragraph_format.space_after
+        paragraph.paragraph_format.space_before = template_paragraph.paragraph_format.space_before
+        paragraph.paragraph_format.line_spacing = template_paragraph.paragraph_format.line_spacing
+        if paragraph.runs:
+            _copy_run_style(template_run, paragraph.runs[0])
+
+
 def _set_table_cell_no_wrap(cell):
     tc_pr = cell._tc.get_or_add_tcPr()
     no_wrap = tc_pr.find(qn("w:noWrap"))
@@ -548,12 +611,15 @@ def build_recaudo_docx(
     cronograma_df: pd.DataFrame,
     plan_df: pd.DataFrame,
     template_context: dict[str, str],
+    include_graduado_clause: bool = False,
 ) -> bytes:
     if not template_path.exists():
         raise FileNotFoundError(f"No encontré la plantilla Word: {template_path}")
 
     document = Document(str(template_path))
     _apply_context_to_document(document, template_context)
+    if include_graduado_clause:
+        _insert_graduado_clause(document, template_context)
     if len(document.tables) < 2:
         raise ValueError("La plantilla Word debe tener al menos dos tablas para reemplazar.")
 
