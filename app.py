@@ -19,7 +19,6 @@ from zipfile import ZipFile
 import xml.etree.ElementTree as ET
 import zlib
 
-import gspread
 from google.oauth2.service_account import Credentials
 import streamlit.components.v1 as components
 from docx import Document
