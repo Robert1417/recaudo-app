@@ -136,6 +136,7 @@ DOCX_TEMPLATE_PATH = Path("data/Documento Estructurados en Blanco.docx")
 CLIENTES_LOOKUP_PATH = Path("data/Consulta_F_Clientes_Parte_1.csv")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB = "Historico Calculadora"
+GOOGLE_SHEET_TAB_RESPUESTAS = "Respuestas Estr"
 GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -150,6 +151,8 @@ GOOGLE_SHEET_HEADERS = [
     "amount_total",
     "prediccion",
 ]
+
+GOOGLE_RESPUESTAS_COLS = [chr(i) for i in range(ord("A"), ord("V") + 1)]
 
 
 # ========= Helpers de "versión de archivo" para invalidar cache =========
@@ -1059,7 +1062,7 @@ def _load_google_service_account_info() -> dict:
 
 
 @st.cache_resource(show_spinner=False)
-def get_google_sheet_worksheet():
+def get_google_sheet_worksheet(tab_name: str = GOOGLE_SHEET_TAB):
     """
     Devuelve la hoja de cálculo destino para histórico.
     Se cachea mientras no cambie el proceso.
@@ -1068,7 +1071,7 @@ def get_google_sheet_worksheet():
     credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
     client = gspread.authorize(credentials)
     spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
-    return spreadsheet.worksheet(GOOGLE_SHEET_TAB)
+    return spreadsheet.worksheet(tab_name)
 
 
 def _append_row_to_google_sheet(row_data: dict):
@@ -1089,6 +1092,23 @@ def _append_row_to_google_sheet(row_data: dict):
         return True, f"Google Sheets > {GOOGLE_SHEET_TAB}", None
     except Exception as e:
         return False, f"Google Sheets > {GOOGLE_SHEET_TAB}", str(e)
+
+def _append_row_to_respuestas_estr(row_values: list):
+    """
+    Inserta una fila en la hoja "Respuestas Estr" respetando el orden A:V.
+    """
+    try:
+        worksheet = get_google_sheet_worksheet(GOOGLE_SHEET_TAB_RESPUESTAS)
+        normalized = list(row_values or [])
+        if len(normalized) < len(GOOGLE_RESPUESTAS_COLS):
+            normalized += [""] * (len(GOOGLE_RESPUESTAS_COLS) - len(normalized))
+        elif len(normalized) > len(GOOGLE_RESPUESTAS_COLS):
+            normalized = normalized[: len(GOOGLE_RESPUESTAS_COLS)]
+
+        worksheet.append_row(normalized, value_input_option="USER_ENTERED")
+        return True, f"Google Sheets > {GOOGLE_SHEET_TAB_RESPUESTAS}", None
+    except Exception as e:
+        return False, f"Google Sheets > {GOOGLE_SHEET_TAB_RESPUESTAS}", str(e)
 
 
 def diagnosticar_google_sheets():
@@ -1299,7 +1319,12 @@ def _get_writable_log_path() -> Path:
     return LOG_PATH
 
 
-def guardar_log_calculo(referencia, ids, features, prediccion):
+def guardar_log_calculo(
+    referencia,
+    ids,
+    features,
+    prediccion,
+):
     """
     Guarda una fila del histórico en Google Sheets y, como respaldo,
     también en CSV local. Retorna un diccionario con el resultado.
@@ -1342,6 +1367,55 @@ def guardar_log_calculo(referencia, ids, features, prediccion):
         "local_ok": local_ok,
         "local_path": log_path,
         "local_error": local_err,
+    }
+
+def enviar_aprobacion_estructurados(
+    *,
+    referencia,
+    ids,
+    bancos,
+    correo_electronico,
+    condonacion_mensualidades,
+    comision_exito_total,
+    ce_inicial,
+    prediccion,
+    tipo_liquidacion="",
+):
+    tipo_liquidacion_norm = _norm(tipo_liquidacion)
+    umbral_aprobacion = 0.8 if "tradicional" in tipo_liquidacion_norm else 0.74
+    es_aprobado = float(prediccion or 0.0) >= float(umbral_aprobacion)
+
+    respuestas_row = [
+        datetime.now().strftime("%d/%m/%Y %H:%M:%S"),  # A Marca temporal
+        str(correo_electronico or "").strip(),  # B Correo
+        str(referencia),  # C Referencia
+        "-".join(map(str, ids)),  # D ID deuda
+        str(bancos),  # E Banco
+        "Pendiente",  # F Carta pagaré firmado
+        "Pendiente",  # G Pantallazo aceptación
+        "Sí" if str(condonacion_mensualidades).strip().lower() == "si" else "No",  # H Condonación
+        "",  # I Adjuntar pantallazo de correo
+        float(comision_exito_total or 0.0),  # J Comisión total
+        float(ce_inicial or 0.0),  # K Primera comisión
+        "",  # L
+        "",  # M
+        "",  # N
+        "TRUE" if es_aprobado else "FALSE",  # O Aprobación Estructurados
+        "Aprobado" if es_aprobado else "",  # P Estado
+        "",  # Q
+        "",  # R
+        "",  # S
+        "",  # T
+        "",  # U
+        float(prediccion or 0.0),  # V Calculadora
+    ]
+    estr_ok, estr_dest, estr_err = _append_row_to_respuestas_estr(respuestas_row)
+    return {
+        "estr_ok": estr_ok,
+        "estr_destination": estr_dest,
+        "estr_error": estr_err,
+        "es_aprobado": es_aprobado,
+        "umbral_aprobacion": umbral_aprobacion,
     }
         
 
@@ -1564,6 +1638,9 @@ if not ids_sel:
     st.stop()
 
 sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
+col_tipo_liquidacion = _find_col(sel, ["Tipo de Liquidacion", "Tipo Liquidacion", "Tipo de liquidación"]) or _find_col_contains(sel, ["tipo", "liquid"])
+tipo_liquidacion_val = _join_unique_values(sel[col_tipo_liquidacion].tolist()) if col_tipo_liquidacion else ""
+bancos_sel_text = _join_unique_values(sel[col_banco].astype(str).tolist())
 
 # =================== 3) Valores base (reactivo) ===================
 st.markdown("### 3) Valores base (puedes editarlos)")
@@ -2266,8 +2343,10 @@ if do_predict:
             referencia=ref_input,
             ids=ids_sel,
             features=feature_vals,
-            prediccion=yhat_adj
+            prediccion=yhat_adj,
         )
+        st.session_state.last_prediction_value = float(yhat_adj)
+        st.session_state.last_prediction_ready = True
 
         if log_result["sheet_ok"]:
             st.caption(f"📊 Histórico guardado en: `{log_result['sheet_destination']}`")
@@ -2290,3 +2369,52 @@ if do_predict:
 
     except Exception as e:
         st.error(f"Error al predecir: {e}")
+
+st.markdown("---")
+st.markdown("### 8) Envío a aprobación de estructurados")
+st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
+
+correo_para_sheets = st.text_input(
+    "📧 Dirección de correo electrónico (obligatorio para enviar)",
+    key="correo_para_sheets",
+).strip()
+condonacion_mensualidades = st.selectbox(
+    "¿El cliente cuenta con condonación de mensualidades? (obligatorio)",
+    options=["", "Si", "No"],
+    index=0,
+    key="condonacion_mensualidades",
+)
+
+enviar_aprobacion = st.button("Enviar AProbación estructurados", use_container_width=True)
+if enviar_aprobacion:
+    pred_value = st.session_state.get("last_prediction_value")
+    if pred_value is None:
+        st.warning("Primero debes presionar **Predecir recaudo**.")
+    elif not correo_para_sheets:
+        st.warning("Debes ingresar el correo electrónico antes de enviar.")
+    elif condonacion_mensualidades not in {"Si", "No"}:
+        st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
+    else:
+        envio_result = enviar_aprobacion_estructurados(
+            referencia=ref_input,
+            ids=ids_sel,
+            bancos=bancos_sel_text,
+            correo_electronico=correo_para_sheets,
+            condonacion_mensualidades=condonacion_mensualidades,
+            comision_exito_total=feature_vals.get("AMOUNT_TOTAL"),
+            ce_inicial=ce_inicial,
+            prediccion=pred_value,
+            tipo_liquidacion=tipo_liquidacion_val,
+        )
+        if envio_result["estr_ok"]:
+            estado_aprob = "✅ Aprobado" if envio_result["es_aprobado"] else "⛔ No aprobado"
+            st.success(f"Envío exitoso a `{envio_result['estr_destination']}`.")
+            st.caption(
+                f"Criterio aplicado ({tipo_liquidacion_val or 'No Tradicional'}): "
+                f"predicción {pred_value:.2f} vs umbral {envio_result['umbral_aprobacion']:.2f} → {estado_aprob}"
+            )
+        else:
+            st.error(
+                "No se pudo enviar a estructurados. "
+                f"Detalle: {envio_result['estr_error']}"
+            )
