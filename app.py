@@ -499,9 +499,34 @@ def _set_table_grid_widths(table, column_widths: list[float]):
             table.columns[idx].width = int(width * 1440)
 
 
+def _set_table_fixed_layout(table, column_widths: list[float]):
+    """
+    Fuerza layout fijo de tabla y ancho total explícito.
+    Esto evita que LibreOffice "recalcule" columnas al exportar a PDF.
+    """
+    tbl_pr = table._tbl.tblPr
+    if tbl_pr is None:
+        tbl_pr = OxmlElement("w:tblPr")
+        table._tbl.insert(0, tbl_pr)
+
+    tbl_layout = tbl_pr.find(qn("w:tblLayout"))
+    if tbl_layout is None:
+        tbl_layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(tbl_layout)
+    tbl_layout.set(qn("w:type"), "fixed")
+
+    total_twips = str(int(sum(column_widths) * 1440))
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:type"), "dxa")
+    tbl_w.set(qn("w:w"), total_twips)
+
+
 def _apply_cronograma_table_layout(table):
     table.autofit = False
-    column_widths = [0.58, 1.22, 1.58, 3.12]
+    column_widths = [0.72, 1.28, 1.65, 3.05]
     for row in table.rows:
         for idx, width in enumerate(column_widths):
             if idx < len(row.cells):
