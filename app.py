@@ -460,14 +460,6 @@ def _set_table_cell_no_wrap(cell):
         no_wrap = OxmlElement("w:noWrap")
         tc_pr.append(no_wrap)
 
-def _set_table_fixed_layout(table):
-    tbl_pr = table._tbl.tblPr
-    tbl_layout = tbl_pr.find(qn("w:tblLayout"))
-    if tbl_layout is None:
-        tbl_layout = OxmlElement("w:tblLayout")
-        tbl_pr.append(tbl_layout)
-    tbl_layout.set(qn("w:type"), "fixed")
-
 
 def _set_cell_width(cell, width_inches: float):
     width_twips = int(width_inches * 1440)
@@ -483,15 +475,11 @@ def _set_cell_width(cell, width_inches: float):
 
 def _apply_cronograma_table_layout(table):
     table.autofit = False
-    _set_table_fixed_layout(table)
-    # Ajuste fino para evitar cortes en Fecha y numeración de dos dígitos.
-    # Total aprox. 6.5" (ancho útil típico de página carta con márgenes de 1").
-    column_widths = [0.62, 1.35, 2.05, 2.48]
+    column_widths = [0.32, 0.95, 1.35, 3.15]
     for row in table.rows:
         for idx, width in enumerate(column_widths):
             if idx < len(row.cells):
                 _set_cell_width(row.cells[idx], width)
-                _set_table_cell_no_wrap(row.cells[idx])
 
 
 def _apply_table_text_style(paragraph, run, *, bold=None):
@@ -642,6 +630,7 @@ def build_recaudo_docx(
         ])
 
     _populate_docx_table(document.tables[0], cronograma_rows)
+    _apply_cronograma_table_layout(document.tables[0])
     _populate_docx_table(document.tables[1], plan_rows)
 
     output = BytesIO()
