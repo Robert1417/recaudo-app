@@ -988,6 +988,37 @@ def _looks_like_service_account_mapping(value) -> bool:
         return False
     return "private_key" in data and "client_email" in data
 
+def _extract_service_account_from_secrets_tree(value):
+    """
+    Busca credenciales en estructuras anidadas de st.secrets (dict/AttrDict).
+    Soporta:
+    - llave MI_JSON en cualquier nivel
+    - objetos con private_key + client_email en cualquier nivel
+    """
+    try:
+        if isinstance(value, str) and value.strip():
+            return value
+    except Exception:
+        pass
+
+    if _looks_like_service_account_mapping(value):
+        return dict(value)
+
+    try:
+        items = dict(value).items()
+    except Exception:
+        return None
+
+    for key, sub_value in items:
+        if str(key).strip().upper() == "MI_JSON":
+            return sub_value
+        nested = _extract_service_account_from_secrets_tree(sub_value)
+        if nested is not None:
+            return nested
+    return None
+
+
+
 def _load_google_service_account_info() -> dict:
     """
     Carga el JSON del service account desde Streamlit Secrets o variable de entorno.
@@ -996,15 +1027,16 @@ def _load_google_service_account_info() -> dict:
     creds_source = None
 
     try:
-        if "MI_JSON" in st.secrets:
-            creds_source = st.secrets["MI_JSON"]
-        elif _looks_like_service_account_mapping(st.secrets):
-            creds_source = dict(st.secrets)    
+        creds_source = _extract_service_account_from_secrets_tree(st.secrets)    
     except Exception:
         creds_source = None
 
     if creds_source is None:
-        env_json = os.environ.get("MI_JSON")
+        env_json = (
+            os.environ.get("MI_JSON")
+            or os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+            or os.environ.get("MI_JSON_SANDBOX")
+        )
         if env_json:
             creds_source = env_json
         else:
@@ -1030,7 +1062,9 @@ def _load_google_service_account_info() -> dict:
 
     if creds_source is None:
         raise RuntimeError(
-            "No encontré el secreto `MI_JSON`. Configúralo en Streamlit Secrets o como variable de entorno."
+            "No encontré credenciales de Google Sheets. "
+            "Configura `MI_JSON` en Streamlit Secrets (de ESTE despliegue) "
+            "o una variable de entorno (`MI_JSON` / `GOOGLE_SERVICE_ACCOUNT_JSON`)."
         )
 
     if isinstance(creds_source, str):
@@ -2302,7 +2336,8 @@ with st.expander("📊 Diagnóstico de guardado en Google Sheets", expanded=Fals
         st.markdown(
             f"""
 **Revisa estos puntos:**
-- El secreto `MI_JSON` debe existir y ser un JSON válido del service account.
+- El secreto debe existir en **Streamlit Secrets del despliegue actual** (sandbox/prod tienen secretos separados).
+- Puedes usar `MI_JSON` (recomendado) o `GOOGLE_SERVICE_ACCOUNT_JSON`.
 - Debes compartir el spreadsheet con este correo: `{gs_status['client_email']}`.
 - La pestaña debe llamarse exactamente `{GOOGLE_SHEET_TAB}`.
 - El guardado solo se ejecuta cuando presionas **Predecir recaudo**.
