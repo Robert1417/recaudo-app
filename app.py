@@ -526,7 +526,7 @@ def _set_table_fixed_layout(table, column_widths: list[float]):
 
 def _apply_cronograma_table_layout(table):
     table.autofit = False
-    column_widths = [0.72, 1.28, 1.65, 3.05]
+    column_widths = [0.3, 1.1, 1.2, 2.9]
     _set_table_fixed_layout(table, column_widths)
     _set_table_grid_widths(table, column_widths)
     for row in table.rows:
