@@ -18,6 +18,9 @@ from io import BytesIO
 from zipfile import ZipFile
 import xml.etree.ElementTree as ET
 import zlib
+import subprocess
+import shutil
+import tempfile
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -634,6 +637,45 @@ def build_recaudo_docx(
     document.save(output)
     output.seek(0)
     return output.getvalue()
+
+def convert_docx_bytes_to_pdf_bytes(docx_bytes: bytes) -> bytes:
+    """
+    Convierte un DOCX a PDF usando LibreOffice en modo headless.
+    Preserva al máximo el layout porque renderiza el mismo archivo Word,
+    sin transcribir ni reconstruir contenido.
+    """
+    soffice_bin = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice_bin:
+        raise RuntimeError(
+            "No encontré LibreOffice (soffice) en el servidor. "
+            "Instálalo para habilitar la exportación exacta a PDF."
+        )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        input_path = Path(tmp_dir) / "documento.docx"
+        output_dir = Path(tmp_dir) / "out"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "documento.pdf"
+        input_path.write_bytes(docx_bytes)
+
+        cmd = [
+            soffice_bin,
+            "--headless",
+            "--convert-to",
+            "pdf:writer_pdf_Export",
+            str(input_path),
+            "--outdir",
+            str(output_dir),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "La conversión a PDF falló en LibreOffice. "
+                f"Detalle: {(result.stderr or result.stdout).strip()}"
+            )
+        if not output_path.exists():
+            raise RuntimeError("LibreOffice no generó el PDF esperado.")
+        return output_path.read_bytes()
 #############################################################################################################################################################################
 #############################################################################################################################################################################
 
@@ -1995,7 +2037,7 @@ if st.session_state.doc_graduacion_pendiente:
 elif st.session_state.doc_graduacion_check and st.session_state.doc_graduacion_confirmada:
     st.caption("Graduación confirmada: el Word incluirá el punto 6 en la primera página.")
 
-export_docx_bytes = None
+export_pdf_bytes = None
 if not cronograma_editado.empty and not plan_df.empty:
     try:
         col_nombre_cliente = _find_col(sel, ["Nombre del cliente", "Nombre Cliente", "Nombre"]) or _find_col_contains(sel, ["nombre", "cliente"])
@@ -2032,10 +2074,11 @@ if not cronograma_editado.empty and not plan_df.empty:
             template_context=template_context,
             include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
         )
+        export_pdf_bytes = convert_docx_bytes_to_pdf_bytes(export_docx_bytes)
     except Exception as export_exc:
-        st.error(f"No pude preparar el documento Word: {export_exc}")
+        st.error(f"No pude preparar el documento PDF: {export_exc}")
 
-if export_docx_bytes:
+if export_pdf_bytes:
     missing_document_fields = _missing_document_fields(template_context)
     suma_comision_resuelve = float(
         cronograma_editado.loc[
@@ -2055,19 +2098,19 @@ if export_docx_bytes:
     if suma_pago_entidad > float(pago_banco) + 0.01:
         missing_document_fields.append("Ajustar cronograma: Pago a Entidad Financiera no puede ser mayor a PAGO BANCO")
     referencia_export = re.sub(r"[^A-Za-z0-9._-]+", " ", str(ref_input or "sin referencia")).strip() or "sin referencia"
-    export_filename = f"{date.today().isoformat()} - ref {referencia_export}.docx"
+    export_filename = f"{date.today().isoformat()} - ref {referencia_export}.pdf"
     if missing_document_fields:
         st.warning("Completa o corrige estos puntos antes de descargar el Word: " + ", ".join(missing_document_fields))
     st.download_button(
-        "⬇️ Descargar Word con tablas",
-        data=export_docx_bytes,
+        "⬇️ Descargar PDF con tablas",
+        data=export_pdf_bytes,
         file_name=export_filename,
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        mime="application/pdf",
         use_container_width=True,
         disabled=bool(missing_document_fields),
     )
 else:
-    st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el documento.")
+    st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el PDF.")
 #############################################################################################################################################################################
 #############################################################################################################################################################################
 
