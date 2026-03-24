@@ -472,10 +472,36 @@ def _set_cell_width(cell, width_inches: float):
     tc_w.set(qn("w:type"), "dxa")
     tc_w.set(qn("w:w"), str(width_twips))
 
+def _set_table_grid_widths(table, column_widths: list[float]):
+    """
+    Ajusta el ancho de columnas a nivel de grid de tabla (w:tblGrid),
+    que es lo que LibreOffice suele respetar al exportar a PDF.
+    """
+    tbl = table._tbl
+    tbl_grid = tbl.tblGrid
+    if tbl_grid is None:
+        tbl_grid = OxmlElement("w:tblGrid")
+        tbl.insert(0, tbl_grid)
+
+    # Reemplazar definición previa del grid para evitar conflictos de ancho.
+    for grid_col in list(tbl_grid):
+        tbl_grid.remove(grid_col)
+
+    for width in column_widths:
+        width_twips = int(width * 1440)
+        grid_col = OxmlElement("w:gridCol")
+        grid_col.set(qn("w:w"), str(width_twips))
+        tbl_grid.append(grid_col)
+
+    # También aplicar a la API de python-docx por compatibilidad adicional.
+    for idx, width in enumerate(column_widths):
+        if idx < len(table.columns):
+            table.columns[idx].width = int(width * 1440)
+
 
 def _apply_cronograma_table_layout(table):
     table.autofit = False
-    column_widths = [6.2, 6.2, 3.2, 3.25]
+    column_widths = [0.58, 1.22, 1.58, 3.12]
     for row in table.rows:
         for idx, width in enumerate(column_widths):
             if idx < len(row.cells):
