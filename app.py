@@ -475,7 +475,7 @@ def _set_cell_width(cell, width_inches: float):
 
 def _apply_cronograma_table_layout(table):
     table.autofit = False
-    column_widths = [0.32, 0.95, 1.35, 3.15]
+    column_widths = [0.5, 1.2, 1.35, 3.25]
     for row in table.rows:
         for idx, width in enumerate(column_widths):
             if idx < len(row.cells):
