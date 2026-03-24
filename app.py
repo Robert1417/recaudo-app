@@ -642,7 +642,6 @@ def build_recaudo_docx(
         ])
 
     _populate_docx_table(document.tables[0], cronograma_rows)
-    _apply_cronograma_table_layout(document.tables[0])
     _populate_docx_table(document.tables[1], plan_rows)
 
     output = BytesIO()
