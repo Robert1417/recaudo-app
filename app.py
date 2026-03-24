@@ -2038,6 +2038,7 @@ elif st.session_state.doc_graduacion_check and st.session_state.doc_graduacion_c
     st.caption("Graduación confirmada: el Word incluirá el punto 6 en la primera página.")
 
 export_pdf_bytes = None
+export_pdf_error = None
 if not cronograma_editado.empty and not plan_df.empty:
     try:
         col_nombre_cliente = _find_col(sel, ["Nombre del cliente", "Nombre Cliente", "Nombre"]) or _find_col_contains(sel, ["nombre", "cliente"])
@@ -2076,6 +2077,7 @@ if not cronograma_editado.empty and not plan_df.empty:
         )
         export_pdf_bytes = convert_docx_bytes_to_pdf_bytes(export_docx_bytes)
     except Exception as export_exc:
+        export_pdf_error = str(export_exc)
         st.error(f"No pude preparar el documento PDF: {export_exc}")
 
 if export_pdf_bytes:
@@ -2100,7 +2102,7 @@ if export_pdf_bytes:
     referencia_export = re.sub(r"[^A-Za-z0-9._-]+", " ", str(ref_input or "sin referencia")).strip() or "sin referencia"
     export_filename = f"{date.today().isoformat()} - ref {referencia_export}.pdf"
     if missing_document_fields:
-        st.warning("Completa o corrige estos puntos antes de descargar el Word: " + ", ".join(missing_document_fields))
+        st.warning("Completa o corrige estos puntos antes de descargar el PDF: " + ", ".join(missing_document_fields))
     st.download_button(
         "⬇️ Descargar PDF con tablas",
         data=export_pdf_bytes,
@@ -2110,7 +2112,8 @@ if export_pdf_bytes:
         disabled=bool(missing_document_fields),
     )
 else:
-    st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el PDF.")
+    if not export_pdf_error:
+        st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el PDF.")
 #############################################################################################################################################################################
 #############################################################################################################################################################################
 
