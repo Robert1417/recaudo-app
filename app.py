@@ -475,11 +475,14 @@ def _set_cell_width(cell, width_inches: float):
 
 def _apply_cronograma_table_layout(table):
     table.autofit = False
-    column_widths = [0.32, 0.95, 1.35, 3.15]
+    # Ajuste fino para evitar cortes en Fecha y numeración de dos dígitos.
+    # Total aprox. 6.5" (ancho útil típico de página carta con márgenes de 1").
+    column_widths = [0.45, 1.15, 1.60, 3.30]
     for row in table.rows:
         for idx, width in enumerate(column_widths):
             if idx < len(row.cells):
                 _set_cell_width(row.cells[idx], width)
+                _set_table_cell_no_wrap(row.cells[idx])
 
 
 def _apply_table_text_style(paragraph, run, *, bold=None):
