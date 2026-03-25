@@ -160,8 +160,9 @@ GOOGLE_RESPUESTAS_COLS = [chr(i) for i in range(ord("A"), ord("V") + 1)]
 # puedes pegar aquí el JSON completo del service account.
 # Deja vacío ("") cuando vuelvas a usar secrets/variables de entorno.
 # ============================================================
-
+MI_JSON_HARDCODED = ""
 # ========= Helpers de "versión de archivo" para invalidar cache =========
+
 
 def _file_version(path: Path) -> str:
     """
@@ -2346,7 +2347,10 @@ with st.expander("📊 Diagnóstico de guardado en Google Sheets", expanded=Fals
             f"""
 **Revisa estos puntos:**
 - El secreto debe existir en **Streamlit Secrets del despliegue actual** (sandbox/prod tienen secretos separados).
-- Puedes usar `MI_JSON` (recomendado) o `GOOGLE_SERVICE_ACCOUNT_JSON`.
+Dónde cargar credenciales:
+  - **Streamlit Community Cloud**: *App → Settings → Secrets* (de **esta app y este branch**).
+  - **Local**: archivo `.streamlit/secrets.toml` en la raíz del proyecto.
+- Puedes usar `MI_JSON` (recomendado) o `GOOGLE_SERVICE_ACCOUNT_JSON` como JSON completo.
 - Debes compartir el spreadsheet con este correo: `{gs_status['client_email']}`.
 - La pestaña debe llamarse exactamente `{GOOGLE_SHEET_TAB}`.
 - El guardado solo se ejecuta cuando presionas **Predecir recaudo**.
