@@ -2350,6 +2350,26 @@ with st.expander("📊 Diagnóstico de guardado en Google Sheets", expanded=Fals
 Dónde cargar credenciales:
   - **Streamlit Community Cloud**: *App → Settings → Secrets* (de **esta app y este branch**).
   - **Local**: archivo `.streamlit/secrets.toml` en la raíz del proyecto.
+- Formatos válidos en Secrets (TOML):
+  1) JSON completo en una variable (usa triple comilla para evitar error TOML):
+     ```toml
+     MI_JSON = '''{{"type":"service_account","project_id":"...","private_key":"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n","client_email":"...","client_id":"...","token_uri":"https://oauth2.googleapis.com/token"}}'''
+     ```
+  2) Tabla TOML (recomendado para evitar problemas de comillas):
+     ```toml
+     [gcp_service_account]
+     type = "service_account"
+     project_id = "..."
+     private_key_id = "..."
+     private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+     client_email = "..."
+     client_id = "..."
+     auth_uri = "https://accounts.google.com/o/oauth2/auth"
+     token_uri = "https://oauth2.googleapis.com/token"
+     auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+     client_x509_cert_url = "..."
+     universe_domain = "googleapis.com"
+     ```  
 - Puedes usar `MI_JSON` (recomendado) o `GOOGLE_SERVICE_ACCOUNT_JSON` como JSON completo.
 - Debes compartir el spreadsheet con este correo: `{gs_status['client_email']}`.
 - La pestaña debe llamarse exactamente `{GOOGLE_SHEET_TAB}`.
