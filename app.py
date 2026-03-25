@@ -1139,7 +1139,28 @@ def _append_row_to_respuestas_estr(row_values: list):
         elif len(normalized) > len(GOOGLE_RESPUESTAS_COLS):
             normalized = normalized[: len(GOOGLE_RESPUESTAS_COLS)]
 
-        worksheet.append_row(normalized, value_input_option="USER_ENTERED")
+        # Evita que el registro se vaya al final de filas "ocupadas" por fórmulas
+        # (por ejemplo, columnas con FALSE/checkbox). Lo insertamos justo después
+        # de la última fila donde A, B y C están diligenciadas.
+        col_a = worksheet.col_values(1)
+        col_b = worksheet.col_values(2)
+        col_c = worksheet.col_values(3)
+        max_len = max(len(col_a), len(col_b), len(col_c), 1)
+
+        last_data_row = 1  # encabezados
+        for row_idx in range(2, max_len + 1):
+            a_val = col_a[row_idx - 1] if row_idx <= len(col_a) else ""
+            b_val = col_b[row_idx - 1] if row_idx <= len(col_b) else ""
+            c_val = col_c[row_idx - 1] if row_idx <= len(col_c) else ""
+            if str(a_val).strip() and str(b_val).strip() and str(c_val).strip():
+                last_data_row = row_idx
+
+        target_row = last_data_row + 1
+        worksheet.update(
+            f"A{target_row}:V{target_row}",
+            [normalized],
+            value_input_option="USER_ENTERED",
+        )
         return True, f"Google Sheets > {GOOGLE_SHEET_TAB_RESPUESTAS}", None
     except Exception as e:
         return False, f"Google Sheets > {GOOGLE_SHEET_TAB_RESPUESTAS}", str(e)
