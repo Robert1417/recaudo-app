@@ -21,9 +21,12 @@ import zlib
 import subprocess
 import shutil
 import tempfile
+from urllib.parse import parse_qs, urlparse
 
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 import streamlit.components.v1 as components
 from docx import Document
 from docx.oxml import OxmlElement
@@ -153,7 +156,8 @@ GOOGLE_SHEET_HEADERS = [
 ]
 
 GOOGLE_RESPUESTAS_COLS = [chr(i) for i in range(ord("A"), ord("V") + 1)]
-
+DRIVE_FOLDER_CARTA_FIRMADA_URL = "https://drive.google.com/drive/folders/1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk?usp=sharing"
+DRIVE_FOLDER_PANTALLAZO_URL = "https://drive.google.com/drive/folders/1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1?usp=sharing"
 
 # ========= Helpers de "versión de archivo" para invalidar cache =========
 
@@ -1165,6 +1169,51 @@ def _append_row_to_respuestas_estr(row_values: list):
     except Exception as e:
         return False, f"Google Sheets > {GOOGLE_SHEET_TAB_RESPUESTAS}", str(e)
 
+def _extract_drive_folder_id(folder_url: str) -> str:
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", str(folder_url))
+    if match:
+        return match.group(1)
+    parsed = urlparse(str(folder_url))
+    query = parse_qs(parsed.query)
+    if "id" in query and query["id"]:
+        return query["id"][0]
+    raise ValueError(f"No pude obtener el folder id de la URL: {folder_url}")
+
+
+@st.cache_resource(show_spinner=False)
+def get_google_drive_service():
+    creds_info = _resolve_google_credentials_info()
+    credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+
+def _sanitize_filename(name: str, fallback: str = "archivo") -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(name or "").strip())
+    return cleaned[:150] if cleaned else fallback
+
+
+def upload_streamlit_file_to_drive(uploaded_file, folder_url: str, reference: str, prefix: str) -> str:
+    folder_id = _extract_drive_folder_id(folder_url)
+    drive_service = get_google_drive_service()
+    source_name = _sanitize_filename(getattr(uploaded_file, "name", "archivo"))
+    reference_name = _sanitize_filename(str(reference), "sin_referencia")
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{prefix}_{reference_name}_{source_name}"
+
+    uploaded_file.seek(0)
+    file_bytes = uploaded_file.read()
+    media = MediaIoBaseUpload(
+        BytesIO(file_bytes),
+        mimetype=getattr(uploaded_file, "type", None) or "application/octet-stream",
+        resumable=False,
+    )
+    body = {"name": filename, "parents": [folder_id]}
+    created = (
+        drive_service.files()
+        .create(body=body, media_body=media, fields="id, webViewLink")
+        .execute()
+    )
+    return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
+
 
 def diagnosticar_google_sheets():
     """
@@ -1434,6 +1483,8 @@ def enviar_aprobacion_estructurados(
     comision_exito_total,
     ce_inicial,
     prediccion,
+    link_carta_firmada,
+    link_pantallazo,
     tipo_liquidacion="",
 ):
     tipo_liquidacion_norm = _norm(tipo_liquidacion)
@@ -1446,10 +1497,10 @@ def enviar_aprobacion_estructurados(
         str(referencia),  # C Referencia
         "-".join(map(str, ids)),  # D ID deuda
         str(bancos),  # E Banco
-        "Pendiente",  # F Carta pagaré firmado
-        "Pendiente",  # G Pantallazo aceptación
+        str(link_carta_firmada or "").strip(),  # F Carta pagaré firmado
+        str(link_pantallazo or "").strip(),  # G Pantallazo aceptación
         "Sí" if str(condonacion_mensualidades).strip().lower() == "si" else "No",  # H Condonación
-        "",  # I Adjuntar pantallazo de correo
+        str(link_pantallazo or "").strip(),  # I Adjuntar pantallazo de correo
         float(comision_exito_total or 0.0),  # J Comisión total
         float(ce_inicial or 0.0),  # K Primera comisión
         "",  # L
@@ -2429,6 +2480,7 @@ if do_predict:
 st.markdown("---")
 st.markdown("### 8) Envío a aprobación de estructurados")
 st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
+st.caption("Obligatorio: subir carta/pagaré firmado (PDF) y pantallazo de aceptación (foto o PDF).")
 
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
@@ -2440,6 +2492,17 @@ condonacion_mensualidades = st.selectbox(
     index=0,
     key="condonacion_mensualidades",
 )
+carta_firmada_file = st.file_uploader(
+    "📎 Adjuntar carta con pagaré firmado (obligatorio, PDF)",
+    type=["pdf"],
+    key="carta_firmada_file",
+)
+pantallazo_file = st.file_uploader(
+    "🖼️ Adjuntar pantallazo/foto/PDF de aceptación (obligatorio)",
+    type=["pdf", "png", "jpg", "jpeg", "webp"],
+    key="pantallazo_file",
+)
+
 
 enviar_aprobacion = st.button("Enviar AProbación estructurados", use_container_width=True)
 if enviar_aprobacion:
@@ -2450,21 +2513,52 @@ if enviar_aprobacion:
         st.warning("Debes ingresar el correo electrónico antes de enviar.")
     elif condonacion_mensualidades not in {"Si", "No"}:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
+    elif carta_firmada_file is None:
+        st.warning("Debes adjuntar la carta/pagaré firmado en PDF.")
+    elif pantallazo_file is None:
+        st.warning("Debes adjuntar el pantallazo/foto/PDF de aceptación.")    
+        
     else:
-        envio_result = enviar_aprobacion_estructurados(
-            referencia=ref_input,
-            ids=ids_sel,
-            bancos=bancos_sel_text,
-            correo_electronico=correo_para_sheets,
-            condonacion_mensualidades=condonacion_mensualidades,
-            comision_exito_total=feature_vals.get("AMOUNT_TOTAL"),
-            ce_inicial=ce_inicial,
-            prediccion=pred_value,
-            tipo_liquidacion=tipo_liquidacion_val,
-        )
-        if envio_result["estr_ok"]:
+        try:
+            link_carta_firmada = upload_streamlit_file_to_drive(
+                carta_firmada_file,
+                DRIVE_FOLDER_CARTA_FIRMADA_URL,
+                reference=ref_input,
+                prefix="carta_firmada",
+            )
+            link_pantallazo = upload_streamlit_file_to_drive(
+                pantallazo_file,
+                DRIVE_FOLDER_PANTALLAZO_URL,
+                reference=ref_input,
+                prefix="pantallazo",
+            )
+        except Exception as upload_exc:
+            st.error(f"No se pudieron subir los adjuntos a Drive. Detalle: {upload_exc}")
+            link_carta_firmada = None
+            link_pantallazo = None
+
+        if not link_carta_firmada or not link_pantallazo:
+            envio_result = {"estr_ok": False, "estr_error": "No se generaron links de Drive para ambos adjuntos."}
+        else:
+            envio_result = enviar_aprobacion_estructurados(
+                referencia=ref_input,
+                ids=ids_sel,
+                bancos=bancos_sel_text,
+                correo_electronico=correo_para_sheets,
+                condonacion_mensualidades=condonacion_mensualidades,
+                comision_exito_total=feature_vals.get("AMOUNT_TOTAL"),
+                ce_inicial=ce_inicial,
+                prediccion=pred_value,
+                link_carta_firmada=link_carta_firmada,
+                link_pantallazo=link_pantallazo,
+                tipo_liquidacion=tipo_liquidacion_val,
+            )
+
+        if envio_result.get("estr_ok"):
             estado_aprob = "✅ Aprobado" if envio_result["es_aprobado"] else "⛔ No aprobado"
             st.success(f"Envío exitoso a `{envio_result['estr_destination']}`.")
+            st.caption(f"🔗 Carta firmada (columna F): {link_carta_firmada}")
+            st.caption(f"🔗 Pantallazo/PDF (columnas G e I): {link_pantallazo}")
             st.caption(
                 f"Criterio aplicado ({tipo_liquidacion_val or 'No Tradicional'}): "
                 f"predicción {pred_value:.2f} vs umbral {envio_result['umbral_aprobacion']:.2f} → {estado_aprob}"
@@ -2472,5 +2566,5 @@ if enviar_aprobacion:
         else:
             st.error(
                 "No se pudo enviar a estructurados. "
-                f"Detalle: {envio_result['estr_error']}"
+                f"Detalle: {envio_result.get('estr_error')}"
             )
