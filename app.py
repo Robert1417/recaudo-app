@@ -158,7 +158,6 @@ GOOGLE_SHEET_HEADERS = [
 GOOGLE_RESPUESTAS_COLS = [chr(i) for i in range(ord("A"), ord("V") + 1)]
 DRIVE_FOLDER_CARTA_FIRMADA_URL = "https://drive.google.com/drive/folders/1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk?usp=sharing"
 DRIVE_FOLDER_PANTALLAZO_URL = "https://drive.google.com/drive/folders/1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1?usp=sharing"
-
 # ========= Helpers de "versión de archivo" para invalidar cache =========
 
 def _file_version(path: Path) -> str:
@@ -1182,7 +1181,7 @@ def _extract_drive_folder_id(folder_url: str) -> str:
 
 @st.cache_resource(show_spinner=False)
 def get_google_drive_service():
-    creds_info = _resolve_google_credentials_info()
+    creds_info = _load_google_service_account_info()
     credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
@@ -1213,6 +1212,27 @@ def upload_streamlit_file_to_drive(uploaded_file, folder_url: str, reference: st
         .execute()
     )
     return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
+
+
+def _pdf_has_reference_match(uploaded_pdf_file, expected_reference: str) -> bool:
+    """
+    Validación ligera: busca la referencia en el contenido del PDF.
+    Nota: no parsea layout; se usa para alertar inconsistencias obvias.
+    """
+    expected = re.sub(r"\s+", "", str(expected_reference or "")).strip().lower()
+    if not expected:
+        return False
+
+    uploaded_pdf_file.seek(0)
+    raw = uploaded_pdf_file.read()
+    uploaded_pdf_file.seek(0)
+
+    # Búsqueda directa y versión alfanumérica (sin signos)
+    raw_text = raw.decode("latin-1", errors="ignore").lower()
+    raw_text_compact = re.sub(r"[^a-z0-9]", "", raw_text)
+    expected_compact = re.sub(r"[^a-z0-9]", "", expected)
+
+    return expected in raw_text or expected_compact in raw_text_compact
 
 
 def diagnosticar_google_sheets():
@@ -2479,8 +2499,8 @@ if do_predict:
 
 st.markdown("---")
 st.markdown("### 8) Envío a aprobación de estructurados")
-st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
 st.caption("Obligatorio: subir carta/pagaré firmado (PDF) y pantallazo de aceptación (foto o PDF).")
+st.caption("La carta firmada debe corresponder a la misma referencia del caso; si no coincide, se bloquea el envío.")
 
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
@@ -2516,7 +2536,11 @@ if enviar_aprobacion:
     elif carta_firmada_file is None:
         st.warning("Debes adjuntar la carta/pagaré firmado en PDF.")
     elif pantallazo_file is None:
-        st.warning("Debes adjuntar el pantallazo/foto/PDF de aceptación.")    
+        st.warning("Debes adjuntar el pantallazo/foto/PDF de aceptación.")
+    elif not _pdf_has_reference_match(carta_firmada_file, ref_input):
+        st.warning(
+            "La carta/pagaré firmado no coincide con la referencia actual. "
+            "Debe contener la misma referencia del caso en la primera hoja (ej: Ref. No...)."   
         
     else:
         try:
@@ -2553,6 +2577,7 @@ if enviar_aprobacion:
                 link_pantallazo=link_pantallazo,
                 tipo_liquidacion=tipo_liquidacion_val,
             )
+
 
         if envio_result.get("estr_ok"):
             estado_aprob = "✅ Aprobado" if envio_result["es_aprobado"] else "⛔ No aprobado"
