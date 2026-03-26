@@ -27,6 +27,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from pypdf import PdfReader
 import streamlit.components.v1 as components
 from docx import Document
 from docx.oxml import OxmlElement
@@ -1214,48 +1215,15 @@ def upload_streamlit_file_to_drive(uploaded_file, folder_url: str, reference: st
     return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
 
 
-def _extract_pdf_pages_text(raw_pdf_bytes: bytes) -> list[str]:
+def _extract_pdf_pages_text(uploaded_pdf_file) -> list[str]:
     """
-    Extrae texto aproximado por página leyendo objetos/streams del PDF.
-    Es una estrategia ligera para validaciones de negocio (referencia/QR).
+    Extrae texto por página con pypdf.
     """
-    object_pattern = re.compile(rb"(\d+)\s+(\d+)\s+obj(.*?)endobj", re.DOTALL)
-    objects: dict[bytes, bytes] = {}
-    for match in object_pattern.finditer(raw_pdf_bytes):
-        obj_id = match.group(1)
-        obj_body = match.group(3)
-        objects[obj_id] = obj_body
-
-    page_ids: list[bytes] = []
-    for obj_id, obj_body in objects.items():
-        if b"/Type /Page" in obj_body and b"/Type /Pages" not in obj_body:
-            page_ids.append(obj_id)
-
-    page_texts: list[str] = []
-    for page_id in page_ids:
-        page_obj = objects.get(page_id, b"")
-        content_refs = re.findall(rb"(\d+)\s+\d+\s+R", page_obj.split(b"/Contents", 1)[-1])
-        if not content_refs:
-            page_texts.append("")
-            continue
-
-        page_chunks: list[str] = []
-        for ref in content_refs:
-            content_obj = objects.get(ref, b"")
-            stream_match = re.search(rb"stream\r?\n(.*?)\r?\nendstream", content_obj, re.DOTALL)
-            if not stream_match:
-                continue
-            stream_data = stream_match.group(1)
-            if b"/FlateDecode" in content_obj:
-                try:
-                    stream_data = zlib.decompress(stream_data)
-                except Exception:
-                    pass
-            page_chunks.append(stream_data.decode("latin-1", errors="ignore"))
-
-        page_texts.append("\n".join(page_chunks))
-
-    return page_texts
+    uploaded_pdf_file.seek(0)
+    pdf_bytes = uploaded_pdf_file.read()
+    uploaded_pdf_file.seek(0)
+    reader = PdfReader(BytesIO(pdf_bytes))
+    return [(page.extract_text() or "") for page in reader.pages]
 
 
 def _validate_signed_pdf(uploaded_pdf_file, expected_reference: str) -> tuple[bool, str | None]:
@@ -1274,12 +1242,15 @@ def _validate_signed_pdf(uploaded_pdf_file, expected_reference: str) -> tuple[bo
     if not raw:
         return False, "El PDF firmado está vacío."
 
-    page_texts = _extract_pdf_pages_text(raw)
+    page_texts: list[str] = []
+    try:
+        page_texts = _extract_pdf_pages_text(uploaded_pdf_file)
+    except Exception:
+        page_texts = []
+
     if page_texts:
         first_page = re.sub(r"[^0-9A-Za-z]", "", page_texts[0]).lower()
         last_page_text = page_texts[-1].lower()
-
-        # Ruta principal: validar por página (primera y última).
         if expected_ref in first_page and "qr" in last_page_text:
             return True, None
 
@@ -1294,7 +1265,6 @@ def _validate_signed_pdf(uploaded_pdf_file, expected_reference: str) -> tuple[bo
     if page_texts:
         return False, "No validó referencia en primera hoja y/o QR en última hoja del PDF firmado."
     return False, "No pude leer el PDF por páginas; tampoco encontré referencia+QR en el contenido del archivo."
-
 
 def diagnosticar_google_sheets():
     """
