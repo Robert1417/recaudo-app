@@ -14,6 +14,8 @@ import re  # ✅ NUEVO
 from datetime import datetime
 import os
 import html as html_lib
+import time
+import ssl
 from io import BytesIO
 from zipfile import ZipFile
 import xml.etree.ElementTree as ET
@@ -27,6 +29,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.errors import HttpError
 from pypdf import PdfReader
 import streamlit.components.v1 as components
 from docx import Document
@@ -157,8 +160,8 @@ GOOGLE_SHEET_HEADERS = [
 ]
 
 GOOGLE_RESPUESTAS_COLS = [chr(i) for i in range(ord("A"), ord("V") + 1)]
-DRIVE_FOLDER_CARTA_FIRMADA_URL = "https://drive.google.com/drive/folders/1YSJ48HwS0ONpOpfJNeiF_ccgItNY1Dbc?usp=drive_link"
-DRIVE_FOLDER_PANTALLAZO_URL = "https://drive.google.com/drive/folders/117gE0uPDR1PzKmUXQAbrLqjnXy3qxNEm?usp=drive_link"
+DRIVE_FOLDER_CARTA_FIRMADA_PATH = ["Predicción fecha de liquidación", "Aprobaciones", "Carta y pagaré firmado"]
+DRIVE_FOLDER_PANTALLAZO_PATH = ["Predicción fecha de liquidación", "Aprobaciones", "Pantallazos Confirmación"]
 # ========= Helpers de "versión de archivo" para invalidar cache =========
 
 def _file_version(path: Path) -> str:
@@ -1180,6 +1183,37 @@ def _extract_drive_folder_id(folder_url: str) -> str:
     raise ValueError(f"No pude obtener el folder id de la URL: {folder_url}")
 
 
+def _find_drive_folder_by_name(drive_service, parent_id: str, folder_name: str):
+    safe_name = str(folder_name).replace("'", "\\'")
+    query = (
+        f"'{parent_id}' in parents and "
+        f"name = '{safe_name}' and "
+        "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    )
+    response = drive_service.files().list(
+        q=query,
+        fields="files(id,name)",
+        pageSize=5,
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+    ).execute()
+    items = response.get("files", [])
+    return items[0] if items else None
+
+
+def _resolve_drive_folder_id_from_path(drive_service, folder_path: list[str]) -> str:
+    parent_id = "root"
+    for level_name in folder_path:
+        found = _find_drive_folder_by_name(drive_service, parent_id, level_name)
+        if not found:
+            raise RuntimeError(
+                "No encontré la carpeta en Drive con la ruta: "
+                + " / ".join(folder_path)
+            )
+        parent_id = found["id"]
+    return parent_id
+
+
 @st.cache_resource(show_spinner=False)
 def get_google_drive_service():
     creds_info = _load_google_service_account_info()
@@ -1192,45 +1226,72 @@ def _sanitize_filename(name: str, fallback: str = "archivo") -> str:
     return cleaned[:150] if cleaned else fallback
 
 
-def upload_streamlit_file_to_drive(uploaded_file, folder_url: str, reference: str, prefix: str) -> str:
-    folder_id = _extract_drive_folder_id(folder_url)
+def _find_drive_file_in_folder(drive_service, folder_id: str, filename: str):
+    safe_name = str(filename).replace("'", "\\'")
+    query = f"'{folder_id}' in parents and name = '{safe_name}' and trashed = false"
+    response = drive_service.files().list(
+        q=query,
+        fields="files(id,name,webViewLink)",
+        pageSize=5,
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+    ).execute()
+    files = response.get("files", [])
+    return files[0] if files else None
+
+
+def _execute_resumable_request(request, max_attempts: int = 6):
+    response = None
+    attempts = 0
+    while response is None:
+        try:
+            _, response = request.next_chunk(num_retries=5)
+        except (HttpError, ssl.SSLEOFError, ConnectionError, OSError) as exc:
+            attempts += 1
+            if attempts >= max_attempts:
+                raise RuntimeError(f"Falló la subida tras {attempts} intentos. Último error: {exc}") from exc
+            time.sleep(2 ** attempts)
+    return response
+
+
+def upload_streamlit_file_to_drive(uploaded_file, folder_target, reference: str, prefix: str) -> str:
+    drive_service = get_google_drive_service()
+    if isinstance(folder_target, list):
+        folder_id = _resolve_drive_folder_id_from_path(drive_service, folder_target)
+    else:
+        folder_id = _extract_drive_folder_id(str(folder_target))
     source_name = _sanitize_filename(getattr(uploaded_file, "name", "archivo"))
     reference_name = _sanitize_filename(str(reference), "sin_referencia")
-    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{prefix}_{reference_name}_{source_name}"
+    filename = f"{prefix}_{reference_name}_{source_name}"
 
     uploaded_file.seek(0)
     file_bytes = uploaded_file.read()
     media = MediaIoBaseUpload(
         BytesIO(file_bytes),
         mimetype=getattr(uploaded_file, "type", None) or "application/octet-stream",
-        resumable=False,
+        chunksize=2 * 1024 * 1024,
+        resumable=True,
     )
-    body = {"name": filename, "parents": [folder_id]}
 
-    last_error = None
-    for _attempt in range(3):
-        try:
-            drive_service = get_google_drive_service()
-            created = (
-                drive_service.files()
-                .create(
-                    body=body,
-                    media_body=media,
-                    fields="id, webViewLink",
-                    supportsAllDrives=True,
-                )
-                .execute(num_retries=3)
-            )
-            return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
-        except Exception as exc:
-            last_error = exc
-            uploaded_file.seek(0)
-            media = MediaIoBaseUpload(
-                BytesIO(uploaded_file.read()),
-                mimetype=getattr(uploaded_file, "type", None) or "application/octet-stream",
-                resumable=False,
-            )
-    raise RuntimeError(f"No fue posible subir el archivo a Drive tras varios intentos: {last_error}")
+    existing = _find_drive_file_in_folder(drive_service, folder_id, filename)
+    if existing:
+        request = drive_service.files().update(
+            fileId=existing["id"],
+            media_body=media,
+            fields="id,webViewLink",
+            supportsAllDrives=True,
+        )
+        updated = _execute_resumable_request(request)
+        return updated.get("webViewLink") or f"https://drive.google.com/file/d/{updated['id']}/view"
+
+    request = drive_service.files().create(
+        body={"name": filename, "parents": [folder_id]},
+        media_body=media,
+        fields="id,webViewLink",
+        supportsAllDrives=True,
+    )
+    created = _execute_resumable_request(request)
+    return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
 
 
 def _extract_pdf_pages_text(uploaded_pdf_file) -> list[str]:
@@ -2599,13 +2660,13 @@ if enviar_aprobacion:
             try:
                 link_carta_firmada = upload_streamlit_file_to_drive(
                     carta_firmada_file,
-                    DRIVE_FOLDER_CARTA_FIRMADA_URL,
+                    DRIVE_FOLDER_CARTA_FIRMADA_PATH,
                     reference=ref_input,
                     prefix="carta_firmada",
                 )
                 link_pantallazo = upload_streamlit_file_to_drive(
                     pantallazo_file,
-                    DRIVE_FOLDER_PANTALLAZO_URL,
+                    DRIVE_FOLDER_PANTALLAZO_PATH,
                     reference=ref_input,
                     prefix="pantallazo",
                 )
