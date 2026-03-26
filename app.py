@@ -1183,28 +1183,42 @@ def _extract_drive_folder_id(folder_url: str) -> str:
     raise ValueError(f"No pude obtener el folder id de la URL: {folder_url}")
 
 
-def _find_drive_folder_by_name(drive_service, parent_id: str, folder_name: str):
-    safe_name = str(folder_name).replace("'", "\\'")
-    query = (
-        f"'{parent_id}' in parents and "
-        f"name = '{safe_name}' and "
-        "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    )
+def _normalize_drive_name(value: str) -> str:
+    txt = unicodedata.normalize("NFKD", str(value or ""))
+    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", txt).strip().lower()
+
+
+def _find_drive_folder_by_name(drive_service, folder_name: str, parent_id: str | None = None):
+    if parent_id:
+        query = (
+            f"'{parent_id}' in parents and "
+            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        )
+    else:
+        query = "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     response = drive_service.files().list(
         q=query,
         fields="files(id,name)",
-        pageSize=5,
+        pageSize=200,
         includeItemsFromAllDrives=True,
         supportsAllDrives=True,
     ).execute()
     items = response.get("files", [])
-    return items[0] if items else None
+    expected = _normalize_drive_name(folder_name)
+    for item in items:
+        if _normalize_drive_name(item.get("name")) == expected:
+            return item
+    return None
 
 
 def _resolve_drive_folder_id_from_path(drive_service, folder_path: list[str]) -> str:
-    parent_id = "root"
-    for level_name in folder_path:
-        found = _find_drive_folder_by_name(drive_service, parent_id, level_name)
+    parent_id = None
+    for idx, level_name in enumerate(folder_path):
+        found = _find_drive_folder_by_name(drive_service, level_name, parent_id=parent_id)
+        if not found and idx == 0:
+            # Fallback: buscar el primer nivel globalmente por nombre (útil si no cuelga de root SA).
+            found = _find_drive_folder_by_name(drive_service, level_name, parent_id=None)
         if not found:
             raise RuntimeError(
                 "No encontré la carpeta en Drive con la ruta: "
