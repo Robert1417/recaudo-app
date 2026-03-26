@@ -1194,7 +1194,6 @@ def _sanitize_filename(name: str, fallback: str = "archivo") -> str:
 
 def upload_streamlit_file_to_drive(uploaded_file, folder_url: str, reference: str, prefix: str) -> str:
     folder_id = _extract_drive_folder_id(folder_url)
-    drive_service = get_google_drive_service()
     source_name = _sanitize_filename(getattr(uploaded_file, "name", "archivo"))
     reference_name = _sanitize_filename(str(reference), "sin_referencia")
     filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{prefix}_{reference_name}_{source_name}"
@@ -1207,12 +1206,31 @@ def upload_streamlit_file_to_drive(uploaded_file, folder_url: str, reference: st
         resumable=False,
     )
     body = {"name": filename, "parents": [folder_id]}
-    created = (
-        drive_service.files()
-        .create(body=body, media_body=media, fields="id, webViewLink")
-        .execute()
-    )
-    return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
+
+    last_error = None
+    for _attempt in range(3):
+        try:
+            drive_service = get_google_drive_service()
+            created = (
+                drive_service.files()
+                .create(
+                    body=body,
+                    media_body=media,
+                    fields="id, webViewLink",
+                    supportsAllDrives=True,
+                )
+                .execute(num_retries=3)
+            )
+            return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
+        except Exception as exc:
+            last_error = exc
+            uploaded_file.seek(0)
+            media = MediaIoBaseUpload(
+                BytesIO(uploaded_file.read()),
+                mimetype=getattr(uploaded_file, "type", None) or "application/octet-stream",
+                resumable=False,
+            )
+    raise RuntimeError(f"No fue posible subir el archivo a Drive tras varios intentos: {last_error}")
 
 
 def _extract_pdf_pages_text(uploaded_pdf_file) -> list[str]:
@@ -1265,7 +1283,6 @@ def _validate_signed_pdf(uploaded_pdf_file, expected_reference: str) -> tuple[bo
     if page_texts:
         return False, "No validó referencia en primera hoja y/o QR en última hoja del PDF firmado."
     return False, "No pude leer el PDF por páginas; tampoco encontré referencia+QR en el contenido del archivo."
-
 def diagnosticar_google_sheets():
     """
     Valida que el secreto, el spreadsheet y la pestaña destino estén accesibles.
