@@ -158,7 +158,7 @@ GOOGLE_SHEET_HEADERS = [
 
 GOOGLE_RESPUESTAS_COLS = [chr(i) for i in range(ord("A"), ord("V") + 1)]
 DRIVE_FOLDER_CARTA_FIRMADA_URL = "https://drive.google.com/drive/folders/1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk?usp=sharing"
-DRIVE_FOLDER_PANTALLAZO_URL = "https://drive.google.com/drive/folders/1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1?usp=sharing"
+DRIVE_FOLDER_PANTALLAZO_URL = "https://drive.google.com/drive/folders/1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1?usp=sharing
 # ========= Helpers de "versión de archivo" para invalidar cache =========
 
 def _file_version(path: Path) -> str:
@@ -2592,7 +2592,14 @@ if enviar_aprobacion:
                     prefix="pantallazo",
                 )
             except Exception as upload_exc:
-                st.error(f"No se pudieron subir los adjuntos a Drive. Detalle: {upload_exc}")
+                upload_msg = str(upload_exc)
+                if "storageQuotaExceeded" in upload_msg or "Service Accounts do not have storage quota" in upload_msg:
+                    st.error(
+                        "No se pudieron subir los adjuntos a Drive porque la cuenta de servicio no tiene cuota "
+                        "en 'Mi unidad'. Usa carpeta en Shared Drive (unidad compartida) o delegación OAuth."
+                    )
+                else:
+                    st.error(f"No se pudieron subir los adjuntos a Drive. Detalle: {upload_exc}")
                 link_carta_firmada = None
                 link_pantallazo = None
 
