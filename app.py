@@ -2591,7 +2591,6 @@ if enviar_aprobacion:
     elif pantallazo_file is None:
         st.warning("Debes adjuntar el pantallazo/foto/PDF de aceptación.")
      
-        )
     else:
         pdf_ok, pdf_error = _validate_signed_pdf(carta_firmada_file, ref_input)
         if not pdf_ok:
