@@ -1275,18 +1275,25 @@ def _validate_signed_pdf(uploaded_pdf_file, expected_reference: str) -> tuple[bo
         return False, "El PDF firmado está vacío."
 
     page_texts = _extract_pdf_pages_text(raw)
-    if not page_texts:
-        return False, "No pude leer el PDF para validar referencia/QR."
+    if page_texts:
+        first_page = re.sub(r"[^0-9A-Za-z]", "", page_texts[0]).lower()
+        last_page_text = page_texts[-1].lower()
 
-    first_page = re.sub(r"[^0-9A-Za-z]", "", page_texts[0]).lower()
-    if expected_ref not in first_page:
-        return False, "La referencia no coincide en la primera hoja del PDF firmado."
+        # Ruta principal: validar por página (primera y última).
+        if expected_ref in first_page and "qr" in last_page_text:
+            return True, None
 
-    last_page_text = page_texts[-1].lower()
-    if "qr" not in last_page_text:
-        return False, "No encontré indicio de QR en la última hoja del PDF firmado."
+    # Fallback robusto: algunos PDFs no exponen bien streams por página.
+    raw_text = raw.decode("latin-1", errors="ignore").lower()
+    raw_compact = re.sub(r"[^0-9a-z]", "", raw_text)
+    has_ref_anywhere = expected_ref in raw_compact
+    has_qr_anywhere = "qr" in raw_text
+    if has_ref_anywhere and has_qr_anywhere:
+        return True, None
 
-    return True, None
+    if page_texts:
+        return False, "No validó referencia en primera hoja y/o QR en última hoja del PDF firmado."
+    return False, "No pude leer el PDF por páginas; tampoco encontré referencia+QR en el contenido del archivo."
 
 
 def diagnosticar_google_sheets():
