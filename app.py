@@ -14,9 +14,6 @@ import re  # ✅ NUEVO
 from datetime import datetime
 import os
 import html as html_lib
-import time
-import ssl
-import unicodedata
 from io import BytesIO
 from zipfile import ZipFile
 import xml.etree.ElementTree as ET
@@ -24,14 +21,9 @@ import zlib
 import subprocess
 import shutil
 import tempfile
-from urllib.parse import parse_qs, urlparse
 
 import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-from googleapiclient.errors import HttpError
-from pypdf import PdfReader
 import streamlit.components.v1 as components
 from docx import Document
 from docx.oxml import OxmlElement
@@ -161,8 +153,8 @@ GOOGLE_SHEET_HEADERS = [
 ]
 
 GOOGLE_RESPUESTAS_COLS = [chr(i) for i in range(ord("A"), ord("V") + 1)]
-DRIVE_FOLDER_CARTA_FIRMADA_PATH = ["Predicción fecha de liquidación", "Aprobaciones", "Carta y pagaré firmado"]
-DRIVE_FOLDER_PANTALLAZO_PATH = ["Predicción fecha de liquidación", "Aprobaciones", "Pantallazos Confirmación"]
+
+
 # ========= Helpers de "versión de archivo" para invalidar cache =========
 
 def _file_version(path: Path) -> str:
@@ -1173,193 +1165,7 @@ def _append_row_to_respuestas_estr(row_values: list):
     except Exception as e:
         return False, f"Google Sheets > {GOOGLE_SHEET_TAB_RESPUESTAS}", str(e)
 
-def _extract_drive_folder_id(folder_url: str) -> str:
-    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", str(folder_url))
-    if match:
-        return match.group(1)
-    parsed = urlparse(str(folder_url))
-    query = parse_qs(parsed.query)
-    if "id" in query and query["id"]:
-        return query["id"][0]
-    raise ValueError(f"No pude obtener el folder id de la URL: {folder_url}")
 
-
-def _normalize_drive_name(value: str) -> str:
-    txt = unicodedata.normalize("NFKD", str(value or ""))
-    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
-    return re.sub(r"\s+", " ", txt).strip().lower()
-
-
-def _find_drive_folder_by_name(drive_service, folder_name: str, parent_id: str | None = None):
-    if parent_id:
-        query = (
-            f"'{parent_id}' in parents and "
-            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        )
-    else:
-        query = "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    response = drive_service.files().list(
-        q=query,
-        fields="files(id,name)",
-        pageSize=200,
-        includeItemsFromAllDrives=True,
-        supportsAllDrives=True,
-    ).execute()
-    items = response.get("files", [])
-    expected = _normalize_drive_name(folder_name)
-    for item in items:
-        if _normalize_drive_name(item.get("name")) == expected:
-            return item
-    return None
-
-
-def _resolve_drive_folder_id_from_path(drive_service, folder_path: list[str]) -> str:
-    parent_id = None
-    for idx, level_name in enumerate(folder_path):
-        found = _find_drive_folder_by_name(drive_service, level_name, parent_id=parent_id)
-        if not found and idx == 0:
-            # Fallback: buscar el primer nivel globalmente por nombre (útil si no cuelga de root SA).
-            found = _find_drive_folder_by_name(drive_service, level_name, parent_id=None)
-        if not found:
-            raise RuntimeError(
-                "No encontré la carpeta en Drive con la ruta: "
-                + " / ".join(folder_path)
-            )
-        parent_id = found["id"]
-    return parent_id
-
-
-@st.cache_resource(show_spinner=False)
-def get_google_drive_service():
-    creds_info = _load_google_service_account_info()
-    credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
-    return build("drive", "v3", credentials=credentials, cache_discovery=False)
-
-
-def _sanitize_filename(name: str, fallback: str = "archivo") -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(name or "").strip())
-    return cleaned[:150] if cleaned else fallback
-
-
-def _find_drive_file_in_folder(drive_service, folder_id: str, filename: str):
-    safe_name = str(filename).replace("'", "\\'")
-    query = f"'{folder_id}' in parents and name = '{safe_name}' and trashed = false"
-    response = drive_service.files().list(
-        q=query,
-        fields="files(id,name,webViewLink)",
-        pageSize=5,
-        includeItemsFromAllDrives=True,
-        supportsAllDrives=True,
-    ).execute()
-    files = response.get("files", [])
-    return files[0] if files else None
-
-
-def _execute_resumable_request(request, max_attempts: int = 6):
-    response = None
-    attempts = 0
-    while response is None:
-        try:
-            _, response = request.next_chunk(num_retries=5)
-        except (HttpError, ssl.SSLEOFError, ConnectionError, OSError) as exc:
-            attempts += 1
-            if attempts >= max_attempts:
-                raise RuntimeError(f"Falló la subida tras {attempts} intentos. Último error: {exc}") from exc
-            time.sleep(2 ** attempts)
-    return response
-
-
-def upload_streamlit_file_to_drive(uploaded_file, folder_target, reference: str, prefix: str) -> str:
-    drive_service = get_google_drive_service()
-    if isinstance(folder_target, list):
-        folder_id = _resolve_drive_folder_id_from_path(drive_service, folder_target)
-    else:
-        folder_id = _extract_drive_folder_id(str(folder_target))
-    source_name = _sanitize_filename(getattr(uploaded_file, "name", "archivo"))
-    reference_name = _sanitize_filename(str(reference), "sin_referencia")
-    filename = f"{prefix}_{reference_name}_{source_name}"
-
-    uploaded_file.seek(0)
-    file_bytes = uploaded_file.read()
-    media = MediaIoBaseUpload(
-        BytesIO(file_bytes),
-        mimetype=getattr(uploaded_file, "type", None) or "application/octet-stream",
-        chunksize=2 * 1024 * 1024,
-        resumable=True,
-    )
-
-    existing = _find_drive_file_in_folder(drive_service, folder_id, filename)
-    if existing:
-        request = drive_service.files().update(
-            fileId=existing["id"],
-            media_body=media,
-            fields="id,webViewLink",
-            supportsAllDrives=True,
-        )
-        updated = _execute_resumable_request(request)
-        return updated.get("webViewLink") or f"https://drive.google.com/file/d/{updated['id']}/view"
-
-    request = drive_service.files().create(
-        body={"name": filename, "parents": [folder_id]},
-        media_body=media,
-        fields="id,webViewLink",
-        supportsAllDrives=True,
-    )
-    created = _execute_resumable_request(request)
-    return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
-
-
-def _extract_pdf_pages_text(uploaded_pdf_file) -> list[str]:
-    """
-    Extrae texto por página con pypdf.
-    """
-    uploaded_pdf_file.seek(0)
-    pdf_bytes = uploaded_pdf_file.read()
-    uploaded_pdf_file.seek(0)
-    reader = PdfReader(BytesIO(pdf_bytes))
-    return [(page.extract_text() or "") for page in reader.pages]
-
-
-def _validate_signed_pdf(uploaded_pdf_file, expected_reference: str) -> tuple[bool, str | None]:
-    """
-    Reglas:
-    1) La referencia del caso debe aparecer en la primera hoja.
-    2) La última hoja debe contener 'QR' (indicio de firma).
-    """
-    expected_ref = re.sub(r"[^0-9A-Za-z]", "", str(expected_reference or "")).lower()
-    if not expected_ref:
-        return False, "No hay referencia del caso para validar la carta firmada."
-
-    uploaded_pdf_file.seek(0)
-    raw = uploaded_pdf_file.read()
-    uploaded_pdf_file.seek(0)
-    if not raw:
-        return False, "El PDF firmado está vacío."
-
-    page_texts: list[str] = []
-    try:
-        page_texts = _extract_pdf_pages_text(uploaded_pdf_file)
-    except Exception:
-        page_texts = []
-
-    if page_texts:
-        first_page = re.sub(r"[^0-9A-Za-z]", "", page_texts[0]).lower()
-        last_page_text = page_texts[-1].lower()
-        if expected_ref in first_page and "qr" in last_page_text:
-            return True, None
-
-    # Fallback robusto: algunos PDFs no exponen bien streams por página.
-    raw_text = raw.decode("latin-1", errors="ignore").lower()
-    raw_compact = re.sub(r"[^0-9a-z]", "", raw_text)
-    has_ref_anywhere = expected_ref in raw_compact
-    has_qr_anywhere = "qr" in raw_text
-    if has_ref_anywhere and has_qr_anywhere:
-        return True, None
-
-    if page_texts:
-        return False, "No validó referencia en primera hoja y/o QR en última hoja del PDF firmado."
-    return False, "No pude leer el PDF por páginas; tampoco encontré referencia+QR en el contenido del archivo."
-    
 def diagnosticar_google_sheets():
     """
     Valida que el secreto, el spreadsheet y la pestaña destino estén accesibles.
@@ -1628,8 +1434,6 @@ def enviar_aprobacion_estructurados(
     comision_exito_total,
     ce_inicial,
     prediccion,
-    link_carta_firmada,
-    link_pantallazo,
     tipo_liquidacion="",
 ):
     tipo_liquidacion_norm = _norm(tipo_liquidacion)
@@ -1642,10 +1446,10 @@ def enviar_aprobacion_estructurados(
         str(referencia),  # C Referencia
         "-".join(map(str, ids)),  # D ID deuda
         str(bancos),  # E Banco
-        str(link_carta_firmada or "").strip(),  # F Carta pagaré firmado
-        str(link_pantallazo or "").strip(),  # G Pantallazo aceptación
+        "Pendiente",  # F Carta pagaré firmado
+        "Pendiente",  # G Pantallazo aceptación
         "Sí" if str(condonacion_mensualidades).strip().lower() == "si" else "No",  # H Condonación
-        str(link_pantallazo or "").strip(),  # I Adjuntar pantallazo de correo
+        "",  # I Adjuntar pantallazo de correo
         float(comision_exito_total or 0.0),  # J Comisión total
         float(ce_inicial or 0.0),  # K Primera comisión
         "",  # L
@@ -2624,8 +2428,8 @@ if do_predict:
 
 st.markdown("---")
 st.markdown("### 8) Envío a aprobación de estructurados")
-st.caption("Obligatorio: subir carta/pagaré firmado (PDF) y pantallazo de aceptación (foto o PDF).")
-st.caption("Validación carta firmada: referencia en primera hoja y texto 'QR' en la última hoja.")
+st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
+
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
     key="correo_para_sheets",
@@ -2636,17 +2440,6 @@ condonacion_mensualidades = st.selectbox(
     index=0,
     key="condonacion_mensualidades",
 )
-carta_firmada_file = st.file_uploader(
-    "📎 Adjuntar carta con pagaré firmado (obligatorio, PDF)",
-    type=["pdf"],
-    key="carta_firmada_file",
-)
-pantallazo_file = st.file_uploader(
-    "🖼️ Adjuntar pantallazo/foto/PDF de aceptación (obligatorio)",
-    type=["pdf", "png", "jpg", "jpeg", "webp"],
-    key="pantallazo_file",
-)
-
 
 enviar_aprobacion = st.button("Enviar AProbación estructurados", use_container_width=True)
 if enviar_aprobacion:
@@ -2657,68 +2450,21 @@ if enviar_aprobacion:
         st.warning("Debes ingresar el correo electrónico antes de enviar.")
     elif condonacion_mensualidades not in {"Si", "No"}:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
-    elif carta_firmada_file is None:
-        st.warning("Debes adjuntar la carta/pagaré firmado en PDF.")
-    elif pantallazo_file is None:
-        st.warning("Debes adjuntar el pantallazo/foto/PDF de aceptación.")
-     
     else:
-        pdf_ok, pdf_error = _validate_signed_pdf(carta_firmada_file, ref_input)
-        if not pdf_ok:
-            envio_result = {
-                "estr_ok": False,
-                "estr_error": f"{pdf_error} Validación requerida: referencia en primera hoja + QR en última hoja.",
-            }
-            link_carta_firmada = None
-            link_pantallazo = None
-        else:
-            try:
-                link_carta_firmada = upload_streamlit_file_to_drive(
-                    carta_firmada_file,
-                    DRIVE_FOLDER_CARTA_FIRMADA_PATH,
-                    reference=ref_input,
-                    prefix="carta_firmada",
-                )
-                link_pantallazo = upload_streamlit_file_to_drive(
-                    pantallazo_file,
-                    DRIVE_FOLDER_PANTALLAZO_PATH,
-                    reference=ref_input,
-                    prefix="pantallazo",
-                )
-            except Exception as upload_exc:
-                upload_msg = str(upload_exc)
-                if "storageQuotaExceeded" in upload_msg or "Service Accounts do not have storage quota" in upload_msg:
-                    st.error(
-                        "No se pudieron subir los adjuntos a Drive por cuota/permisos de la cuenta de servicio. "
-                        "El envío se detiene para evitar guardar solo links de carpeta."
-                    )
-                else:
-                    st.error(f"No se pudieron subir los adjuntos a Drive. Detalle: {upload_exc}")
-                link_carta_firmada = None
-                link_pantallazo = None
-
-            if not link_carta_firmada or not link_pantallazo:
-                envio_result = {"estr_ok": False, "estr_error": "No se generaron links de Drive para ambos adjuntos."}
-            else:
-                envio_result = enviar_aprobacion_estructurados(
-                    referencia=ref_input,
-                    ids=ids_sel,
-                    bancos=bancos_sel_text,
-                    correo_electronico=correo_para_sheets,
-                    condonacion_mensualidades=condonacion_mensualidades,
-                    comision_exito_total=feature_vals.get("AMOUNT_TOTAL"),
-                    ce_inicial=ce_inicial,
-                    prediccion=pred_value,
-                    link_carta_firmada=link_carta_firmada,
-                    link_pantallazo=link_pantallazo,
-                    tipo_liquidacion=tipo_liquidacion_val,
-                )
-
-        if envio_result.get("estr_ok"):
+        envio_result = enviar_aprobacion_estructurados(
+            referencia=ref_input,
+            ids=ids_sel,
+            bancos=bancos_sel_text,
+            correo_electronico=correo_para_sheets,
+            condonacion_mensualidades=condonacion_mensualidades,
+            comision_exito_total=feature_vals.get("AMOUNT_TOTAL"),
+            ce_inicial=ce_inicial,
+            prediccion=pred_value,
+            tipo_liquidacion=tipo_liquidacion_val,
+        )
+        if envio_result["estr_ok"]:
             estado_aprob = "✅ Aprobado" if envio_result["es_aprobado"] else "⛔ No aprobado"
             st.success(f"Envío exitoso a `{envio_result['estr_destination']}`.")
-            st.caption(f"🔗 Carta firmada (columna F): {link_carta_firmada}")
-            st.caption(f"🔗 Pantallazo/PDF (columnas G e I): {link_pantallazo}")
             st.caption(
                 f"Criterio aplicado ({tipo_liquidacion_val or 'No Tradicional'}): "
                 f"predicción {pred_value:.2f} vs umbral {envio_result['umbral_aprobacion']:.2f} → {estado_aprob}"
@@ -2726,5 +2472,5 @@ if enviar_aprobacion:
         else:
             st.error(
                 "No se pudo enviar a estructurados. "
-                f"Detalle: {envio_result.get('estr_error')}"
+                f"Detalle: {envio_result['estr_error']}"
             )
