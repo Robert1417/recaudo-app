@@ -1283,6 +1283,7 @@ def _validate_signed_pdf(uploaded_pdf_file, expected_reference: str) -> tuple[bo
     if page_texts:
         return False, "No validó referencia en primera hoja y/o QR en última hoja del PDF firmado."
     return False, "No pude leer el PDF por páginas; tampoco encontré referencia+QR en el contenido del archivo."
+    
 def diagnosticar_google_sheets():
     """
     Valida que el secreto, el spreadsheet y la pestaña destino estén accesibles.
@@ -2611,14 +2612,16 @@ if enviar_aprobacion:
             except Exception as upload_exc:
                 upload_msg = str(upload_exc)
                 if "storageQuotaExceeded" in upload_msg or "Service Accounts do not have storage quota" in upload_msg:
-                    st.error(
-                        "No se pudieron subir los adjuntos a Drive porque la cuenta de servicio no tiene cuota "
-                        "en 'Mi unidad'. Usa carpeta en Shared Drive (unidad compartida) o delegación OAuth."
+                    st.warning(
+                        "No se pudieron subir automáticamente los adjuntos a Drive por límite de cuota de la "
+                        "cuenta de servicio. Se registrarán links de carpeta destino para continuar el envío."
                     )
+                    link_carta_firmada = DRIVE_FOLDER_CARTA_FIRMADA_URL
+                    link_pantallazo = DRIVE_FOLDER_PANTALLAZO_URL
                 else:
                     st.error(f"No se pudieron subir los adjuntos a Drive. Detalle: {upload_exc}")
-                link_carta_firmada = None
-                link_pantallazo = None
+                    link_carta_firmada = None
+                    link_pantallazo = None
 
             if not link_carta_firmada or not link_pantallazo:
                 envio_result = {"estr_ok": False, "estr_error": "No se generaron links de Drive para ambos adjuntos."}
