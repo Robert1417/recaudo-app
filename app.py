@@ -157,8 +157,8 @@ GOOGLE_SHEET_HEADERS = [
 ]
 
 GOOGLE_RESPUESTAS_COLS = [chr(i) for i in range(ord("A"), ord("V") + 1)]
-DRIVE_FOLDER_CARTA_FIRMADA_URL = "https://drive.google.com/drive/folders/1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk?usp=sharing"
-DRIVE_FOLDER_PANTALLAZO_URL = "https://drive.google.com/drive/folders/1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1?usp=sharing"
+DRIVE_FOLDER_CARTA_FIRMADA_URL = "https://drive.google.com/drive/folders/1YSJ48HwS0ONpOpfJNeiF_ccgItNY1Dbc?usp=drive_link"
+DRIVE_FOLDER_PANTALLAZO_URL = "https://drive.google.com/drive/folders/117gE0uPDR1PzKmUXQAbrLqjnXy3qxNEm?usp=drive_link"
 # ========= Helpers de "versión de archivo" para invalidar cache =========
 
 def _file_version(path: Path) -> str:
@@ -2612,16 +2612,14 @@ if enviar_aprobacion:
             except Exception as upload_exc:
                 upload_msg = str(upload_exc)
                 if "storageQuotaExceeded" in upload_msg or "Service Accounts do not have storage quota" in upload_msg:
-                    st.warning(
-                        "No se pudieron subir automáticamente los adjuntos a Drive por límite de cuota de la "
-                        "cuenta de servicio. Se registrarán links de carpeta destino para continuar el envío."
+                    st.error(
+                        "No se pudieron subir los adjuntos a Drive por cuota/permisos de la cuenta de servicio. "
+                        "El envío se detiene para evitar guardar solo links de carpeta."
                     )
-                    link_carta_firmada = DRIVE_FOLDER_CARTA_FIRMADA_URL
-                    link_pantallazo = DRIVE_FOLDER_PANTALLAZO_URL
                 else:
                     st.error(f"No se pudieron subir los adjuntos a Drive. Detalle: {upload_exc}")
-                    link_carta_firmada = None
-                    link_pantallazo = None
+                link_carta_firmada = None
+                link_pantallazo = None
 
             if not link_carta_firmada or not link_pantallazo:
                 envio_result = {"estr_ok": False, "estr_error": "No se generaron links de Drive para ambos adjuntos."}
