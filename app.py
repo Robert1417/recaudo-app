@@ -2541,7 +2541,7 @@ if enviar_aprobacion:
         st.warning(
             "La carta/pagaré firmado no coincide con la referencia actual. "
             "Debe contener la misma referencia del caso en la primera hoja (ej: Ref. No...)."   
-        
+        )
     else:
         try:
             link_carta_firmada = upload_streamlit_file_to_drive(
