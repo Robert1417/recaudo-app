@@ -158,7 +158,7 @@ GOOGLE_SHEET_HEADERS = [
 
 GOOGLE_RESPUESTAS_COLS = [chr(i) for i in range(ord("A"), ord("V") + 1)]
 DRIVE_FOLDER_CARTA_FIRMADA_URL = "https://drive.google.com/drive/folders/1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk?usp=sharing"
-DRIVE_FOLDER_PANTALLAZO_URL = "https://drive.google.com/drive/folders/1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1?usp=sharing
+DRIVE_FOLDER_PANTALLAZO_URL = "https://drive.google.com/drive/folders/1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1?usp=sharing"
 # ========= Helpers de "versión de archivo" para invalidar cache =========
 
 def _file_version(path: Path) -> str:
