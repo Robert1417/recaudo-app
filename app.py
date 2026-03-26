@@ -1214,25 +1214,79 @@ def upload_streamlit_file_to_drive(uploaded_file, folder_url: str, reference: st
     return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
 
 
-def _pdf_has_reference_match(uploaded_pdf_file, expected_reference: str) -> bool:
+def _extract_pdf_pages_text(raw_pdf_bytes: bytes) -> list[str]:
     """
-    Validación ligera: busca la referencia en el contenido del PDF.
-    Nota: no parsea layout; se usa para alertar inconsistencias obvias.
+    Extrae texto aproximado por página leyendo objetos/streams del PDF.
+    Es una estrategia ligera para validaciones de negocio (referencia/QR).
     """
-    expected = re.sub(r"\s+", "", str(expected_reference or "")).strip().lower()
-    if not expected:
-        return False
+    object_pattern = re.compile(rb"(\d+)\s+(\d+)\s+obj(.*?)endobj", re.DOTALL)
+    objects: dict[bytes, bytes] = {}
+    for match in object_pattern.finditer(raw_pdf_bytes):
+        obj_id = match.group(1)
+        obj_body = match.group(3)
+        objects[obj_id] = obj_body
+
+    page_ids: list[bytes] = []
+    for obj_id, obj_body in objects.items():
+        if b"/Type /Page" in obj_body and b"/Type /Pages" not in obj_body:
+            page_ids.append(obj_id)
+
+    page_texts: list[str] = []
+    for page_id in page_ids:
+        page_obj = objects.get(page_id, b"")
+        content_refs = re.findall(rb"(\d+)\s+\d+\s+R", page_obj.split(b"/Contents", 1)[-1])
+        if not content_refs:
+            page_texts.append("")
+            continue
+
+        page_chunks: list[str] = []
+        for ref in content_refs:
+            content_obj = objects.get(ref, b"")
+            stream_match = re.search(rb"stream\r?\n(.*?)\r?\nendstream", content_obj, re.DOTALL)
+            if not stream_match:
+                continue
+            stream_data = stream_match.group(1)
+            if b"/FlateDecode" in content_obj:
+                try:
+                    stream_data = zlib.decompress(stream_data)
+                except Exception:
+                    pass
+            page_chunks.append(stream_data.decode("latin-1", errors="ignore"))
+
+        page_texts.append("\n".join(page_chunks))
+
+    return page_texts
+
+
+def _validate_signed_pdf(uploaded_pdf_file, expected_reference: str) -> tuple[bool, str | None]:
+    """
+    Reglas:
+    1) La referencia del caso debe aparecer en la primera hoja.
+    2) La última hoja debe contener 'QR' (indicio de firma).
+    """
+    expected_ref = re.sub(r"[^0-9A-Za-z]", "", str(expected_reference or "")).lower()
+    if not expected_ref:
+        return False, "No hay referencia del caso para validar la carta firmada."
 
     uploaded_pdf_file.seek(0)
     raw = uploaded_pdf_file.read()
     uploaded_pdf_file.seek(0)
+    if not raw:
+        return False, "El PDF firmado está vacío."
 
-    # Búsqueda directa y versión alfanumérica (sin signos)
-    raw_text = raw.decode("latin-1", errors="ignore").lower()
-    raw_text_compact = re.sub(r"[^a-z0-9]", "", raw_text)
-    expected_compact = re.sub(r"[^a-z0-9]", "", expected)
+    page_texts = _extract_pdf_pages_text(raw)
+    if not page_texts:
+        return False, "No pude leer el PDF para validar referencia/QR."
 
-    return expected in raw_text or expected_compact in raw_text_compact
+    first_page = re.sub(r"[^0-9A-Za-z]", "", page_texts[0]).lower()
+    if expected_ref not in first_page:
+        return False, "La referencia no coincide en la primera hoja del PDF firmado."
+
+    last_page_text = page_texts[-1].lower()
+    if "qr" not in last_page_text:
+        return False, "No encontré indicio de QR en la última hoja del PDF firmado."
+
+    return True, None
 
 
 def diagnosticar_google_sheets():
@@ -2500,8 +2554,7 @@ if do_predict:
 st.markdown("---")
 st.markdown("### 8) Envío a aprobación de estructurados")
 st.caption("Obligatorio: subir carta/pagaré firmado (PDF) y pantallazo de aceptación (foto o PDF).")
-st.caption("La carta firmada debe corresponder a la misma referencia del caso; si no coincide, se bloquea el envío.")
-
+st.caption("Validación carta firmada: referencia en primera hoja y texto 'QR' en la última hoja.")
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
     key="correo_para_sheets",
@@ -2537,47 +2590,52 @@ if enviar_aprobacion:
         st.warning("Debes adjuntar la carta/pagaré firmado en PDF.")
     elif pantallazo_file is None:
         st.warning("Debes adjuntar el pantallazo/foto/PDF de aceptación.")
-    elif not _pdf_has_reference_match(carta_firmada_file, ref_input):
-        st.warning(
-            "La carta/pagaré firmado no coincide con la referencia actual. "
-            "Debe contener la misma referencia del caso en la primera hoja (ej: Ref. No...)."   
+     
         )
     else:
-        try:
-            link_carta_firmada = upload_streamlit_file_to_drive(
-                carta_firmada_file,
-                DRIVE_FOLDER_CARTA_FIRMADA_URL,
-                reference=ref_input,
-                prefix="carta_firmada",
-            )
-            link_pantallazo = upload_streamlit_file_to_drive(
-                pantallazo_file,
-                DRIVE_FOLDER_PANTALLAZO_URL,
-                reference=ref_input,
-                prefix="pantallazo",
-            )
-        except Exception as upload_exc:
-            st.error(f"No se pudieron subir los adjuntos a Drive. Detalle: {upload_exc}")
+        pdf_ok, pdf_error = _validate_signed_pdf(carta_firmada_file, ref_input)
+        if not pdf_ok:
+            envio_result = {
+                "estr_ok": False,
+                "estr_error": f"{pdf_error} Validación requerida: referencia en primera hoja + QR en última hoja.",
+            }
             link_carta_firmada = None
             link_pantallazo = None
-
-        if not link_carta_firmada or not link_pantallazo:
-            envio_result = {"estr_ok": False, "estr_error": "No se generaron links de Drive para ambos adjuntos."}
         else:
-            envio_result = enviar_aprobacion_estructurados(
-                referencia=ref_input,
-                ids=ids_sel,
-                bancos=bancos_sel_text,
-                correo_electronico=correo_para_sheets,
-                condonacion_mensualidades=condonacion_mensualidades,
-                comision_exito_total=feature_vals.get("AMOUNT_TOTAL"),
-                ce_inicial=ce_inicial,
-                prediccion=pred_value,
-                link_carta_firmada=link_carta_firmada,
-                link_pantallazo=link_pantallazo,
-                tipo_liquidacion=tipo_liquidacion_val,
-            )
+            try:
+                link_carta_firmada = upload_streamlit_file_to_drive(
+                    carta_firmada_file,
+                    DRIVE_FOLDER_CARTA_FIRMADA_URL,
+                    reference=ref_input,
+                    prefix="carta_firmada",
+                )
+                link_pantallazo = upload_streamlit_file_to_drive(
+                    pantallazo_file,
+                    DRIVE_FOLDER_PANTALLAZO_URL,
+                    reference=ref_input,
+                    prefix="pantallazo",
+                )
+            except Exception as upload_exc:
+                st.error(f"No se pudieron subir los adjuntos a Drive. Detalle: {upload_exc}")
+                link_carta_firmada = None
+                link_pantallazo = None
 
+            if not link_carta_firmada or not link_pantallazo:
+                envio_result = {"estr_ok": False, "estr_error": "No se generaron links de Drive para ambos adjuntos."}
+            else:
+                envio_result = enviar_aprobacion_estructurados(
+                    referencia=ref_input,
+                    ids=ids_sel,
+                    bancos=bancos_sel_text,
+                    correo_electronico=correo_para_sheets,
+                    condonacion_mensualidades=condonacion_mensualidades,
+                    comision_exito_total=feature_vals.get("AMOUNT_TOTAL"),
+                    ce_inicial=ce_inicial,
+                    prediccion=pred_value,
+                    link_carta_firmada=link_carta_firmada,
+                    link_pantallazo=link_pantallazo,
+                    tipo_liquidacion=tipo_liquidacion_val,
+                )
 
         if envio_result.get("estr_ok"):
             estado_aprob = "✅ Aprobado" if envio_result["es_aprobado"] else "⛔ No aprobado"
