@@ -26,6 +26,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.errors import HttpError
 import streamlit.components.v1 as components
 from docx import Document
 from docx.oxml import OxmlElement
@@ -143,8 +144,8 @@ GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-DEFAULT_DRIVE_FOLDER_PAGARE_ID = "1YSJ48HwS0ONpOpfJNeiF_ccgItNY1Dbc"
-DEFAULT_DRIVE_FOLDER_PANTALLAZO_ID = "117gE0uPDR1PzKmUXQAbrLqjnXy3qxNEm"
+DEFAULT_DRIVE_FOLDER_PAGARE_ID = "1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk"
+DEFAULT_DRIVE_FOLDER_PANTALLAZO_ID = "1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1"
 GOOGLE_DRIVE_FOLDER_PAGARE_ID = st.secrets.get(
     "GOOGLE_DRIVE_FOLDER_PAGARE_ID",
     os.environ.get("GOOGLE_DRIVE_FOLDER_PAGARE_ID", DEFAULT_DRIVE_FOLDER_PAGARE_ID),
@@ -1223,6 +1224,7 @@ def _upload_file_to_drive(
             body=file_metadata,
             media_body=media,
             fields="id, webViewLink",
+            supportsAllDrives=True,
         ).execute()
 
         file_id = uploaded.get("id")
@@ -1241,6 +1243,15 @@ def _upload_file_to_drive(
                 pass
 
         return True, web_link, None
+    except HttpError as e:
+        error_text = str(e)
+        if "storageQuotaExceeded" in error_text or "Service Accounts do not have storage quota" in error_text:
+            return False, None, (
+                "La cuenta de servicio no puede subir archivos a 'Mi unidad' porque no tiene cuota propia. "
+                "Mueve la carpeta destino a un Shared Drive y comparte ese Shared Drive con la cuenta de servicio "
+                "con rol Content manager (o usa OAuth de usuario)."
+            )
+        return False, None, error_text
     except Exception as e:
         return False, None, str(e)
 
@@ -1256,9 +1267,22 @@ def _validate_drive_folder(folder_id: str):
         creds_info = _load_google_service_account_info()
         credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
         drive_service = build("drive", "v3", credentials=credentials)
-        folder = drive_service.files().get(fileId=folder_id, fields="id,name,mimeType").execute()
+        folder = drive_service.files().get(
+            fileId=folder_id,
+            fields="id,name,mimeType,driveId",
+            supportsAllDrives=True,
+        ).execute()
         if folder.get("mimeType") != "application/vnd.google-apps.folder":
             return {"ok": False, "name": folder.get("name"), "error": "El ID configurado no corresponde a una carpeta."}
+        if not folder.get("driveId"):
+            return {
+                "ok": False,
+                "name": folder.get("name"),
+                "error": (
+                    "La carpeta está en 'Mi unidad'. Con cuenta de servicio esto puede fallar por cuota. "
+                    "Usa una carpeta dentro de Shared Drive."
+                ),
+            }
         return {"ok": True, "name": folder.get("name"), "error": None}
     except Exception as e:
         return {"ok": False, "name": None, "error": str(e)}
