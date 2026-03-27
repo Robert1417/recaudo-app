@@ -21,9 +21,14 @@ import zlib
 import subprocess
 import shutil
 import tempfile
+from urllib.parse import urlparse, parse_qs
 
 import gspread
 from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials as UserCredentials
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 import streamlit.components.v1 as components
 from docx import Document
 from docx.oxml import OxmlElement
@@ -141,6 +146,10 @@ GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+GOOGLE_DRIVE_UPLOAD_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+DRIVE_FOLDER_CARTA_PAGARE_ID = "1YSJ48HwS0ONpOpfJNeiF_ccgItNY1Dbc"
+DRIVE_FOLDER_PANTALLAZOS_ID = "117gE0uPDR1PzKmUXQAbrLqjnXy3qxNEm"
+
 GOOGLE_SHEET_HEADERS = [
     "fecha",
     "referencia",
@@ -1435,6 +1444,9 @@ def enviar_aprobacion_estructurados(
     ce_inicial,
     prediccion,
     tipo_liquidacion="",
+    carta_pagare_link="Pendiente",
+    pantallazo_aceptacion_link="Pendiente",
+    
 ):
     tipo_liquidacion_norm = _norm(tipo_liquidacion)
     umbral_aprobacion = 0.8 if "tradicional" in tipo_liquidacion_norm else 0.74
@@ -1446,8 +1458,8 @@ def enviar_aprobacion_estructurados(
         str(referencia),  # C Referencia
         "-".join(map(str, ids)),  # D ID deuda
         str(bancos),  # E Banco
-        "Pendiente",  # F Carta pagaré firmado
-        "Pendiente",  # G Pantallazo aceptación
+        str(carta_pagare_link or "Pendiente"),  # F Carta pagaré firmado
+        str(pantallazo_aceptacion_link or "Pendiente"),  # G Pantallazo aceptación
         "Sí" if str(condonacion_mensualidades).strip().lower() == "si" else "No",  # H Condonación
         "",  # I Adjuntar pantallazo de correo
         float(comision_exito_total or 0.0),  # J Comisión total
@@ -1485,6 +1497,94 @@ def _norm(s: str) -> str:
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+def _load_google_oauth_client_config() -> dict:
+    """
+    Carga client config OAuth para usuario final.
+    Busca en secrets:
+      - GOOGLE_OAUTH_CLIENT_JSON (JSON completo de OAuth Client)
+      - o GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET
+    """
+    raw_json = st.secrets.get("GOOGLE_OAUTH_CLIENT_JSON")
+    if raw_json:
+        if isinstance(raw_json, dict):
+            cfg = raw_json
+        else:
+            cfg = json.loads(str(raw_json))
+        if "installed" in cfg or "web" in cfg:
+            return cfg
+        if all(k in cfg for k in ("client_id", "client_secret", "auth_uri", "token_uri")):
+            return {"installed": cfg}
+        raise ValueError("GOOGLE_OAUTH_CLIENT_JSON no tiene formato OAuth válido.")
+
+    client_id = st.secrets.get("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = st.secrets.get("GOOGLE_OAUTH_CLIENT_SECRET")
+    if client_id and client_secret:
+        return {
+            "installed": {
+                "client_id": str(client_id),
+                "client_secret": str(client_secret),
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": ["http://localhost"],
+            }
+        }
+    raise RuntimeError(
+        "Faltan secretos OAuth de Google. Configura GOOGLE_OAUTH_CLIENT_JSON o "
+        "GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET."
+    )
+
+
+def _get_drive_flow_and_auth_url():
+    client_config = _load_google_oauth_client_config()
+    flow = Flow.from_client_config(client_config, scopes=GOOGLE_DRIVE_UPLOAD_SCOPES)
+    flow.redirect_uri = "http://localhost"
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+    return flow, auth_url, state
+
+
+def _extract_oauth_code(redirect_text: str) -> str:
+    text = str(redirect_text or "").strip()
+    if not text:
+        return ""
+    if text.startswith("http://") or text.startswith("https://"):
+        parsed = urlparse(text)
+        q = parse_qs(parsed.query)
+        return str((q.get("code") or [""])[0]).strip()
+    return text
+
+
+def _build_drive_service_from_session():
+    token_data = st.session_state.get("drive_user_token")
+    if not token_data:
+        return None
+    creds = UserCredentials.from_authorized_user_info(token_data, GOOGLE_DRIVE_UPLOAD_SCOPES)
+    if not creds.valid:
+        return None
+    return build("drive", "v3", credentials=creds)
+
+
+def _upload_pdf_to_drive(service, uploaded_file, folder_id: str):
+    if uploaded_file is None:
+        return None
+    file_name = str(uploaded_file.name or "").strip()
+    if not file_name.lower().endswith(".pdf"):
+        raise ValueError("Solo se permiten archivos PDF.")
+
+    content = uploaded_file.getvalue()
+    metadata = {"name": file_name, "parents": [folder_id]}
+    media = MediaIoBaseUpload(BytesIO(content), mimetype="application/pdf", resumable=True)
+    result = service.files().create(
+        body=metadata,
+        media_body=media,
+        fields="id,name,webViewLink,parents",
+        supportsAllDrives=True,
+    ).execute()
+    return result
 
 def _find_col(df: pd.DataFrame, candidates):
     cols = {_norm(c): c for c in df.columns}
@@ -2430,6 +2530,74 @@ st.markdown("---")
 st.markdown("### 8) Envío a aprobación de estructurados")
 st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
 
+st.markdown("#### Adjuntos obligatorios (Drive con autenticación de usuario)")
+st.caption(
+    "Primero autoriza tu cuenta Google para subir PDFs a Drive. "
+    "Luego adjunta los 2 archivos requeridos."
+)
+
+auth_col1, auth_col2 = st.columns([1, 2])
+with auth_col1:
+    iniciar_auth_drive = st.button("🔐 Iniciar autenticación Drive", use_container_width=True)
+with auth_col2:
+    if st.session_state.get("drive_user_token"):
+        st.success("Cuenta Drive autenticada en esta sesión.")
+    else:
+        st.info("Sin autenticación activa.")
+
+if iniciar_auth_drive:
+    try:
+        flow, auth_url, oauth_state = _get_drive_flow_and_auth_url()
+        st.session_state.drive_oauth_state = oauth_state
+        st.session_state.drive_auth_url = auth_url
+        st.session_state.drive_auth_client_config = flow.client_config
+        st.session_state.drive_auth_in_progress = True
+    except Exception as e:
+        st.error(f"No se pudo iniciar autenticación OAuth: {e}")
+
+if st.session_state.get("drive_auth_in_progress"):
+    auth_url = st.session_state.get("drive_auth_url", "")
+    if auth_url:
+        st.markdown(
+            f"1) Abre este enlace y autoriza tu cuenta: [Autorizar Drive]({auth_url})  \n"
+            "2) Copia el `code` de la URL de redirección (o pega la URL completa)."
+        )
+    auth_code_input = st.text_input(
+        "Código OAuth / URL de redirección",
+        key="drive_oauth_code_input",
+        help="Puedes pegar solo el code o la URL completa que termina en ?code=...",
+    )
+    finalizar_auth_drive = st.button("✅ Confirmar autenticación", use_container_width=True)
+    if finalizar_auth_drive:
+        try:
+            code = _extract_oauth_code(auth_code_input)
+            if not code:
+                st.warning("Debes pegar un código OAuth válido.")
+            else:
+                cfg = st.session_state.get("drive_auth_client_config")
+                if not cfg:
+                    raise RuntimeError("No existe configuración OAuth en sesión. Inicia de nuevo.")
+                flow = Flow.from_client_config(cfg, scopes=GOOGLE_DRIVE_UPLOAD_SCOPES)
+                flow.redirect_uri = "http://localhost"
+                flow.fetch_token(code=code)
+                creds = flow.credentials
+                st.session_state.drive_user_token = json.loads(creds.to_json())
+                st.session_state.drive_auth_in_progress = False
+                st.success("Autenticación de Drive completada.")
+        except Exception as e:
+            st.error(f"No fue posible completar OAuth: {e}")
+
+carta_pagare_file = st.file_uploader(
+    "📎 Adjuntar carta con pagaré firmado (PDF)",
+    type=["pdf"],
+    key="carta_pagare_pdf",
+)
+pantallazo_file = st.file_uploader(
+    "📎 Adjuntar pantallazo de aceptación del cliente (PDF)",
+    type=["pdf"],
+    key="pantallazo_pdf",
+)
+
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
     key="correo_para_sheets",
@@ -2450,7 +2618,28 @@ if enviar_aprobacion:
         st.warning("Debes ingresar el correo electrónico antes de enviar.")
     elif condonacion_mensualidades not in {"Si", "No"}:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
+    elif carta_pagare_file is None or pantallazo_file is None:
+        st.warning("Debes adjuntar ambos archivos PDF (Carta/Pagaré y Pantallazo).")    
+        
     else:
+        try:
+            drive_service = _build_drive_service_from_session()
+            if drive_service is None:
+                st.warning("Debes autenticar Drive antes de enviar la aprobación.")
+                st.stop()
+
+            carta_upload = _upload_pdf_to_drive(
+                drive_service, carta_pagare_file, DRIVE_FOLDER_CARTA_PAGARE_ID
+            )
+            pantallazo_upload = _upload_pdf_to_drive(
+                drive_service, pantallazo_file, DRIVE_FOLDER_PANTALLAZOS_ID
+            )
+            st.caption(f"📂 Carta/Pagaré cargado: {carta_upload.get('webViewLink', '')}")
+            st.caption(f"📂 Pantallazo cargado: {pantallazo_upload.get('webViewLink', '')}")
+        except Exception as e:
+            st.error(f"No se pudieron subir los adjuntos a Drive: {e}")
+            st.stop()
+            
         envio_result = enviar_aprobacion_estructurados(
             referencia=ref_input,
             ids=ids_sel,
@@ -2461,6 +2650,8 @@ if enviar_aprobacion:
             ce_inicial=ce_inicial,
             prediccion=pred_value,
             tipo_liquidacion=tipo_liquidacion_val,
+            carta_pagare_link=carta_upload.get("webViewLink"),
+            pantallazo_aceptacion_link=pantallazo_upload.get("webViewLink"),
         )
         if envio_result["estr_ok"]:
             estado_aprob = "✅ Aprobado" if envio_result["es_aprobado"] else "⛔ No aprobado"
