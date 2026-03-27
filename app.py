@@ -2553,41 +2553,68 @@ if do_predict:
 st.markdown("---")
 st.markdown("### 8) Envío a aprobación de estructurados")
 st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
+modo_adjuntos = st.radio(
+    "Modo de adjuntos",
+    options=["Subir desde la app", "Ingresar links manualmente"],
+    horizontal=True,
+    help=(
+        "Si usas 'Ingresar links manualmente', el asesor sube primero los archivos con su propia cuenta de Google "
+        "(por ejemplo desde Drive/Colab) y aquí solo pega los links."
+    ),
+)
+
 pagare_drive_status = _validate_drive_folder(GOOGLE_DRIVE_FOLDER_PAGARE_ID) if GOOGLE_DRIVE_FOLDER_PAGARE_ID else {"ok": False, "error": "FOLDER_ID vacío", "name": None}
 pantallazo_drive_status = _validate_drive_folder(GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID) if GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID else {"ok": False, "error": "FOLDER_ID vacío", "name": None}
 
-if GOOGLE_DRIVE_FOLDER_PAGARE_ID and pagare_drive_status["ok"]:
+if modo_adjuntos == "Subir desde la app" and GOOGLE_DRIVE_FOLDER_PAGARE_ID and pagare_drive_status["ok"]:
     st.caption(
         f"📁 Carpeta carta/pagaré firmado: {GOOGLE_DRIVE_FOLDER_PAGARE_URL} "
         f"(carpeta: {pagare_drive_status['name']})"
     )
-else:
+elif modo_adjuntos == "Subir desde la app":
     st.warning(
         "No pude validar la carpeta de carta/pagaré firmado. "
         f"Detalle: {pagare_drive_status['error']}"
     )
 
-if GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID and pantallazo_drive_status["ok"]:
+if modo_adjuntos == "Subir desde la app" and GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID and pantallazo_drive_status["ok"]:
     st.caption(
         f"📁 Carpeta pantallazo aceptación: {GOOGLE_DRIVE_FOLDER_PANTALLAZO_URL} "
         f"(carpeta: {pantallazo_drive_status['name']})"
     )
-else:
+elif modo_adjuntos == "Subir desde la app":
     st.warning(
         "No pude validar la carpeta de pantallazo de aceptación. "
         f"Detalle: {pantallazo_drive_status['error']}"
     )
 
-archivo_pagare_firmado = st.file_uploader(
-    "📎 Adjuntar carta con pagaré firmado (solo PDF)",
-    type=["pdf"],
-    key="adjunto_pagare_firmado",
-)
-archivo_pantallazo_aceptacion = st.file_uploader(
-    "📎 Adjuntar pantallazo de aceptación del cliente + tabla del apartado (PDF/JPG/PNG)",
-    type=["pdf", "jpg", "jpeg", "png"],
-    key="adjunto_pantallazo_aceptacion",
-)
+archivo_pagare_firmado = None
+archivo_pantallazo_aceptacion = None
+link_pagare_manual = ""
+link_pantallazo_manual = ""
+
+if modo_adjuntos == "Subir desde la app":
+    archivo_pagare_firmado = st.file_uploader(
+        "📎 Adjuntar carta con pagaré firmado (solo PDF)",
+        type=["pdf"],
+        key="adjunto_pagare_firmado",
+    )
+    archivo_pantallazo_aceptacion = st.file_uploader(
+        "📎 Adjuntar pantallazo de aceptación del cliente + tabla del apartado (PDF/JPG/PNG)",
+        type=["pdf", "jpg", "jpeg", "png"],
+        key="adjunto_pantallazo_aceptacion",
+    )
+else:
+    st.info("En este modo no se suben archivos aquí: solo pega los links ya cargados en Drive por el asesor.")
+    link_pagare_manual = st.text_input(
+        "🔗 Link carta con pagaré firmado (obligatorio)",
+        key="link_pagare_manual",
+    ).strip()
+    link_pantallazo_manual = st.text_input(
+        "🔗 Link pantallazo de aceptación (obligatorio)",
+        key="link_pantallazo_manual",
+    ).strip()
+
 
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
@@ -2610,40 +2637,46 @@ if enviar_aprobacion:
     elif condonacion_mensualidades not in {"Si", "No"}:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
 
-    elif not GOOGLE_DRIVE_FOLDER_PAGARE_ID or not pagare_drive_status["ok"]:
+    elif modo_adjuntos == "Subir desde la app" and (not GOOGLE_DRIVE_FOLDER_PAGARE_ID or not pagare_drive_status["ok"]):
         st.warning("No hay acceso válido a la carpeta de carta/pagaré firmado en Drive.")
-    elif not GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID or not pantallazo_drive_status["ok"]:
+    elif modo_adjuntos == "Subir desde la app" and (not GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID or not pantallazo_drive_status["ok"]):
         st.warning("No hay acceso válido a la carpeta de pantallazo de aceptación en Drive.")
-    elif not archivo_pagare_firmado:
+    elif modo_adjuntos == "Subir desde la app" and not archivo_pagare_firmado:
         st.warning("Debes adjuntar la carta con pagaré firmado antes de enviar.")
-    elif not str(archivo_pagare_firmado.name or "").lower().endswith(".pdf"):
+    elif modo_adjuntos == "Subir desde la app" and not str(archivo_pagare_firmado.name or "").lower().endswith(".pdf"):
         st.warning("La carta con pagaré firmado debe estar en formato PDF.")
-    elif not archivo_pantallazo_aceptacion:
+    elif modo_adjuntos == "Subir desde la app" and not archivo_pantallazo_aceptacion:
         st.warning("Debes adjuntar el pantallazo de aceptación antes de enviar.")
+    elif modo_adjuntos == "Ingresar links manualmente" and (not link_pagare_manual or not link_pantallazo_manual):
+        st.warning("Debes pegar ambos links manuales antes de enviar.")
     else:
-        pagare_ok, pagare_link, pagare_err = _upload_file_to_drive(
-            file_name=archivo_pagare_firmado.name,
-            file_bytes=archivo_pagare_firmado.getvalue(),
-            mime_type=archivo_pagare_firmado.type or "application/octet-stream",
-            referencia=ref_input,
-            file_label="pagare-firmado",
-            folder_id=GOOGLE_DRIVE_FOLDER_PAGARE_ID,
-        )
-        if not pagare_ok:
-            st.error(f"No se pudo subir la carta con pagaré firmado: {pagare_err}")
-            st.stop()
+        if modo_adjuntos == "Subir desde la app":
+            pagare_ok, pagare_link, pagare_err = _upload_file_to_drive(
+                file_name=archivo_pagare_firmado.name,
+                file_bytes=archivo_pagare_firmado.getvalue(),
+                mime_type=archivo_pagare_firmado.type or "application/octet-stream",
+                referencia=ref_input,
+                file_label="pagare-firmado",
+                folder_id=GOOGLE_DRIVE_FOLDER_PAGARE_ID,
+            )
+            if not pagare_ok:
+                st.error(f"No se pudo subir la carta con pagaré firmado: {pagare_err}")
+                st.stop()
 
-        aceptacion_ok, aceptacion_link, aceptacion_err = _upload_file_to_drive(
-            file_name=archivo_pantallazo_aceptacion.name,
-            file_bytes=archivo_pantallazo_aceptacion.getvalue(),
-            mime_type=archivo_pantallazo_aceptacion.type or "application/octet-stream",
-            referencia=ref_input,
-            file_label="pantallazo-aceptacion",
-            folder_id=GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID,
-        )
-        if not aceptacion_ok:
-            st.error(f"No se pudo subir el pantallazo de aceptación: {aceptacion_err}")
-            st.stop()
+            aceptacion_ok, aceptacion_link, aceptacion_err = _upload_file_to_drive(
+                file_name=archivo_pantallazo_aceptacion.name,
+                file_bytes=archivo_pantallazo_aceptacion.getvalue(),
+                mime_type=archivo_pantallazo_aceptacion.type or "application/octet-stream",
+                referencia=ref_input,
+                file_label="pantallazo-aceptacion",
+                folder_id=GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID,
+            )
+            if not aceptacion_ok:
+                st.error(f"No se pudo subir el pantallazo de aceptación: {aceptacion_err}")
+                st.stop()
+        else:
+            pagare_link = link_pagare_manual
+            aceptacion_link = link_pantallazo_manual
             
         envio_result = enviar_aprobacion_estructurados(
             referencia=ref_input,
