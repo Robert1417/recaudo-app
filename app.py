@@ -1505,18 +1505,6 @@ def _load_google_oauth_client_config() -> dict:
       - GOOGLE_OAUTH_CLIENT_JSON (JSON completo de OAuth Client)
       - o GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET
     """
-    raw_json = st.secrets.get("GOOGLE_OAUTH_CLIENT_JSON")
-    if raw_json:
-        if isinstance(raw_json, dict):
-            cfg = raw_json
-        else:
-            cfg = json.loads(str(raw_json))
-        if "installed" in cfg or "web" in cfg:
-            return cfg
-        if all(k in cfg for k in ("client_id", "client_secret", "auth_uri", "token_uri")):
-            return {"installed": cfg}
-        raise ValueError("GOOGLE_OAUTH_CLIENT_JSON no tiene formato OAuth válido.")
-
     client_id = st.secrets.get("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = st.secrets.get("GOOGLE_OAUTH_CLIENT_SECRET")
     if client_id and client_secret:
@@ -1529,6 +1517,23 @@ def _load_google_oauth_client_config() -> dict:
                 "redirect_uris": ["http://localhost"],
             }
         }
+
+    raw_json = st.secrets.get("GOOGLE_OAUTH_CLIENT_JSON")
+    if raw_json:
+        if isinstance(raw_json, dict):
+            cfg = raw_json
+        else:
+            cfg = json.loads(str(raw_json))
+        if "installed" in cfg or "web" in cfg:
+            return cfg
+        if all(k in cfg for k in ("client_id", "client_secret", "auth_uri", "token_uri")):
+            return {"installed": cfg}
+        if str(cfg.get("type", "")).strip().lower() == "service_account":
+            raise ValueError(
+                "GOOGLE_OAUTH_CLIENT_JSON parece ser de Service Account. "
+                "Para OAuth de usuario debes usar credenciales de tipo Web/Installed App."
+            )
+        raise ValueError("GOOGLE_OAUTH_CLIENT_JSON no tiene formato OAuth válido.")
     raise RuntimeError(
         "Faltan secretos OAuth de Google. Configura GOOGLE_OAUTH_CLIENT_JSON o "
         "GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET."
@@ -2534,10 +2539,6 @@ if do_predict:
     except Exception as e:
         st.error(f"Error al predecir: {e}")
 
-st.markdown("---")
-st.markdown("### 8) Envío a aprobación de estructurados")
-st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
-
 st.markdown("#### Adjuntos obligatorios (Drive con autenticación de usuario)")
 st.caption(
     "Puedes subir automáticamente con OAuth o pegar links manuales si tu despliegue aún no tiene secretos OAuth."
@@ -2640,7 +2641,6 @@ else:
         placeholder="https://drive.google.com/...",
         key="pantallazo_manual_link",
     ).strip()
-
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
     key="correo_para_sheets",
@@ -2685,7 +2685,7 @@ if enviar_aprobacion:
                 st.caption(f"📂 Pantallazo cargado: {pantallazo_link_final}")
             except Exception as e:
                 st.error(f"No se pudieron subir los adjuntos a Drive: {e}")
-                st.stop()   
+                st.stop()
         
     else:
         if not carta_manual_link or not pantallazo_manual_link:
