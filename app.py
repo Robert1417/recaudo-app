@@ -1593,6 +1593,13 @@ def _upload_pdf_to_drive(service, uploaded_file, folder_id: str):
         supportsAllDrives=True,
     ).execute()
 
+def _find_col(df: pd.DataFrame, candidates):
+    cols = {_norm(c): c for c in df.columns}
+    for cand in candidates:
+        if _norm(cand) in cols:
+            return cols[_norm(cand)]
+    return None
+
 ####################################################
 ###################################################
 
