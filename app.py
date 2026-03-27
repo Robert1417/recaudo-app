@@ -24,9 +24,6 @@ import tempfile
 
 import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-from googleapiclient.errors import HttpError
 import streamlit.components.v1 as components
 from docx import Document
 from docx.oxml import OxmlElement
@@ -144,22 +141,6 @@ GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-DEFAULT_DRIVE_FOLDER_PAGARE_ID = "1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk"
-DEFAULT_DRIVE_FOLDER_PANTALLAZO_ID = "1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1"
-GOOGLE_DRIVE_FOLDER_PAGARE_ID = st.secrets.get(
-    "GOOGLE_DRIVE_FOLDER_PAGARE_ID",
-    os.environ.get("GOOGLE_DRIVE_FOLDER_PAGARE_ID", DEFAULT_DRIVE_FOLDER_PAGARE_ID),
-).strip()
-GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID = st.secrets.get(
-    "GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID",
-    os.environ.get("GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID", DEFAULT_DRIVE_FOLDER_PANTALLAZO_ID),
-).strip()
-GOOGLE_DRIVE_FOLDER_PAGARE_URL = (
-    f"https://drive.google.com/drive/folders/{GOOGLE_DRIVE_FOLDER_PAGARE_ID}" if GOOGLE_DRIVE_FOLDER_PAGARE_ID else ""
-)
-GOOGLE_DRIVE_FOLDER_PANTALLAZO_URL = (
-    f"https://drive.google.com/drive/folders/{GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID}" if GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID else ""
-)
 GOOGLE_SHEET_HEADERS = [
     "fecha",
     "referencia",
@@ -1184,109 +1165,6 @@ def _append_row_to_respuestas_estr(row_values: list):
     except Exception as e:
         return False, f"Google Sheets > {GOOGLE_SHEET_TAB_RESPUESTAS}", str(e)
 
-def _upload_file_to_drive(
-    *,
-    file_name: str,
-    file_bytes: bytes,
-    mime_type: str,
-    referencia: str,
-    file_label: str,
-    folder_id: str,
-):
-    """
-    Sube un archivo a Google Drive y devuelve (ok, web_link, error_msg).
-    """
-    try:
-        if not file_bytes:
-            return False, None, f"No se recibió archivo para {file_label}."
-
-        creds_info = _load_google_service_account_info()
-        credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
-        drive_service = build("drive", "v3", credentials=credentials)
-
-        reference_safe = re.sub(r"[^A-Za-z0-9._-]+", "-", str(referencia or "sin-ref")).strip("-") or "sin-ref"
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        upload_name = f"{reference_safe}_{file_label}_{timestamp}_{file_name}"
-
-        if not folder_id:
-            return False, None, (
-                "No está configurado folder_id de Drive en secrets/env. "
-                "Define la carpeta destino para guardar los adjuntos."
-            )
-
-        file_metadata = {
-            "name": upload_name,
-            "parents": [folder_id],
-        }
-
-        media = MediaIoBaseUpload(BytesIO(file_bytes), mimetype=mime_type, resumable=False)
-        uploaded = drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields="id, webViewLink",
-            supportsAllDrives=True,
-        ).execute()
-
-        file_id = uploaded.get("id")
-        web_link = uploaded.get("webViewLink")
-        if file_id and not web_link:
-            web_link = f"https://drive.google.com/file/d/{file_id}/view"
-
-        if file_id:
-            try:
-                drive_service.permissions().create(
-                    fileId=file_id,
-                    body={"type": "anyone", "role": "reader"},
-                ).execute()
-            except Exception:
-                # Si el dominio restringe permisos públicos, dejamos el archivo interno.
-                pass
-
-        return True, web_link, None
-    except HttpError as e:
-        error_text = str(e)
-        if "storageQuotaExceeded" in error_text or "Service Accounts do not have storage quota" in error_text:
-            return False, None, (
-                "La cuenta de servicio no puede subir archivos a 'Mi unidad' porque no tiene cuota propia. "
-                "Mueve la carpeta destino a un Shared Drive y comparte ese Shared Drive con la cuenta de servicio "
-                "con rol Content manager (o usa OAuth de usuario)."
-            )
-        return False, None, error_text
-    except Exception as e:
-        return False, None, str(e)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _validate_drive_folder(folder_id: str):
-    """
-    Valida acceso a la carpeta destino de Drive.
-    """
-    if not str(folder_id or "").strip():
-        return {"ok": False, "name": None, "error": "FOLDER_ID vacío"}
-    try:
-        creds_info = _load_google_service_account_info()
-        credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
-        drive_service = build("drive", "v3", credentials=credentials)
-        folder = drive_service.files().get(
-            fileId=folder_id,
-            fields="id,name,mimeType,driveId",
-            supportsAllDrives=True,
-        ).execute()
-        if folder.get("mimeType") != "application/vnd.google-apps.folder":
-            return {"ok": False, "name": folder.get("name"), "error": "El ID configurado no corresponde a una carpeta."}
-        if not folder.get("driveId"):
-            return {
-                "ok": False,
-                "name": folder.get("name"),
-                "error": (
-                    "La carpeta está en 'Mi unidad'. Con cuenta de servicio esto puede fallar por cuota. "
-                    "Usa una carpeta dentro de Shared Drive."
-                ),
-            }
-        return {"ok": True, "name": folder.get("name"), "error": None}
-    except Exception as e:
-        return {"ok": False, "name": None, "error": str(e)}
-
 
 def diagnosticar_google_sheets():
     """
@@ -1556,8 +1434,6 @@ def enviar_aprobacion_estructurados(
     comision_exito_total,
     ce_inicial,
     prediccion,
-    link_pagare_firmado="",
-    link_pantallazo_aceptacion="",
     tipo_liquidacion="",
 ):
     tipo_liquidacion_norm = _norm(tipo_liquidacion)
@@ -1570,8 +1446,8 @@ def enviar_aprobacion_estructurados(
         str(referencia),  # C Referencia
         "-".join(map(str, ids)),  # D ID deuda
         str(bancos),  # E Banco
-        str(link_pagare_firmado or "").strip(),  # F Carta pagaré firmado
-        str(link_pantallazo_aceptacion or "").strip(),  # G Pantallazo aceptación
+        "Pendiente",  # F Carta pagaré firmado
+        "Pendiente",  # G Pantallazo aceptación
         "Sí" if str(condonacion_mensualidades).strip().lower() == "si" else "No",  # H Condonación
         "",  # I Adjuntar pantallazo de correo
         float(comision_exito_total or 0.0),  # J Comisión total
@@ -2553,68 +2429,6 @@ if do_predict:
 st.markdown("---")
 st.markdown("### 8) Envío a aprobación de estructurados")
 st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
-modo_adjuntos = st.radio(
-    "Modo de adjuntos",
-    options=["Subir desde la app", "Ingresar links manualmente"],
-    horizontal=True,
-    help=(
-        "Si usas 'Ingresar links manualmente', el asesor sube primero los archivos con su propia cuenta de Google "
-        "(por ejemplo desde Drive/Colab) y aquí solo pega los links."
-    ),
-)
-
-pagare_drive_status = _validate_drive_folder(GOOGLE_DRIVE_FOLDER_PAGARE_ID) if GOOGLE_DRIVE_FOLDER_PAGARE_ID else {"ok": False, "error": "FOLDER_ID vacío", "name": None}
-pantallazo_drive_status = _validate_drive_folder(GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID) if GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID else {"ok": False, "error": "FOLDER_ID vacío", "name": None}
-
-if modo_adjuntos == "Subir desde la app" and GOOGLE_DRIVE_FOLDER_PAGARE_ID and pagare_drive_status["ok"]:
-    st.caption(
-        f"📁 Carpeta carta/pagaré firmado: {GOOGLE_DRIVE_FOLDER_PAGARE_URL} "
-        f"(carpeta: {pagare_drive_status['name']})"
-    )
-elif modo_adjuntos == "Subir desde la app":
-    st.warning(
-        "No pude validar la carpeta de carta/pagaré firmado. "
-        f"Detalle: {pagare_drive_status['error']}"
-    )
-
-if modo_adjuntos == "Subir desde la app" and GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID and pantallazo_drive_status["ok"]:
-    st.caption(
-        f"📁 Carpeta pantallazo aceptación: {GOOGLE_DRIVE_FOLDER_PANTALLAZO_URL} "
-        f"(carpeta: {pantallazo_drive_status['name']})"
-    )
-elif modo_adjuntos == "Subir desde la app":
-    st.warning(
-        "No pude validar la carpeta de pantallazo de aceptación. "
-        f"Detalle: {pantallazo_drive_status['error']}"
-    )
-
-archivo_pagare_firmado = None
-archivo_pantallazo_aceptacion = None
-link_pagare_manual = ""
-link_pantallazo_manual = ""
-
-if modo_adjuntos == "Subir desde la app":
-    archivo_pagare_firmado = st.file_uploader(
-        "📎 Adjuntar carta con pagaré firmado (solo PDF)",
-        type=["pdf"],
-        key="adjunto_pagare_firmado",
-    )
-    archivo_pantallazo_aceptacion = st.file_uploader(
-        "📎 Adjuntar pantallazo de aceptación del cliente + tabla del apartado (PDF/JPG/PNG)",
-        type=["pdf", "jpg", "jpeg", "png"],
-        key="adjunto_pantallazo_aceptacion",
-    )
-else:
-    st.info("En este modo no se suben archivos aquí: solo pega los links ya cargados en Drive por el asesor.")
-    link_pagare_manual = st.text_input(
-        "🔗 Link carta con pagaré firmado (obligatorio)",
-        key="link_pagare_manual",
-    ).strip()
-    link_pantallazo_manual = st.text_input(
-        "🔗 Link pantallazo de aceptación (obligatorio)",
-        key="link_pantallazo_manual",
-    ).strip()
-
 
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
@@ -2636,48 +2450,7 @@ if enviar_aprobacion:
         st.warning("Debes ingresar el correo electrónico antes de enviar.")
     elif condonacion_mensualidades not in {"Si", "No"}:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
-
-    elif modo_adjuntos == "Subir desde la app" and (not GOOGLE_DRIVE_FOLDER_PAGARE_ID or not pagare_drive_status["ok"]):
-        st.warning("No hay acceso válido a la carpeta de carta/pagaré firmado en Drive.")
-    elif modo_adjuntos == "Subir desde la app" and (not GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID or not pantallazo_drive_status["ok"]):
-        st.warning("No hay acceso válido a la carpeta de pantallazo de aceptación en Drive.")
-    elif modo_adjuntos == "Subir desde la app" and not archivo_pagare_firmado:
-        st.warning("Debes adjuntar la carta con pagaré firmado antes de enviar.")
-    elif modo_adjuntos == "Subir desde la app" and not str(archivo_pagare_firmado.name or "").lower().endswith(".pdf"):
-        st.warning("La carta con pagaré firmado debe estar en formato PDF.")
-    elif modo_adjuntos == "Subir desde la app" and not archivo_pantallazo_aceptacion:
-        st.warning("Debes adjuntar el pantallazo de aceptación antes de enviar.")
-    elif modo_adjuntos == "Ingresar links manualmente" and (not link_pagare_manual or not link_pantallazo_manual):
-        st.warning("Debes pegar ambos links manuales antes de enviar.")
     else:
-        if modo_adjuntos == "Subir desde la app":
-            pagare_ok, pagare_link, pagare_err = _upload_file_to_drive(
-                file_name=archivo_pagare_firmado.name,
-                file_bytes=archivo_pagare_firmado.getvalue(),
-                mime_type=archivo_pagare_firmado.type or "application/octet-stream",
-                referencia=ref_input,
-                file_label="pagare-firmado",
-                folder_id=GOOGLE_DRIVE_FOLDER_PAGARE_ID,
-            )
-            if not pagare_ok:
-                st.error(f"No se pudo subir la carta con pagaré firmado: {pagare_err}")
-                st.stop()
-
-            aceptacion_ok, aceptacion_link, aceptacion_err = _upload_file_to_drive(
-                file_name=archivo_pantallazo_aceptacion.name,
-                file_bytes=archivo_pantallazo_aceptacion.getvalue(),
-                mime_type=archivo_pantallazo_aceptacion.type or "application/octet-stream",
-                referencia=ref_input,
-                file_label="pantallazo-aceptacion",
-                folder_id=GOOGLE_DRIVE_FOLDER_PANTALLAZO_ID,
-            )
-            if not aceptacion_ok:
-                st.error(f"No se pudo subir el pantallazo de aceptación: {aceptacion_err}")
-                st.stop()
-        else:
-            pagare_link = link_pagare_manual
-            aceptacion_link = link_pantallazo_manual
-            
         envio_result = enviar_aprobacion_estructurados(
             referencia=ref_input,
             ids=ids_sel,
@@ -2688,8 +2461,6 @@ if enviar_aprobacion:
             ce_inicial=ce_inicial,
             prediccion=pred_value,
             tipo_liquidacion=tipo_liquidacion_val,
-            link_pagare_firmado=pagare_link,
-            link_pantallazo_aceptacion=aceptacion_link,
         )
         if envio_result["estr_ok"]:
             estado_aprob = "✅ Aprobado" if envio_result["es_aprobado"] else "⛔ No aprobado"
