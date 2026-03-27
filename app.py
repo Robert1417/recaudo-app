@@ -1592,6 +1592,7 @@ def _upload_pdf_to_drive(service, uploaded_file, folder_id: str):
         fields="id,name,webViewLink,parents",
         supportsAllDrives=True,
     ).execute()
+    return result
 
 def _find_col(df: pd.DataFrame, candidates):
     cols = {_norm(c): c for c in df.columns}
@@ -2684,7 +2685,7 @@ if enviar_aprobacion:
                 st.caption(f"📂 Pantallazo cargado: {pantallazo_link_final}")
             except Exception as e:
                 st.error(f"No se pudieron subir los adjuntos a Drive: {e}")
-                st.stop()    
+                st.stop()   
         
     else:
         if not carta_manual_link or not pantallazo_manual_link:
