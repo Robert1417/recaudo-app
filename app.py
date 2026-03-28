@@ -2152,7 +2152,6 @@ with fecha_cfg_4:
 with fecha_cfg_5:
     if st.button("Restablecer cronograma", use_container_width=True):
         st.session_state.pop("cronograma_editor", None)
-        st.session_state.pop("cronograma_editor_editables", None)
         st.session_state.pop("cronograma_overrides", None)
         st.rerun()
 
@@ -2170,7 +2169,7 @@ cronograma_df, cronograma_meta = construir_cronograma_pagos(
 
 totales_por_tipo = {"banco": float(pago_banco), "comision": float(comision_exito)}
 cronograma_overrides = st.session_state.get("cronograma_overrides", {})
-cronograma_editor_state = st.session_state.get("cronograma_editor_editables", {})
+cronograma_editor_state = st.session_state.get("cronograma_editor", {})
 
 cronograma_base_editado, _ = aplicar_overrides_cronograma(
     cronograma_df=cronograma_df,
@@ -2184,20 +2183,27 @@ cronograma_base_editado, _ = aplicar_overrides_cronograma(
 )
 
 cronograma_base_visible = cronograma_base_editado[cronograma_base_editado["Cantidad"] > 0.005].reset_index(drop=True)
-cronograma_base_editable = cronograma_base_visible[cronograma_base_visible["months_ahead"] > 0].reset_index(drop=True)
+cronograma_locked_rows_changed = False
 for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {}) or {}).items():
     try:
         row_position = int(row_position_str)
     except (TypeError, ValueError):
         continue
-    if row_position < 0 or row_position >= len(cronograma_base_editable):
+    if row_position < 0 or row_position >= len(cronograma_base_visible):
         continue
-    row = cronograma_base_editable.iloc[row_position]
+    row = cronograma_base_visible.iloc[row_position]
+    if int(row["months_ahead"]) == 0:
+        cronograma_locked_rows_changed = True
+        continue
     row_key = str(row["row_key"])
     existing = cronograma_overrides.get(row_key, {})
     existing.update(cambios)
     cronograma_overrides[row_key] = existing
 st.session_state["cronograma_overrides"] = cronograma_overrides
+
+if cronograma_locked_rows_changed:
+    st.session_state.pop("cronograma_editor", None)
+    st.rerun()
 
 cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
     cronograma_df=cronograma_df,
@@ -2213,60 +2219,30 @@ cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
 for advertencia in advertencias_cronograma:
     st.warning(advertencia)
 
-cronograma_visible = cronograma_editado[cronograma_editado["Cantidad"] > 0.005].copy()
-
-def _formatear_cronograma_view(df_view: pd.DataFrame, idx_inicial: int) -> pd.DataFrame:
-    view = df_view[["Fecha", "Cantidad", "Concepto"]].copy()
-    view["Fecha"] = pd.to_datetime(view["Fecha"])
-    view["Cantidad"] = (
-        pd.to_numeric(view["Cantidad"], errors="coerce")
+cronograma_view = cronograma_editado[cronograma_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
+if not cronograma_view.empty:
+    cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
+    cronograma_view["Cantidad"] = (
+        pd.to_numeric(cronograma_view["Cantidad"], errors="coerce")
         .fillna(0.0)
         .round(2)
         .map(_format_currency0)
     )
-    view.index = range(idx_inicial, idx_inicial + len(view))
-    return view
-
-if not cronograma_visible.empty:
-    cronograma_bloqueado_view = _formatear_cronograma_view(
-        cronograma_visible[cronograma_visible["months_ahead"] == 0],
-        1,
+    cronograma_view.index = range(1, len(cronograma_view) + 1)
+    st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
+    st.data_editor(
+        cronograma_view,
+        key="cronograma_editor",
+        use_container_width=True,
+        num_rows="fixed",
+        hide_index=False,
+        column_config={
+            "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+            "Cantidad": st.column_config.TextColumn("Cantidad"),
+            "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
+        },
+        disabled=["Concepto"],
     )
-    cronograma_editable_view = _formatear_cronograma_view(
-        cronograma_visible[cronograma_visible["months_ahead"] > 0],
-        len(cronograma_bloqueado_view) + 1,
-    )
-
-    st.caption(
-        "Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos."
-    )
-    if not cronograma_bloqueado_view.empty:
-        st.caption("Filas 1 y 2 bloqueadas (no editables).")
-        st.dataframe(
-            cronograma_bloqueado_view,
-            use_container_width=True,
-            hide_index=False,
-            column_config={
-                "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-                "Cantidad": st.column_config.TextColumn("Cantidad"),
-                "Concepto": st.column_config.TextColumn("Concepto"),
-            },
-        )
-
-    if not cronograma_editable_view.empty:
-        st.data_editor(
-            cronograma_editable_view,
-            key="cronograma_editor_editables",
-            use_container_width=True,
-            num_rows="fixed",
-            hide_index=False,
-            column_config={
-                "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-                "Cantidad": st.column_config.TextColumn("Cantidad"),
-                "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
-            },
-            disabled=["Concepto"],
-        )
 else:
     st.info("Aún no hay valores suficientes para construir el cronograma.")
 
