@@ -2203,6 +2203,7 @@ st.session_state["cronograma_overrides"] = cronograma_overrides
 
 if cronograma_locked_rows_changed:
     st.session_state.pop("cronograma_editor", None)
+    st.info("Las filas 1 y 2 están bloqueadas y no se pueden editar.")
     st.rerun()
 
 cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
@@ -2219,8 +2220,9 @@ cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
 for advertencia in advertencias_cronograma:
     st.warning(advertencia)
 
-cronograma_view = cronograma_editado[cronograma_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
-if not cronograma_view.empty:
+cronograma_visible = cronograma_editado[cronograma_editado["Cantidad"] > 0.005].copy()
+if not cronograma_visible.empty:
+    cronograma_view = cronograma_visible[["Fecha", "Cantidad", "Concepto"]].copy()
     cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
     cronograma_view["Cantidad"] = (
         pd.to_numeric(cronograma_view["Cantidad"], errors="coerce")
@@ -2230,6 +2232,7 @@ if not cronograma_view.empty:
     )
     cronograma_view.index = range(1, len(cronograma_view) + 1)
     st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
+    st.caption("Filas 1 y 2 bloqueadas (no editables).")
     st.data_editor(
         cronograma_view,
         key="cronograma_editor",
