@@ -2668,8 +2668,8 @@ if enviar_aprobacion:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
     elif carta_pagare_file is None or pantallazo_file is None:
         st.warning("Debes adjuntar ambos archivos PDF (Carta/Pagaré y Pantallazo).")
-        else:
-            try:
+    else:
+         try:
             drive_service = _build_drive_service_from_session()
             if drive_service is None:
                 st.warning("Debes autenticar Drive antes de enviar la aprobación.")
@@ -2688,7 +2688,6 @@ if enviar_aprobacion:
         except Exception as e:
             st.error(f"No se pudieron subir los adjuntos a Drive: {e}")
             st.stop()
-
     if (
         pred_value is not None
         and correo_para_sheets
