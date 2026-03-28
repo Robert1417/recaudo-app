@@ -1557,7 +1557,7 @@ def _get_drive_flow_and_auth_url():
         include_granted_scopes="true",
         prompt="consent",
     )
-    return flow, auth_url, state
+    return flow, auth_url, state, client_config
 
 
 def _extract_oauth_code(redirect_text: str) -> str:
@@ -2539,6 +2539,10 @@ if do_predict:
     except Exception as e:
         st.error(f"Error al predecir: {e}")
 
+st.markdown("---")
+st.markdown("### 8) Envío a aprobación de estructurados")
+st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
+
 st.markdown("#### Adjuntos obligatorios (Drive con autenticación de usuario)")
 st.caption(
     "Puedes subir automáticamente con OAuth o pegar links manuales si tu despliegue aún no tiene secretos OAuth."
@@ -2576,10 +2580,10 @@ if metodo_adjuntos == "Subir automáticamente a Drive (OAuth)":
 
         if iniciar_auth_drive:
             try:
-                flow, auth_url, oauth_state = _get_drive_flow_and_auth_url()
+                flow, auth_url, oauth_state, client_config = _get_drive_flow_and_auth_url()
                 st.session_state.drive_oauth_state = oauth_state
                 st.session_state.drive_auth_url = auth_url
-                st.session_state.drive_auth_client_config = flow.client_config
+                st.session_state.drive_auth_client_config = client_config
                 st.session_state.drive_auth_in_progress = True
             except Exception as e:
                 st.error(f"No se pudo iniciar autenticación OAuth: {e}")
@@ -2641,6 +2645,7 @@ else:
         placeholder="https://drive.google.com/...",
         key="pantallazo_manual_link",
     ).strip()
+    
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
     key="correo_para_sheets",
