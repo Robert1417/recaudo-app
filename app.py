@@ -1714,8 +1714,7 @@ def _format_pesos(value) -> str:
 
 def pesos_input(label: str, key: str, help: str | None = None, disabled: bool = False):
     """
-    Input de texto para pesos colombianos (para Deuda, Apartado, etc.)
-    NO se usa para Comisión de éxito para evitar conflictos.
+    Input de texto para pesos colombianos (para Deuda, Apartado, etc.).
     """
     raw_val = st.session_state.get(key, 0.0)
     try:
@@ -1742,6 +1741,7 @@ def pesos_input(label: str, key: str, help: str | None = None, disabled: bool = 
     if new_val < 0:
         new_val = 0.0
 
+    st.session_state[key] = new_val
     st.session_state[synced_key] = new_val
     return new_val
 
@@ -2018,8 +2018,8 @@ with c5:
 
 # Avance CE inicial vs Comisión de éxito
 st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
-ce_inicial = float(st.session_state.ce_inicial_val or 0.0)
-base = float(st.session_state.comision_exito or 0.0)
+ce_inicial = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
+base = float(st.session_state.get("comision_exito", 0.0) or 0.0)
 if ce_inicial <= 0:
     st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
 elif base <= 0:
