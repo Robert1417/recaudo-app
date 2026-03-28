@@ -2685,7 +2685,7 @@ if enviar_aprobacion:
             pantallazo_link_final = pantallazo_upload.get("webViewLink", "")
             st.caption(f"📂 Carta/Pagaré cargado: {carta_link_final}")
             st.caption(f"📂 Pantallazo cargado: {pantallazo_link_final}")
-        except Exception as e:
+         except Exception as e:
             st.error(f"No se pudieron subir los adjuntos a Drive: {e}")
             st.stop()
     if (
