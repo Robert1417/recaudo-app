@@ -1609,6 +1609,21 @@ def _upload_pdf_to_drive(service, uploaded_file, folder_id: str):
     ).execute()
     return result
 
+
+def _complete_drive_oauth_with_code(code: str):
+    cfg = st.session_state.get("drive_auth_client_config")
+    if not cfg:
+        raise RuntimeError("No existe configuración OAuth en sesión. Inicia de nuevo.")
+    flow = Flow.from_client_config(cfg, scopes=GOOGLE_DRIVE_UPLOAD_SCOPES)
+    flow.redirect_uri = _get_oauth_redirect_uri()
+    code_verifier = st.session_state.get("drive_oauth_code_verifier")
+    if code_verifier:
+        flow.code_verifier = code_verifier
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    st.session_state.drive_user_token = json.loads(creds.to_json())
+    st.session_state.drive_auth_in_progress = False
+
 def _find_col(df: pd.DataFrame, candidates):
     cols = {_norm(c): c for c in df.columns}
     for cand in candidates:
@@ -2591,6 +2606,7 @@ else:
         auth_url = st.session_state.get("drive_auth_url", "")
         redirect_uri = _get_oauth_redirect_uri()
         query_code = str(st.query_params.get("code", "")).strip() if hasattr(st, "query_params") else ""
+        last_processed_code = str(st.session_state.get("drive_last_processed_code", "")).strip()
 
         if auth_url:
             if "localhost" in redirect_uri:
@@ -2603,6 +2619,18 @@ else:
                     f"1) Abre este enlace y autoriza tu cuenta: [Autorizar Drive]({auth_url})  \n"
                     "2) Serás redirigido automáticamente a esta app."
                 )
+
+        if query_code and "localhost" not in redirect_uri and query_code != last_processed_code:
+            try:
+                _complete_drive_oauth_with_code(query_code)
+                st.session_state.drive_last_processed_code = query_code
+                st.success("Autenticación de Drive completada automáticamente.")
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"No fue posible completar OAuth automáticamente: {e}")
 
         auth_code_input = st.text_input(
             "Código OAuth / URL de redirección",
@@ -2617,18 +2645,8 @@ else:
                 if not code:
                     st.warning("Debes pegar un código OAuth válido.")
                 else:
-                    cfg = st.session_state.get("drive_auth_client_config")
-                    if not cfg:
-                        raise RuntimeError("No existe configuración OAuth en sesión. Inicia de nuevo.")
-                    flow = Flow.from_client_config(cfg, scopes=GOOGLE_DRIVE_UPLOAD_SCOPES)
-                    flow.redirect_uri = _get_oauth_redirect_uri()
-                    code_verifier = st.session_state.get("drive_oauth_code_verifier")
-                    if code_verifier:
-                        flow.code_verifier = code_verifier
-                    flow.fetch_token(code=code)
-                    creds = flow.credentials
-                    st.session_state.drive_user_token = json.loads(creds.to_json())
-                    st.session_state.drive_auth_in_progress = False
+                    _complete_drive_oauth_with_code(code)
+                    st.session_state.drive_last_processed_code = code
                     st.success("Autenticación de Drive completada.")
             except Exception as e:
                 st.error(f"No fue posible completar OAuth: {e}")
@@ -2685,9 +2703,10 @@ if enviar_aprobacion:
             pantallazo_link_final = pantallazo_upload.get("webViewLink", "")
             st.caption(f"📂 Carta/Pagaré cargado: {carta_link_final}")
             st.caption(f"📂 Pantallazo cargado: {pantallazo_link_final}")
-         except Exception as e:
+        except Exception as e:
             st.error(f"No se pudieron subir los adjuntos a Drive: {e}")
             st.stop()
+
     if (
         pred_value is not None
         and correo_para_sheets
