@@ -1854,11 +1854,41 @@ if df_ref.empty:
     st.stop()
 
 st.subheader("Resultados (elige Id deuda)")
-df_preview = df_ref[[col_id, col_banco]].head(500)
-st.dataframe(df_preview.reset_index(drop=True), use_container_width=True)
+df_preview = (
+    df_ref[[col_id, col_banco, col_deu]]
+    .rename(columns={col_id: "Id deuda", col_banco: "Banco", col_deu: "Deuda"})
+    .copy()
+)
+df_preview["Id deuda"] = df_preview["Id deuda"].astype(str)
+df_preview["Banco"] = df_preview["Banco"].astype(str)
+df_preview["Deuda"] = pd.to_numeric(df_preview["Deuda"], errors="coerce").fillna(0.0)
 
-ids_opciones = df_ref[col_id].astype(str).tolist()
-ids_sel = st.multiselect("Seleccione **uno o varios** Id deuda", ids_opciones, default=ids_opciones[:1])
+selector_key = f"selector_ids_{ref_input}"
+default_ids = set(df_preview["Id deuda"].head(1).tolist())
+if selector_key not in st.session_state:
+    st.session_state[selector_key] = default_ids
+
+df_selector = df_preview.copy()
+df_selector["Seleccionar"] = df_selector["Id deuda"].isin(st.session_state[selector_key])
+df_selector["Deuda"] = df_selector["Deuda"].map(_format_currency0)
+
+edited_selector = st.data_editor(
+    df_selector[["Seleccionar", "Id deuda", "Banco", "Deuda"]],
+    hide_index=True,
+    use_container_width=True,
+    disabled=["Id deuda", "Banco", "Deuda"],
+    column_config={
+        "Seleccionar": st.column_config.CheckboxColumn(
+            "✅ Seleccionar",
+            help="Marca los Id deuda que quieres incluir en el cálculo.",
+            default=False,
+        )
+    },
+    key=f"{selector_key}_editor",
+)
+
+ids_sel = edited_selector.loc[edited_selector["Seleccionar"], "Id deuda"].astype(str).tolist()
+st.session_state[selector_key] = set(ids_sel)
 if not ids_sel:
     st.info("Selecciona al menos un Id deuda para continuar.")
     st.stop()
