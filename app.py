@@ -223,7 +223,7 @@ def _rebalance_group_amounts(df_group: pd.DataFrame, total_objetivo: float) -> p
     return df_group
 
 
-def _parse_amount_input(value) -> float:
+def _parse_amount_input(value, *, max_decimals: int = 2) -> float:
     if value is None:
         return 0.0
     if isinstance(value, (int, float, np.integer, np.floating)):
@@ -231,14 +231,39 @@ def _parse_amount_input(value) -> float:
     text = str(value).strip()
     if not text:
         return 0.0
-    cleaned = re.sub(r"[^\d-]", "", text)
-    if cleaned in {"", "-"}:
+    sign = -1 if text.startswith("-") else 1
+    cleaned = re.sub(r"[^\d,.\-]", "", text)
+    if cleaned in {"", "-", ",", ".", "-,", "-."}:
         return 0.0
-    return float(cleaned)
+    cleaned = cleaned.replace("-", "")
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    else:
+        parts = cleaned.split(".")
+        if len(parts) > 2:
+            cleaned = "".join(parts)
+        elif len(parts) == 2 and len(parts[-1]) == 3 and parts[0].isdigit():
+            cleaned = cleaned.replace(".", "")
+
+    try:
+        parsed = float(cleaned)
+    except ValueError:
+        return 0.0
+
+    factor = 10 ** max(0, int(max_decimals))
+    parsed = np.trunc(parsed * factor) / factor
+    return sign * parsed
 
 
-def _format_currency0(value) -> str:
-    return f"$ {int(round(float(value or 0.0))):,}"
+def _format_currency0(value, *, decimals: int = 2) -> str:
+    amount = float(value or 0.0)
+    formatted = f"{amount:,.{decimals}f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"$ {formatted}"
 
 
 #############################################################################################################################################################################
@@ -1684,8 +1709,8 @@ def _format_pesos(value) -> str:
         return ""
     if np.isnan(v):
         return ""
-    # Formato colombiano: punto como separador de miles, sin decimales
-    return f"{v:,.0f}".replace(",", ".")
+    # Formato colombiano: punto miles, coma decimales (máx 2)
+    return f"{v:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 def pesos_input(label: str, key: str, help: str | None = None, disabled: bool = False):
     """
@@ -1698,28 +1723,26 @@ def pesos_input(label: str, key: str, help: str | None = None, disabled: bool = 
     except Exception:
         base_val = 0.0
 
-    default_txt = _format_pesos(base_val)
-    txt = st.text_input(
-        label,
-        value=default_txt,
-        key=f"{key}_display",
-        help=help,
-        disabled=disabled
-    )
+    display_key = f"{key}_display"
+    synced_key = f"{display_key}_synced"
+    if display_key not in st.session_state:
+        st.session_state[display_key] = _format_pesos(base_val)
+        st.session_state[synced_key] = base_val
+    elif not disabled and float(st.session_state.get(synced_key, base_val)) != float(base_val):
+        st.session_state[display_key] = _format_pesos(base_val)
+        st.session_state[synced_key] = base_val
 
-    txt_clean = txt.strip().replace(".", "").replace(",", "")
-    if txt_clean == "":
+    txt = st.text_input(label, key=display_key, help=help, disabled=disabled)
+
+    if str(txt).strip() == "":
         new_val = 0.0
     else:
-        try:
-            new_val = float(txt_clean)
-        except Exception:
-            new_val = base_val  # si no se puede parsear, dejamos el valor anterior
+        new_val = _parse_amount_input(txt, max_decimals=2)
 
     if new_val < 0:
         new_val = 0.0
 
-    st.session_state[key] = new_val
+    st.session_state[synced_key] = new_val
     return new_val
 
 # -------- helpers de CE --------
@@ -1979,14 +2002,9 @@ c4, c5 = st.columns(2)
 with c4:
     # Valor automático de referencia
     auto_ce = float(st.session_state.get("comision_exito_auto", st.session_state.get("comision_exito", 0.0)) or 0.0)
-    current_ce = float(st.session_state.get("comision_exito", 0.0) or 0.0)
-
-    new_ce = st.number_input(
+    new_ce = pesos_input(
         "🏁 Comisión de éxito (editable)",
         key="comision_exito",
-        value=current_ce,
-        step=1000.0,
-        format="%.0f",
         help="Por defecto se calcula con la fórmula, pero puedes ajustarla manualmente."
     )
 
@@ -2168,9 +2186,8 @@ if not cronograma_view.empty:
     cronograma_view["Cantidad"] = (
         pd.to_numeric(cronograma_view["Cantidad"], errors="coerce")
         .fillna(0.0)
-        .round(0)
-        .astype(int)
-        .map(lambda x: f"$ {x:,}")
+        .round(2)
+        .map(_format_currency0)
     )
     cronograma_view.index = range(1, len(cronograma_view) + 1)
     st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
