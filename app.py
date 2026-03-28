@@ -2582,6 +2582,7 @@ if metodo_adjuntos == "Subir automáticamente a Drive (OAuth)":
             try:
                 flow, auth_url, oauth_state, client_config = _get_drive_flow_and_auth_url()
                 st.session_state.drive_oauth_state = oauth_state
+                st.session_state.drive_oauth_code_verifier = getattr(flow, "code_verifier", None)
                 st.session_state.drive_auth_url = auth_url
                 st.session_state.drive_auth_client_config = client_config
                 st.session_state.drive_auth_in_progress = True
@@ -2612,6 +2613,9 @@ if metodo_adjuntos == "Subir automáticamente a Drive (OAuth)":
                             raise RuntimeError("No existe configuración OAuth en sesión. Inicia de nuevo.")
                         flow = Flow.from_client_config(cfg, scopes=GOOGLE_DRIVE_UPLOAD_SCOPES)
                         flow.redirect_uri = "http://localhost"
+                        code_verifier = st.session_state.get("drive_oauth_code_verifier")
+                        if code_verifier:
+                            flow.code_verifier = code_verifier
                         flow.fetch_token(code=code)
                         creds = flow.credentials
                         st.session_state.drive_user_token = json.loads(creds.to_json())
