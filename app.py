@@ -1910,7 +1910,6 @@ ce_base_def         = float(fila_primera[col_ce]) if pd.notna(fila_primera[col_c
 
 sig_sel = (str(ref_input), tuple(sorted(map(str, ids_sel))))
 if st.session_state.get("sig_sel") != sig_sel:
-    st.session_state.clear()
     st.session_state.sig_sel = sig_sel
 
     st.session_state.deuda_res_edit = deuda_res_total_def
