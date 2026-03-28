@@ -260,9 +260,18 @@ def _parse_amount_input(value, *, max_decimals: int = 2) -> float:
     return sign * parsed
 
 
-def _format_currency0(value, *, decimals: int = 2) -> str:
+def _format_number_es(value, *, max_decimals: int = 2, trim_trailing: bool = True) -> str:
     amount = float(value or 0.0)
-    formatted = f"{amount:,.{decimals}f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    max_decimals = max(0, int(max_decimals))
+    formatted = f"{amount:,.{max_decimals}f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    if trim_trailing and "," in formatted:
+        formatted = formatted.rstrip("0").rstrip(",")
+    return formatted
+
+
+def _format_currency0(value, *, decimals: int = 2, trim_trailing: bool = True) -> str:
+    amount = float(value or 0.0)
+    formatted = _format_number_es(amount, max_decimals=decimals, trim_trailing=trim_trailing)
     return f"$ {formatted}"
 
 
@@ -270,7 +279,7 @@ def _format_currency0(value, *, decimals: int = 2) -> str:
 #############################################################################################################################################################################
 def _format_currency_cop(value) -> str:
     amount = float(value or 0.0)
-    formatted = f"{amount:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    formatted = _format_number_es(amount, max_decimals=2, trim_trailing=True)
     return f"${formatted} COP"
 
 
@@ -1709,8 +1718,9 @@ def _format_pesos(value) -> str:
         return ""
     if np.isnan(v):
         return ""
-    # Formato colombiano: punto miles, coma decimales (máx 2)
-    return f"{v:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    # Formato colombiano: punto miles, coma decimales (máx 2),
+    # ocultando decimales cuando sean .00 por defecto.
+    return _format_number_es(v, max_decimals=2, trim_trailing=True)
 
 def pesos_input(label: str, key: str, help: str | None = None, disabled: bool = False):
     """
