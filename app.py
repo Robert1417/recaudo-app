@@ -147,8 +147,9 @@ GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 GOOGLE_DRIVE_UPLOAD_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-DRIVE_FOLDER_CARTA_PAGARE_ID = "1YSJ48HwS0ONpOpfJNeiF_ccgItNY1Dbc"
-DRIVE_FOLDER_PANTALLAZOS_ID = "117gE0uPDR1PzKmUXQAbrLqjnXy3qxNEm"
+DRIVE_FOLDER_CARTA_PAGARE_ID = "1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk"
+DRIVE_FOLDER_PANTALLAZOS_ID = "1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1"
+DRIVE_FOLDER_CONDONACION_CORREO_ID = "1CN73OI6DjyEVGLsu1m9iszPPJ4xKfTZM5aMQ-lHNwHnlgzck0VjdL3MX5RuObC_n3zs-MFNF"
 
 GOOGLE_SHEET_HEADERS = [
     "fecha",
@@ -1480,6 +1481,7 @@ def enviar_aprobacion_estructurados(
     tipo_liquidacion="",
     carta_pagare_link="Pendiente",
     pantallazo_aceptacion_link="Pendiente",
+    pantallazo_correo_condonacion_link="Pendiente",
     
 ):
     tipo_liquidacion_norm = _norm(tipo_liquidacion)
@@ -1496,6 +1498,7 @@ def enviar_aprobacion_estructurados(
         str(pantallazo_aceptacion_link or "Pendiente"),  # G Pantallazo aceptación
         "Sí" if str(condonacion_mensualidades).strip().lower() == "si" else "No",  # H Condonación
         "",  # I Adjuntar pantallazo de correo
+        str(pantallazo_correo_condonacion_link or "Pendiente"),  # I Adjuntar pantallazo de correo
         float(comision_exito_total or 0.0),  # J Comisión total
         float(ce_inicial or 0.0),  # K Primera comisión
         "",  # L
@@ -1625,16 +1628,27 @@ def _build_drive_service_from_session():
     return build("drive", "v3", credentials=creds)
 
 
-def _upload_pdf_to_drive(service, uploaded_file, folder_id: str):
+def _upload_file_to_drive(
+    service,
+    uploaded_file,
+    folder_id: str,
+    *,
+    allowed_extensions: tuple[str, ...],
+    invalid_message: str,
+):
     if uploaded_file is None:
         return None
     file_name = str(uploaded_file.name or "").strip()
-    if not file_name.lower().endswith(".pdf"):
-        raise ValueError("Solo se permiten archivos PDF.")
+    if not file_name:
+        raise ValueError(invalid_message)
+    lower_file_name = file_name.lower()
+    if not any(lower_file_name.endswith(ext) for ext in allowed_extensions):
+        raise ValueError(invalid_message)
 
     content = uploaded_file.getvalue()
     metadata = {"name": file_name, "parents": [folder_id]}
-    media = MediaIoBaseUpload(BytesIO(content), mimetype="application/pdf", resumable=True)
+    mime_type = str(getattr(uploaded_file, "type", "") or "").strip() or "application/octet-stream"
+    media = MediaIoBaseUpload(BytesIO(content), mimetype=mime_type, resumable=True)
     result = service.files().create(
         body=metadata,
         media_body=media,
@@ -2353,6 +2367,13 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
 
 
 def _missing_document_fields(context: dict[str, str]) -> list[str]:
+    def _is_empty_or_placeholder(value) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        normalized = re.sub(r"[\s<>]", "", text).lower()
+        return normalized in {"na", "n/a", "nan", "none", "null"}
+        
     required_labels = {
         "referencia": "Referencia documento",
         "dia_firma": "Día firma",
@@ -2372,7 +2393,7 @@ def _missing_document_fields(context: dict[str, str]) -> list[str]:
     }
     missing = []
     for key, label in required_labels.items():
-        if not str(context.get(key, "")).strip():
+        if _is_empty_or_placeholder(context.get(key, "")):
             missing.append(label)
     return missing
 
@@ -2629,12 +2650,13 @@ st.caption("Este envío se hace solo cuando presionas el botón de aprobación."
 
 st.markdown("#### Adjuntos obligatorios (Drive con autenticación de usuario)")
 st.caption(
-    "Flujo automático: autentica tu cuenta Google y luego sube los 2 PDF obligatorios."
+    "Flujo automático: autentica tu cuenta Google y sube los adjuntos obligatorios."
 )
 
 oauth_disponible = _oauth_drive_configurado()
 carta_pagare_file = None
 pantallazo_file = None
+condonacion_correo_file = None
 if not oauth_disponible:
     st.error(
         "Este despliegue no tiene secretos OAuth configurados. "
@@ -2716,8 +2738,8 @@ else:
         key="carta_pagare_pdf",
     )
     pantallazo_file = st.file_uploader(
-        "📎 Adjuntar pantallazo de aceptación del cliente (PDF)",
-        type=["pdf"],
+        "📎 Adjuntar pantallazo de aceptación del cliente (PDF o imagen)",
+        type=["pdf", "png", "jpg", "jpeg", "webp"],
         key="pantallazo_pdf",
     )
     
@@ -2731,12 +2753,19 @@ condonacion_mensualidades = st.selectbox(
     index=0,
     key="condonacion_mensualidades",
 )
+if condonacion_mensualidades == "Si":
+    condonacion_correo_file = st.file_uploader(
+        "📎 Adjuntar pantallazo de correo de aprobación de condonación (PDF o imagen)",
+        type=["pdf", "png", "jpg", "jpeg", "webp"],
+        key="condonacion_correo_soporte",
+    )
 
 enviar_aprobacion = st.button("Enviar AProbación estructurados", use_container_width=True)
 if enviar_aprobacion:
     pred_value = st.session_state.get("last_prediction_value")
     carta_link_final = ""
     pantallazo_link_final = ""
+    condonacion_correo_link_final = ""
     if pred_value is None:
         st.warning("Primero debes presionar **Predecir recaudo**.")
     elif not correo_para_sheets:
@@ -2744,7 +2773,9 @@ if enviar_aprobacion:
     elif condonacion_mensualidades not in {"Si", "No"}:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
     elif carta_pagare_file is None or pantallazo_file is None:
-        st.warning("Debes adjuntar ambos archivos PDF (Carta/Pagaré y Pantallazo).")
+        st.warning("Debes adjuntar Carta/Pagaré (solo PDF) y Pantallazo de aceptación (PDF o imagen).")
+    elif condonacion_mensualidades == "Si" and condonacion_correo_file is None:
+        st.warning("Debes adjuntar el pantallazo de correo de aprobación de condonación (PDF o imagen).")
     else:
          try:
             drive_service = _build_drive_service_from_session()
@@ -2752,16 +2783,36 @@ if enviar_aprobacion:
                 st.warning("Debes autenticar Drive antes de enviar la aprobación.")
                 st.stop()
 
-            carta_upload = _upload_pdf_to_drive(
-                drive_service, carta_pagare_file, DRIVE_FOLDER_CARTA_PAGARE_ID
+            carta_upload = _upload_file_to_drive(
+                drive_service,
+                carta_pagare_file,
+                DRIVE_FOLDER_CARTA_PAGARE_ID,
+                allowed_extensions=(".pdf",),
+                invalid_message="Carta con pagaré firmado: solo se permite PDF.",
             )
-            pantallazo_upload = _upload_pdf_to_drive(
-                drive_service, pantallazo_file, DRIVE_FOLDER_PANTALLAZOS_ID
+            pantallazo_upload = _upload_file_to_drive(
+                drive_service,
+                pantallazo_file,
+                DRIVE_FOLDER_PANTALLAZOS_ID,
+                allowed_extensions=(".pdf", ".png", ".jpg", ".jpeg", ".webp"),
+                invalid_message="Pantallazo de aceptación: solo PDF o imagen (PNG/JPG/JPEG/WEBP).",
             )
             carta_link_final = carta_upload.get("webViewLink", "")
             pantallazo_link_final = pantallazo_upload.get("webViewLink", "")
             st.caption(f"📂 Carta/Pagaré cargado: {carta_link_final}")
             st.caption(f"📂 Pantallazo cargado: {pantallazo_link_final}")
+            if condonacion_mensualidades == "Si" and condonacion_correo_file is not None:
+                condonacion_upload = _upload_file_to_drive(
+                    drive_service,
+                    condonacion_correo_file,
+                    DRIVE_FOLDER_CONDONACION_CORREO_ID,
+                    allowed_extensions=(".pdf", ".png", ".jpg", ".jpeg", ".webp"),
+                    invalid_message="Pantallazo de correo de condonación: solo PDF o imagen (PNG/JPG/JPEG/WEBP).",
+                )
+                condonacion_correo_link_final = condonacion_upload.get("webViewLink", "")
+                st.caption(f"📂 Correo aprobación condonación cargado: {condonacion_correo_link_final}")
+            elif condonacion_mensualidades == "No":
+                condonacion_correo_link_final = ""
          except Exception as e:
             st.error(f"No se pudieron subir los adjuntos a Drive: {e}")
             st.stop()
@@ -2772,6 +2823,7 @@ if enviar_aprobacion:
         and condonacion_mensualidades in {"Si", "No"}
         and carta_link_final
         and pantallazo_link_final
+        and (condonacion_mensualidades == "No" or bool(condonacion_correo_link_final))
     ):
             
         envio_result = enviar_aprobacion_estructurados(
@@ -2786,6 +2838,7 @@ if enviar_aprobacion:
             tipo_liquidacion=tipo_liquidacion_val,
             carta_pagare_link=carta_link_final,
             pantallazo_aceptacion_link=pantallazo_link_final,
+            pantallazo_correo_condonacion_link=condonacion_correo_link_final,
         )
         if envio_result["estr_ok"]:
             estado_aprob = "✅ Aprobado" if envio_result["es_aprobado"] else "⛔ No aprobado"
