@@ -1201,7 +1201,7 @@ def _append_row_to_respuestas_estr(row_data: dict):
                 normalized[idx] = payload.get("correo_electronico", "")
             elif h == "referencia":
                 normalized[idx] = payload.get("referencia", "")
-            elif "id deuda" in h:
+            elif "id deuda" in h or "id de la deuda" in h or "id de deuda" in h:
                 normalized[idx] = payload.get("ids", "")
             elif "banco" in h:
                 normalized[idx] = payload.get("bancos", "")
