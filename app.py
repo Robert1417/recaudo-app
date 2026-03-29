@@ -1185,6 +1185,7 @@ def _append_row_to_respuestas_estr(row_data: dict):
     Evita desalineaciones cuando la estructura de columnas cambia en la hoja.
     """
     try:
+        worksheet = get_google_sheet_worksheet(GOOGLE_SHEET_TAB_RESPUESTAS)
         headers = worksheet.row_values(1)
         if not headers:
             headers = GOOGLE_RESPUESTAS_COLS.copy()
