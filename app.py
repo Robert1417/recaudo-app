@@ -1171,17 +1171,57 @@ def _append_row_to_google_sheet(row_data: dict):
     except Exception as e:
         return False, f"Google Sheets > {GOOGLE_SHEET_TAB}", str(e)
 
-def _append_row_to_respuestas_estr(row_values: list):
+def _col_index_to_letter(col_idx: int) -> str:
+    letters = ""
+    while col_idx > 0:
+        col_idx, rem = divmod(col_idx - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters or "A"
+
+
+def _append_row_to_respuestas_estr(row_data: dict):
     """
-    Inserta una fila en la hoja "Respuestas Estr" respetando el orden A:V.
+    Inserta una fila en la hoja "Respuestas Estr" mapeando por encabezado visible.
+    Evita desalineaciones cuando la estructura de columnas cambia en la hoja.
     """
     try:
-        worksheet = get_google_sheet_worksheet(GOOGLE_SHEET_TAB_RESPUESTAS)
-        normalized = list(row_values or [])
-        if len(normalized) < len(GOOGLE_RESPUESTAS_COLS):
-            normalized += [""] * (len(GOOGLE_RESPUESTAS_COLS) - len(normalized))
-        elif len(normalized) > len(GOOGLE_RESPUESTAS_COLS):
-            normalized = normalized[: len(GOOGLE_RESPUESTAS_COLS)]
+        headers = worksheet.row_values(1)
+        if not headers:
+            headers = GOOGLE_RESPUESTAS_COLS.copy()
+
+        normalized = [""] * len(headers)
+        payload = dict(row_data or {})
+
+        for idx, header in enumerate(headers):
+            h = _norm(header)
+            if "marca temporal" in h:
+                normalized[idx] = payload.get("timestamp", "")
+            elif "direccion de correo" in h or h == "correo":
+                normalized[idx] = payload.get("correo_electronico", "")
+            elif h == "referencia":
+                normalized[idx] = payload.get("referencia", "")
+            elif "id deuda" in h:
+                normalized[idx] = payload.get("ids", "")
+            elif "banco" in h:
+                normalized[idx] = payload.get("bancos", "")
+            elif "carta" in h and "pagare" in h:
+                normalized[idx] = payload.get("carta_pagare_link", "")
+            elif "pantallazo" in h and "aceptacion" in h:
+                normalized[idx] = payload.get("pantallazo_aceptacion_link", "")
+            elif "condonacion" in h and "mensualidades" in h:
+                normalized[idx] = payload.get("condonacion_mensualidades", "")
+            elif "pantallazo" in h and "correo" in h and "condonacion" in h:
+                normalized[idx] = payload.get("pantallazo_correo_condonacion_link", "")
+            elif "total de comision" in h:
+                normalized[idx] = payload.get("comision_exito_total", "")
+            elif "primera comision" in h or "pago de la primera comision" in h:
+                normalized[idx] = payload.get("ce_inicial", "")
+            elif "aprobacion estructurados" in h:
+                normalized[idx] = payload.get("es_aprobado_bool", "")
+            elif h == "estado":
+                normalized[idx] = payload.get("estado_aprobacion", "")
+            elif "calculadora" in h:
+                normalized[idx] = payload.get("prediccion", "")
 
         # Evita que el registro se vaya al final de filas "ocupadas" por fórmulas
         # (por ejemplo, columnas con FALSE/checkbox). Lo insertamos justo después
@@ -1200,8 +1240,9 @@ def _append_row_to_respuestas_estr(row_values: list):
                 last_data_row = row_idx
 
         target_row = last_data_row + 1
+        end_col_letter = _col_index_to_letter(len(headers))
         worksheet.update(
-            f"A{target_row}:V{target_row}",
+            f"A{target_row}:{end_col_letter}{target_row}",
             [normalized],
             value_input_option="USER_ENTERED",
         )
@@ -1487,33 +1528,30 @@ def enviar_aprobacion_estructurados(
     tipo_liquidacion_norm = _norm(tipo_liquidacion)
     umbral_aprobacion = 0.8 if "tradicional" in tipo_liquidacion_norm else 0.74
     es_aprobado = float(prediccion or 0.0) >= float(umbral_aprobacion)
+    condonacion_value = "Sí" if str(condonacion_mensualidades).strip().lower() == "si" else "No"
+    correo_condonacion_link_value = (
+        str(pantallazo_correo_condonacion_link or "").strip()
+        if condonacion_value == "Sí"
+        else ""
+    )
 
-    respuestas_row = [
-        datetime.now().strftime("%d/%m/%Y %H:%M:%S"),  # A Marca temporal
-        str(correo_electronico or "").strip(),  # B Correo
-        str(referencia),  # C Referencia
-        "-".join(map(str, ids)),  # D ID deuda
-        str(bancos),  # E Banco
-        str(carta_pagare_link or "Pendiente"),  # F Carta pagaré firmado
-        str(pantallazo_aceptacion_link or "Pendiente"),  # G Pantallazo aceptación
-        "Sí" if str(condonacion_mensualidades).strip().lower() == "si" else "No",  # H Condonación
-        "",  # I Adjuntar pantallazo de correo
-        str(pantallazo_correo_condonacion_link or "Pendiente"),  # I Adjuntar pantallazo de correo
-        float(comision_exito_total or 0.0),  # J Comisión total
-        float(ce_inicial or 0.0),  # K Primera comisión
-        "",  # L
-        "",  # M
-        "",  # N
-        "TRUE" if es_aprobado else "FALSE",  # O Aprobación Estructurados
-        "Aprobado" if es_aprobado else "",  # P Estado
-        "",  # Q
-        "",  # R
-        "",  # S
-        "",  # T
-        "",  # U
-        float(prediccion or 0.0),  # V Calculadora
-    ]
-    estr_ok, estr_dest, estr_err = _append_row_to_respuestas_estr(respuestas_row)
+    respuestas_payload = {
+        "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "correo_electronico": str(correo_electronico or "").strip(),
+        "referencia": str(referencia),
+        "ids": "-".join(map(str, ids)),
+        "bancos": str(bancos),
+        "carta_pagare_link": str(carta_pagare_link or "").strip(),
+        "pantallazo_aceptacion_link": str(pantallazo_aceptacion_link or "").strip(),
+        "condonacion_mensualidades": condonacion_value,
+        "pantallazo_correo_condonacion_link": correo_condonacion_link_value,
+        "comision_exito_total": float(comision_exito_total or 0.0),
+        "ce_inicial": float(ce_inicial or 0.0),
+        "es_aprobado_bool": "TRUE" if es_aprobado else "FALSE",
+        "estado_aprobacion": "Aprobado" if es_aprobado else "Rechazado",
+        "prediccion": float(prediccion or 0.0),
+    }
+    estr_ok, estr_dest, estr_err = _append_row_to_respuestas_estr(respuestas_payload)
     return {
         "estr_ok": estr_ok,
         "estr_destination": estr_dest,
