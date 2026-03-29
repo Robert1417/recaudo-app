@@ -2897,7 +2897,7 @@ if enviar_aprobacion:
     elif condonacion_mensualidades == "Si" and condonacion_correo_file is None:
         st.warning("Debes adjuntar el pantallazo de correo de aprobación de condonación (PDF o imagen).")
     else:
-         is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(carta_pagare_file, ref_input)
+        is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(carta_pagare_file, ref_input)
         if not is_valid_pdf:
             st.warning(pdf_validation_message)
             st.stop()
