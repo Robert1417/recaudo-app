@@ -1202,7 +1202,7 @@ def _append_row_to_respuestas_estr(row_data: dict):
             elif h == "referencia":
                 normalized[idx] = payload.get("referencia", "")
             elif "id deuda" in h:
-                normalized[idx] = payload.get("ids", "")
+                normalized[idx] = payload.get("id", "")
             elif "banco" in h:
                 normalized[idx] = payload.get("bancos", "")
             elif "carta" in h and "pagare" in h:
@@ -1220,7 +1220,7 @@ def _append_row_to_respuestas_estr(row_data: dict):
             elif "aprobacion estructurados" in h:
                 normalized[idx] = payload.get("es_aprobado_bool", "")
             elif h == "estado":
-                normalized[idx] = payload.get("estado_aprobacion", "")
+                normalized[idx] = payload.get("Comentario", "")
             elif "calculadora" in h:
                 normalized[idx] = payload.get("prediccion", "")
 
