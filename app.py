@@ -21,6 +21,7 @@ import zlib
 import subprocess
 import shutil
 import tempfile
+import importlib.util
 from urllib.parse import urlparse, parse_qs
 
 import gspread
@@ -1695,7 +1696,87 @@ def _upload_file_to_drive(
         supportsAllDrives=True,
     ).execute()
     return result
+def _normalize_reference_token(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper().strip()
 
+
+def _extract_reference_from_text(text: str) -> str:
+    if not text:
+        return ""
+    patterns = [
+        r"ref(?:erencia)?\s*(?:no|nro|n\.°|n°|num(?:ero)?)?[:.\-\s]*([A-Za-z0-9\-]{6,})",
+        r"referencia[:.\-\s]*([A-Za-z0-9\-]{6,})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return _normalize_reference_token(match.group(1))
+    return ""
+
+
+def _extract_pdf_first_last_text(pdf_bytes: bytes) -> tuple[str, str]:
+    first_page_text = ""
+    last_page_text = ""
+
+    pypdf_spec = importlib.util.find_spec("pypdf")
+    if pypdf_spec:
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(pdf_bytes))
+        if len(reader.pages) > 0:
+            first_page_text = str(reader.pages[0].extract_text() or "")
+            last_page_text = str(reader.pages[-1].extract_text() or "")
+        return first_page_text, last_page_text
+
+    pypdf2_spec = importlib.util.find_spec("PyPDF2")
+    if pypdf2_spec:
+        from PyPDF2 import PdfReader
+
+        reader = PdfReader(BytesIO(pdf_bytes))
+        if len(reader.pages) > 0:
+            first_page_text = str(reader.pages[0].extract_text() or "")
+            last_page_text = str(reader.pages[-1].extract_text() or "")
+        return first_page_text, last_page_text
+
+    raise RuntimeError("No hay librería instalada para leer PDFs (pypdf/PyPDF2).")
+
+
+def _has_qr_signal_in_last_page(last_page_text: str) -> bool:
+    text_norm = str(last_page_text or "").lower()
+    qr_signals = [
+        "qr",
+        "código qr",
+        "codigo qr",
+        "escanee",
+        "autentic",
+        "firma electrón",
+        "firma electron",
+    ]
+    return any(signal in text_norm for signal in qr_signals)
+
+
+def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str) -> tuple[bool, str]:
+    if uploaded_file is None:
+        return False, "Debes adjuntar Carta/Pagaré (solo PDF)."
+    try:
+        pdf_bytes = uploaded_file.getvalue()
+        first_page_text, last_page_text = _extract_pdf_first_last_text(pdf_bytes)
+    except Exception as exc:
+        return False, f"No pude leer el PDF adjunto: {exc}"
+
+    expected_ref_norm = _normalize_reference_token(expected_reference)
+    found_ref_norm = _extract_reference_from_text(first_page_text)
+    has_qr = _has_qr_signal_in_last_page(last_page_text)
+
+    if not found_ref_norm and not has_qr:
+        return False, "Se subió el documento equivocado."
+    if not found_ref_norm:
+        return False, "Se subió el documento equivocado, no se encontró la referencia."
+    if expected_ref_norm and found_ref_norm != expected_ref_norm:
+        return False, "Subió el documento equivocado, la referencia no concuerda."
+    if not has_qr:
+        return False, "El documento no está firmado."
+    return True, ""
 
 def _complete_drive_oauth_with_code(code: str):
     cfg = st.session_state.get("drive_auth_client_config")
@@ -2816,7 +2897,11 @@ if enviar_aprobacion:
     elif condonacion_mensualidades == "Si" and condonacion_correo_file is None:
         st.warning("Debes adjuntar el pantallazo de correo de aprobación de condonación (PDF o imagen).")
     else:
-         try:
+         is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(carta_pagare_file, ref_input)
+        if not is_valid_pdf:
+            st.warning(pdf_validation_message)
+            st.stop()
+        try:
             drive_service = _build_drive_service_from_session()
             if drive_service is None:
                 st.warning("Debes autenticar Drive antes de enviar la aprobación.")
@@ -2852,7 +2937,7 @@ if enviar_aprobacion:
                 st.caption(f"📂 Correo aprobación condonación cargado: {condonacion_correo_link_final}")
             elif condonacion_mensualidades == "No":
                 condonacion_correo_link_final = ""
-         except Exception as e:
+        except Exception as e:
             st.error(f"No se pudieron subir los adjuntos a Drive: {e}")
             st.stop()
 
