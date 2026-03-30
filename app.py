@@ -1346,18 +1346,19 @@ def _marcar_anteriores_como_duplicado(exact_rows: list[dict]):
         comentario_col_idx = row_info.get("comentario_col_idx")
         comentario_actual = _norm(row_info.get("comentario_actual", ""))
         if row_idx and aprob_col_idx:
-            worksheet.update_acell(
-                f"{_col_index_to_letter(aprob_col_idx)}{row_idx}",
-                "FALSE",
+            target_cell = f"{_col_index_to_letter(aprob_col_idx)}{row_idx}"
+            worksheet.update(
+                target_cell,
+                [["FALSE"]],
                 value_input_option="USER_ENTERED",
             )
         if row_idx and comentario_col_idx and comentario_actual == "aprobado":
-            worksheet.update_acell(
-                f"{_col_index_to_letter(comentario_col_idx)}{row_idx}",
-                "Duplicado",
+            target_cell = f"{_col_index_to_letter(comentario_col_idx)}{row_idx}"
+            worksheet.update(
+                target_cell,
+                [["Duplicado"]],
                 value_input_option="USER_ENTERED",
             )
-
 
 def diagnosticar_google_sheets():
     """
@@ -3043,6 +3044,7 @@ if enviar_aprobacion:
                 "Se enviará sin check de aprobación estructurados y sin comentario. "
                 "Por favor contacta al equipo de estructurados."
             )
+            
         is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(carta_pagare_file, ref_input)
         if not is_valid_pdf:
             st.warning(pdf_validation_message)
