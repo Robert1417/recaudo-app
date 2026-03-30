@@ -1252,6 +1252,112 @@ def _append_row_to_respuestas_estr(row_data: dict):
     except Exception as e:
         return False, f"Google Sheets > {GOOGLE_SHEET_TAB_RESPUESTAS}", str(e)
 
+def _parse_sheet_timestamp(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _ids_to_set(ids_value) -> set[str]:
+    if isinstance(ids_value, (list, tuple, set)):
+        raw = [str(x) for x in ids_value]
+    else:
+        raw = re.split(r"[^0-9A-Za-z]+", str(ids_value or ""))
+    return {item.strip() for item in raw if str(item).strip()}
+
+
+def _get_respuestas_duplicados_mes(referencia, ids) -> dict:
+    """
+    Busca duplicados del mes en "Respuestas Estr":
+      - exact_duplicate: coincide referencia + set de IDs
+      - reference_duplicate: coincide referencia, pero IDs distintos
+    """
+    try:
+        worksheet = get_google_sheet_worksheet(GOOGLE_SHEET_TAB_RESPUESTAS)
+        all_values = worksheet.get_all_values()
+        if not all_values:
+            return {"ok": True, "mode": "none", "exact_rows": [], "error": None}
+
+        headers = all_values[0]
+        rows = all_values[1:]
+        header_idx = { _norm(h): i for i, h in enumerate(headers) }
+
+        timestamp_idx = next((i for h, i in header_idx.items() if "marca temporal" in h), None)
+        ref_idx = next((i for h, i in header_idx.items() if h == "referencia"), None)
+        ids_idx = next((i for h, i in header_idx.items() if "id deuda" in h or "id de la deuda" in h or "id de deuda" in h), None)
+        aprob_idx = next((i for h, i in header_idx.items() if "aprobacion estructurados" in h), None)
+        comentario_idx = next((i for h, i in header_idx.items() if h == "estado" or "comentario" in h), None)
+
+        if timestamp_idx is None or ref_idx is None or ids_idx is None:
+            return {"ok": True, "mode": "none", "exact_rows": [], "error": None}
+
+        now = datetime.now()
+        ref_norm = _norm(str(referencia or ""))
+        ids_target = _ids_to_set(ids)
+        ref_found = False
+        exact_rows = []
+
+        for offset, row in enumerate(rows, start=2):
+            ts_raw = row[timestamp_idx] if timestamp_idx < len(row) else ""
+            ref_raw = row[ref_idx] if ref_idx < len(row) else ""
+            ids_raw = row[ids_idx] if ids_idx < len(row) else ""
+            row_dt = _parse_sheet_timestamp(ts_raw)
+            if row_dt is None:
+                continue
+            if row_dt.year != now.year or row_dt.month != now.month:
+                continue
+            if _norm(ref_raw) != ref_norm:
+                continue
+            ref_found = True
+            if _ids_to_set(ids_raw) == ids_target:
+                exact_rows.append(
+                    {
+                        "row_idx": offset,
+                        "aprob_col_idx": aprob_idx + 1 if aprob_idx is not None else None,
+                        "comentario_col_idx": comentario_idx + 1 if comentario_idx is not None else None,
+                        "comentario_actual": row[comentario_idx] if comentario_idx is not None and comentario_idx < len(row) else "",
+                    }
+                )
+
+        mode = "none"
+        if exact_rows:
+            mode = "exact_duplicate"
+        elif ref_found:
+            mode = "reference_duplicate"
+
+        return {"ok": True, "mode": mode, "exact_rows": exact_rows, "error": None}
+    except Exception as e:
+        return {"ok": False, "mode": "none", "exact_rows": [], "error": str(e)}
+
+
+def _marcar_anteriores_como_duplicado(exact_rows: list[dict]):
+    if not exact_rows:
+        return
+    worksheet = get_google_sheet_worksheet(GOOGLE_SHEET_TAB_RESPUESTAS)
+    for row_info in exact_rows:
+        row_idx = row_info.get("row_idx")
+        aprob_col_idx = row_info.get("aprob_col_idx")
+        comentario_col_idx = row_info.get("comentario_col_idx")
+        comentario_actual = _norm(row_info.get("comentario_actual", ""))
+        if row_idx and aprob_col_idx:
+            worksheet.update_acell(
+                f"{_col_index_to_letter(aprob_col_idx)}{row_idx}",
+                "FALSE",
+                value_input_option="USER_ENTERED",
+            )
+        if row_idx and comentario_col_idx and comentario_actual == "aprobado":
+            worksheet.update_acell(
+                f"{_col_index_to_letter(comentario_col_idx)}{row_idx}",
+                "Duplicado",
+                value_input_option="USER_ENTERED",
+            )
+
 
 def diagnosticar_google_sheets():
     """
@@ -1525,6 +1631,8 @@ def enviar_aprobacion_estructurados(
     carta_pagare_link="Pendiente",
     pantallazo_aceptacion_link="Pendiente",
     pantallazo_correo_condonacion_link="Pendiente",
+    duplicate_mode="none",
+    exact_rows_previas=None,
     
 ):
     tipo_liquidacion_norm = _norm(tipo_liquidacion)
@@ -1536,6 +1644,14 @@ def enviar_aprobacion_estructurados(
         if condonacion_value == "Sí"
         else ""
     )
+
+    if duplicate_mode == "reference_duplicate":
+        es_aprobado_bool = ""
+        estado_aprobacion = ""
+    else:
+        es_aprobado_bool = "TRUE" if es_aprobado else "FALSE"
+        estado_aprobacion = "Aprobado" if es_aprobado else "Rechazado"
+    
 
     respuestas_payload = {
         "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
@@ -1549,10 +1665,12 @@ def enviar_aprobacion_estructurados(
         "pantallazo_correo_condonacion_link": correo_condonacion_link_value,
         "comision_exito_total": float(comision_exito_total or 0.0),
         "ce_inicial": float(ce_inicial or 0.0),
-        "es_aprobado_bool": "TRUE" if es_aprobado else "FALSE",
-        "estado_aprobacion": "Aprobado" if es_aprobado else "Rechazado",
+        "es_aprobado_bool": es_aprobado_bool,
+        "estado_aprobacion": estado_aprobacion,
         "prediccion": float(prediccion or 0.0),
     }
+    if duplicate_mode == "exact_duplicate":
+        _marcar_anteriores_como_duplicado(exact_rows_previas or [])
     estr_ok, estr_dest, estr_err = _append_row_to_respuestas_estr(respuestas_payload)
     return {
         "estr_ok": estr_ok,
@@ -1560,6 +1678,7 @@ def enviar_aprobacion_estructurados(
         "estr_error": estr_err,
         "es_aprobado": es_aprobado,
         "umbral_aprobacion": umbral_aprobacion,
+        "duplicate_mode": duplicate_mode,
     }
         
 
@@ -2886,6 +3005,9 @@ if enviar_aprobacion:
     carta_link_final = ""
     pantallazo_link_final = ""
     condonacion_correo_link_final = ""
+    duplicate_mode = "none"
+    duplicate_exact_rows = []
+    duplicate_key = f"{datetime.now().strftime('%Y-%m')}|{_norm(ref_input)}|{'-'.join(sorted(_ids_to_set(ids_sel)))}"
     if pred_value is None:
         st.warning("Primero debes presionar **Predecir recaudo**.")
     elif not correo_para_sheets:
@@ -2897,6 +3019,30 @@ if enviar_aprobacion:
     elif condonacion_mensualidades == "Si" and condonacion_correo_file is None:
         st.warning("Debes adjuntar el pantallazo de correo de aprobación de condonación (PDF o imagen).")
     else:
+        duplicate_check = _get_respuestas_duplicados_mes(ref_input, ids_sel)
+        if not duplicate_check["ok"]:
+            st.error(
+                "No fue posible validar duplicados contra la hoja de respuestas. "
+                f"Detalle: {duplicate_check['error']}"
+            )
+            st.stop()
+
+        duplicate_mode = duplicate_check["mode"]
+        duplicate_exact_rows = duplicate_check.get("exact_rows", [])
+        confirmed_key = str(st.session_state.get("duplicate_confirm_key", ""))
+        if duplicate_mode == "exact_duplicate" and confirmed_key != duplicate_key:
+            st.session_state.duplicate_confirm_key = duplicate_key
+            st.warning(
+                "⚠️ Esta referencia con el/los mismo(s) ID(s) ya fue subida este mes. "
+                "Si deseas reenviarla a aprobación, presiona nuevamente **Enviar AProbación estructurados**."
+            )
+            st.stop()
+        if duplicate_mode == "reference_duplicate":
+            st.warning(
+                "ℹ️ Esta referencia ya fue originada este mes con otro ID de deuda. "
+                "Se enviará sin check de aprobación estructurados y sin comentario. "
+                "Por favor contacta al equipo de estructurados."
+            )
         is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(carta_pagare_file, ref_input)
         if not is_valid_pdf:
             st.warning(pdf_validation_message)
@@ -2963,10 +3109,20 @@ if enviar_aprobacion:
             carta_pagare_link=carta_link_final,
             pantallazo_aceptacion_link=pantallazo_link_final,
             pantallazo_correo_condonacion_link=condonacion_correo_link_final,
+            duplicate_mode=duplicate_mode,
+            exact_rows_previas=duplicate_exact_rows,
         )
         if envio_result["estr_ok"]:
+            st.session_state.duplicate_confirm_key = ""
             estado_aprob = "✅ Aprobado" if envio_result["es_aprobado"] else "⛔ No aprobado"
             st.success(f"Envío exitoso a `{envio_result['estr_destination']}`.")
+            if envio_result.get("duplicate_mode") == "exact_duplicate":
+                st.info(
+                    "Se detectó duplicado exacto: se desmarcó la aprobación previa "
+                    "y el comentario anterior aprobado quedó como 'Duplicado'."
+                )
+            elif envio_result.get("duplicate_mode") == "reference_duplicate":
+                st.info("Registro enviado sin aprobación estructurados ni comentario por referencia repetida del mes.")
             st.caption(
                 f"Criterio aplicado ({tipo_liquidacion_val or 'No Tradicional'}): "
                 f"predicción {pred_value:.2f} vs umbral {envio_result['umbral_aprobacion']:.2f} → {estado_aprob}"
