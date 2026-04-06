@@ -1225,6 +1225,11 @@ def _append_row_to_respuestas_estr(row_data: dict):
             elif "calculadora" in h:
                 normalized[idx] = payload.get("prediccion", "")
 
+        # Regla de negocio: la última columna debe registrar la predicción
+        # usada para enviar a aprobación (control anti-manipulación).
+        if normalized:
+            normalized[-1] = payload.get("prediccion", "")
+
         # Evita que el registro se vaya al final de filas "ocupadas" por fórmulas
         # (por ejemplo, columnas con FALSE/checkbox). Lo insertamos justo después
         # de la última fila donde A, B y C están diligenciadas.
@@ -1875,7 +1880,111 @@ def _has_qr_signal_in_last_page(last_page_text: str) -> bool:
     return any(signal in text_norm for signal in qr_signals)
 
 
-def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str) -> tuple[bool, str]:
+def _extract_flow_rows_from_text(first_page_text: str) -> list[dict]:
+    rows: list[dict] = []
+    if not first_page_text:
+        return rows
+
+    lines = [re.sub(r"\s+", " ", str(line or "")).strip() for line in str(first_page_text).splitlines()]
+    lines = [line for line in lines if line]
+    date_regex = re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b")
+    tabular_row_regex = re.compile(r"^\s*(\d{1,2}\s+)?\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
+    amount_regex = re.compile(r"(\$?\s*[\d\.,]{4,})")
+
+    for line in lines:
+        line_norm = _norm(line)
+        if "pago" in line_norm and "entidad financiera" in line_norm:
+            concept = "pago entidad financiera"
+        elif "comision" in line_norm and "resuelve" in line_norm:
+            concept = "comision resuelve"
+        else:
+            continue
+
+        date_match = date_regex.search(line)
+        if not date_match:
+            continue
+        if not tabular_row_regex.search(line):
+            # Evita contar texto narrativo de la carta; aquí solo queremos filas de tabla.
+            continue
+        amount_candidates = amount_regex.findall(line)
+        amount_value = None
+        for candidate in reversed(amount_candidates):
+            parsed = _parse_amount_input(candidate)
+            if parsed > 0:
+                amount_value = round(float(parsed), 2)
+                break
+        rows.append(
+            {
+                "concept": concept,
+                "date": date_match.group(1) if date_match else "",
+                "amount": amount_value,
+            }
+        )
+    return rows
+
+
+def _build_expected_flow_rows(expected_flow_df: pd.DataFrame | None) -> list[dict]:
+    if expected_flow_df is None or expected_flow_df.empty:
+        return []
+    required_cols = {"Fecha", "Cantidad", "Concepto"}
+    if not required_cols.issubset(set(expected_flow_df.columns)):
+        return []
+
+    rows: list[dict] = []
+    for _, row in expected_flow_df[["Fecha", "Cantidad", "Concepto"]].iterrows():
+        fecha = pd.to_datetime(row["Fecha"], errors="coerce")
+        amount = round(float(pd.to_numeric(row["Cantidad"], errors="coerce") or 0.0), 2)
+        concept_norm = _norm(row["Concepto"])
+        if "entidad financiera" in concept_norm:
+            concept_std = "pago entidad financiera"
+        elif "comision" in concept_norm and "resuelve" in concept_norm:
+            concept_std = "comision resuelve"
+        else:
+            concept_std = concept_norm
+        rows.append(
+            {
+                "concept": concept_std,
+                "date": fecha.date().strftime("%d/%m/%Y") if not pd.isna(fecha) else "",
+                "amount": amount,
+            }
+        )
+    return rows
+
+
+def _validate_flow_matches_pdf(first_page_text: str, expected_flow_df: pd.DataFrame | None) -> tuple[bool, str]:
+    expected_rows = _build_expected_flow_rows(expected_flow_df)
+    if not expected_rows:
+        return True, ""
+
+    pdf_rows = _extract_flow_rows_from_text(first_page_text)
+    if not pdf_rows:
+        return False, "El flujo de la tabla no coincide entre calculadora y PDF."
+
+    if len(pdf_rows) != len(expected_rows):
+        return False, "El flujo de la tabla no coincide entre calculadora y PDF."
+
+    expected_concepts = [r["concept"] for r in expected_rows]
+    pdf_concepts = [r["concept"] for r in pdf_rows]
+    if expected_concepts != pdf_concepts:
+        return False, "El flujo de la tabla no coincide entre calculadora y PDF."
+
+    comparable_dates = all(r["date"] for r in expected_rows) and all(r["date"] for r in pdf_rows)
+    if comparable_dates:
+        expected_dates_norm = [_norm(d.replace("-", "/")) for d in [r["date"] for r in expected_rows]]
+        pdf_dates_norm = [_norm(d.replace("-", "/")) for d in [r["date"] for r in pdf_rows]]
+        if expected_dates_norm != pdf_dates_norm:
+            return False, "El flujo de la tabla no coincide entre calculadora y PDF."
+
+    comparable_amounts = all(r["amount"] is not None for r in expected_rows) and all(r["amount"] is not None for r in pdf_rows)
+    if comparable_amounts:
+        for expected_row, pdf_row in zip(expected_rows, pdf_rows):
+            if abs(float(expected_row["amount"]) - float(pdf_row["amount"])) > 1.0:
+                return False, "El flujo de la tabla no coincide entre calculadora y PDF."
+
+    return True, ""
+
+
+def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str, expected_flow_df: pd.DataFrame | None = None) -> tuple[bool, str]:
     if uploaded_file is None:
         return False, "Debes adjuntar Carta/Pagaré (solo PDF)."
     try:
@@ -1896,6 +2005,9 @@ def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str) -> tuple[
         return False, "Subió el documento equivocado, la referencia no concuerda."
     if not has_qr:
         return False, "El documento no está firmado."
+    flow_matches, flow_message = _validate_flow_matches_pdf(first_page_text, expected_flow_df)
+    if not flow_matches:
+        return False, flow_message
     return True, ""
 
 def _complete_drive_oauth_with_code(code: str):
@@ -3020,6 +3132,11 @@ if enviar_aprobacion:
     elif condonacion_mensualidades == "Si" and condonacion_correo_file is None:
         st.warning("Debes adjuntar el pantallazo de correo de aprobación de condonación (PDF o imagen).")
     else:
+        pred_value_envio = round(float(pred_value or 0.0), 4)
+        st.info(
+            f"Predicción de recaudo usada para este envío: **{pred_value_envio:.4f}** "
+            "(este mismo valor se guarda en la última columna)."
+        )
         duplicate_check = _get_respuestas_duplicados_mes(ref_input, ids_sel)
         if not duplicate_check["ok"]:
             st.error(
@@ -3045,7 +3162,11 @@ if enviar_aprobacion:
                 "Por favor contacta al equipo de estructurados."
             )
             
-        is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(carta_pagare_file, ref_input)
+        is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(
+            carta_pagare_file,
+            ref_input,
+            cronograma_visible,
+        )
         if not is_valid_pdf:
             st.warning(pdf_validation_message)
             st.stop()
@@ -3106,7 +3227,7 @@ if enviar_aprobacion:
             condonacion_mensualidades=condonacion_mensualidades,
             comision_exito_total=feature_vals.get("AMOUNT_TOTAL"),
             ce_inicial=ce_inicial,
-            prediccion=pred_value,
+            prediccion=pred_value_envio,
             tipo_liquidacion=tipo_liquidacion_val,
             carta_pagare_link=carta_link_final,
             pantallazo_aceptacion_link=pantallazo_link_final,
@@ -3127,7 +3248,7 @@ if enviar_aprobacion:
                 st.info("Registro enviado sin aprobación estructurados ni comentario por referencia repetida del mes.")
             st.caption(
                 f"Criterio aplicado ({tipo_liquidacion_val or 'No Tradicional'}): "
-                f"predicción {pred_value:.2f} vs umbral {envio_result['umbral_aprobacion']:.2f} → {estado_aprob}"
+                f"predicción {pred_value_envio:.2f} vs umbral {envio_result['umbral_aprobacion']:.2f} → {estado_aprob}"
             )
         else:
             st.error(
