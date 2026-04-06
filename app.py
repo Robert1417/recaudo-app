@@ -1887,39 +1887,29 @@ def _extract_flow_rows_from_text(first_page_text: str) -> list[dict]:
 
     lines = [re.sub(r"\s+", " ", str(line or "")).strip() for line in str(first_page_text).splitlines()]
     lines = [line for line in lines if line]
-    date_regex = re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b")
-    tabular_row_regex = re.compile(r"^\s*(\d{1,2}\s+)?\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
-    amount_regex = re.compile(r"(\$?\s*[\d\.,]{4,})")
+    row_regex = re.compile(r"^\s*(\d{1,3})\s+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
+    amount_with_cop_regex = re.compile(r"(\$?\s*[\d\.,]+)\s*COP\b", flags=re.IGNORECASE)
+    generic_amount_regex = re.compile(r"(\$?\s*[\d\.,]{4,})")
 
     for line in lines:
-        line_norm = _norm(line)
-        if "pago" in line_norm and "entidad financiera" in line_norm:
-            concept = "pago entidad financiera"
-        elif "comision" in line_norm and "resuelve" in line_norm:
-            concept = "comision resuelve"
-        else:
+        row_match = row_regex.search(line)
+        if not row_match:
             continue
+        n_value = int(row_match.group(1))
 
-        date_match = date_regex.search(line)
-        if not date_match:
-            continue
-        if not tabular_row_regex.search(line):
-            # Evita contar texto narrativo de la carta; aquí solo queremos filas de tabla.
-            continue
-        amount_candidates = amount_regex.findall(line)
-        amount_value = None
-        for candidate in reversed(amount_candidates):
+        amount_match = amount_with_cop_regex.search(line)
+        amount_candidates = [amount_match.group(1)] if amount_match else generic_amount_regex.findall(line)
+        parsed_amount = None
+        for candidate in amount_candidates:
             parsed = _parse_amount_input(candidate)
             if parsed > 0:
-                amount_value = round(float(parsed), 2)
+                parsed_amount = round(float(parsed), 2)
                 break
-        rows.append(
-            {
-                "concept": concept,
-                "date": date_match.group(1) if date_match else "",
-                "amount": amount_value,
-            }
-        )
+
+        if parsed_amount is None:
+            continue
+
+        rows.append({"n": n_value, "amount": parsed_amount})
     return rows
 
 
@@ -1931,23 +1921,9 @@ def _build_expected_flow_rows(expected_flow_df: pd.DataFrame | None) -> list[dic
         return []
 
     rows: list[dict] = []
-    for _, row in expected_flow_df[["Fecha", "Cantidad", "Concepto"]].iterrows():
-        fecha = pd.to_datetime(row["Fecha"], errors="coerce")
+    for idx, (_, row) in enumerate(expected_flow_df[["Cantidad"]].iterrows(), start=1):
         amount = round(float(pd.to_numeric(row["Cantidad"], errors="coerce") or 0.0), 2)
-        concept_norm = _norm(row["Concepto"])
-        if "entidad financiera" in concept_norm:
-            concept_std = "pago entidad financiera"
-        elif "comision" in concept_norm and "resuelve" in concept_norm:
-            concept_std = "comision resuelve"
-        else:
-            concept_std = concept_norm
-        rows.append(
-            {
-                "concept": concept_std,
-                "date": fecha.date().strftime("%d/%m/%Y") if not pd.isna(fecha) else "",
-                "amount": amount,
-            }
-        )
+        rows.append({"n": int(idx), "amount": amount})
     return rows
 
 
@@ -1958,28 +1934,21 @@ def _validate_flow_matches_pdf(first_page_text: str, expected_flow_df: pd.DataFr
 
     pdf_rows = _extract_flow_rows_from_text(first_page_text)
     if not pdf_rows:
-        return False, "El flujo de la tabla no coincide entre calculadora y PDF."
+        return False, "La tabla de flujo del PDF no se pudo leer correctamente."
 
-    if len(pdf_rows) != len(expected_rows):
-        return False, "El flujo de la tabla no coincide entre calculadora y PDF."
+    expected_last_n = max(int(r["n"]) for r in expected_rows) if expected_rows else 0
+    pdf_last_n = max(int(r["n"]) for r in pdf_rows) if pdf_rows else 0
+    if expected_last_n != pdf_last_n:
+        return False, "La columna N de la tabla no coincide entre calculadora y PDF."
 
-    expected_concepts = [r["concept"] for r in expected_rows]
-    pdf_concepts = [r["concept"] for r in pdf_rows]
-    if expected_concepts != pdf_concepts:
-        return False, "El flujo de la tabla no coincide entre calculadora y PDF."
+    expected_amounts = [float(r["amount"]) for r in expected_rows]
+    pdf_amounts = [float(r["amount"]) for r in sorted(pdf_rows, key=lambda x: int(x["n"]))]
+    if len(expected_amounts) != len(pdf_amounts):
+        return False, "La columna Cantidad de la tabla no coincide entre calculadora y PDF."
 
-    comparable_dates = all(r["date"] for r in expected_rows) and all(r["date"] for r in pdf_rows)
-    if comparable_dates:
-        expected_dates_norm = [_norm(d.replace("-", "/")) for d in [r["date"] for r in expected_rows]]
-        pdf_dates_norm = [_norm(d.replace("-", "/")) for d in [r["date"] for r in pdf_rows]]
-        if expected_dates_norm != pdf_dates_norm:
-            return False, "El flujo de la tabla no coincide entre calculadora y PDF."
-
-    comparable_amounts = all(r["amount"] is not None for r in expected_rows) and all(r["amount"] is not None for r in pdf_rows)
-    if comparable_amounts:
-        for expected_row, pdf_row in zip(expected_rows, pdf_rows):
-            if abs(float(expected_row["amount"]) - float(pdf_row["amount"])) > 1.0:
-                return False, "El flujo de la tabla no coincide entre calculadora y PDF."
+    for expected_amount, pdf_amount in zip(expected_amounts, pdf_amounts):
+        if abs(expected_amount - pdf_amount) > 1.0:
+            return False, "La columna Cantidad de la tabla no coincide entre calculadora y PDF."
 
     return True, ""
 
