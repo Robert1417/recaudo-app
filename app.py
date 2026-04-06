@@ -1941,14 +1941,37 @@ def _validate_flow_matches_pdf(first_page_text: str, expected_flow_df: pd.DataFr
     if expected_last_n != pdf_last_n:
         return False, "La columna N de la tabla no coincide entre calculadora y PDF."
 
-    expected_amounts = [float(r["amount"]) for r in expected_rows]
-    pdf_amounts = [float(r["amount"]) for r in sorted(pdf_rows, key=lambda x: int(x["n"]))]
-    if len(expected_amounts) != len(pdf_amounts):
+    expected_by_n = {int(r["n"]): float(r["amount"]) for r in expected_rows}
+    pdf_by_n: dict[int, float] = {}
+    for row in sorted(pdf_rows, key=lambda x: int(x["n"])):
+        n_val = int(row["n"])
+        # Tomamos la primera ocurrencia por N (tabla principal) y evitamos
+        # que otras tablas de la página sobrescriban el valor.
+        if n_val not in pdf_by_n:
+            pdf_by_n[n_val] = float(row["amount"])
+
+    if len(expected_by_n) != len(pdf_by_n):
         return False, "La columna Cantidad de la tabla no coincide entre calculadora y PDF."
 
-    for expected_amount, pdf_amount in zip(expected_amounts, pdf_amounts):
-        if abs(expected_amount - pdf_amount) > 1.0:
-            return False, "La columna Cantidad de la tabla no coincide entre calculadora y PDF."
+    diferencias = []
+    for n_val in sorted(expected_by_n.keys()):
+        expected_amount = expected_by_n.get(n_val)
+        pdf_amount = pdf_by_n.get(n_val)
+        if pdf_amount is None:
+            diferencias.append((n_val, expected_amount, None))
+            continue
+        if abs(float(expected_amount) - float(pdf_amount)) > 1.0:
+            diferencias.append((n_val, expected_amount, pdf_amount))
+
+    if diferencias:
+        n_val, expected_amount, pdf_amount = diferencias[0]
+        if pdf_amount is None:
+            return False, f"La columna Cantidad no coincide: falta la fila N° {n_val} en la tabla del PDF."
+        return (
+            False,
+            "La columna Cantidad no coincide en la fila "
+            f"N° {n_val} (calculadora: {_format_currency_cop(expected_amount)} vs PDF: {_format_currency_cop(pdf_amount)})."
+        )
 
     return True, ""
 
