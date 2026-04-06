@@ -1888,8 +1888,8 @@ def _extract_flow_rows_from_text(first_page_text: str) -> list[dict]:
     lines = [re.sub(r"\s+", " ", str(line or "")).strip() for line in str(first_page_text).splitlines()]
     lines = [line for line in lines if line]
     row_regex = re.compile(r"^\s*(\d{1,3})\s+\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
-    amount_with_cop_regex = re.compile(r"(\$?\s*[\d\.,]+)\s*COP\b", flags=re.IGNORECASE)
-    generic_amount_regex = re.compile(r"(\$?\s*[\d\.,]{4,})")
+    amount_with_cop_regex = re.compile(r"(\$?\s*\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?)\s*COP", flags=re.IGNORECASE)
+    grouped_amount_regex = re.compile(r"(\$?\s*\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?)")
 
     for line in lines:
         row_match = row_regex.search(line)
@@ -1897,8 +1897,9 @@ def _extract_flow_rows_from_text(first_page_text: str) -> list[dict]:
             continue
         n_value = int(row_match.group(1))
 
-        amount_match = amount_with_cop_regex.search(line)
-        amount_candidates = [amount_match.group(1)] if amount_match else generic_amount_regex.findall(line)
+        line_after_date = line[row_match.end():]
+        amount_match = amount_with_cop_regex.search(line_after_date)
+        amount_candidates = [amount_match.group(1)] if amount_match else grouped_amount_regex.findall(line_after_date)
         parsed_amount = None
         for candidate in amount_candidates:
             parsed = _parse_amount_input(candidate)
@@ -1964,13 +1965,18 @@ def _validate_flow_matches_pdf(first_page_text: str, expected_flow_df: pd.DataFr
             diferencias.append((n_val, expected_amount, pdf_amount))
 
     if diferencias:
+        def _fmt_cop_plain(value: float | int) -> str:
+            base = f"{float(value):,.2f}"
+            base = base.replace(",", "X").replace(".", ",").replace("X", ".")
+            return f"{base} COP"
+
         n_val, expected_amount, pdf_amount = diferencias[0]
         if pdf_amount is None:
             return False, f"La columna Cantidad no coincide: falta la fila N° {n_val} en la tabla del PDF."
         return (
             False,
             "La columna Cantidad no coincide en la fila "
-            f"N° {n_val} (calculadora: {_format_currency_cop(expected_amount)} vs PDF: {_format_currency_cop(pdf_amount)})."
+            f"N° {n_val} (calculadora: {_fmt_cop_plain(expected_amount)} vs PDF: {_fmt_cop_plain(pdf_amount)})."
         )
 
     return True, ""
