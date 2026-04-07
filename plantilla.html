@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+@page {
+    size: A4;
+    margin: 2cm;
+}
+
+body {
+font-family: "Times New Roman", serif;
+font-size: 12px;
+line-height: 1.4;
+}
+
+h2 {
+text-align: left;
+}
+
+p {
+text-align: justify;
+}
+
+table {
+width: 100%;
+border-collapse: collapse;
+margin-top: 10px;
+}
+
+th {
+background-color: #0b2d5c;
+color: white;
+border: 1px solid black;
+padding: 5px;
+font-size: 12px;
+}
+
+td {
+border: 1px solid black;
+padding: 5px;
+font-size: 11px;
+} </style>
+
+</head>
+
+<body>
+
+<p>Colombia, Bogotá, a {{dia_firma}} de {{mes_firma}} de {{anio_firma}}</p>
+
+<h2>Liquidación de Deuda Ref. No. {{referencia}}</h2>
+
+<p>
+1. Por medio de la presente autorizo a GO BRAVO COLOMBIA S.A.S...
+</p>
+
+<p>
+2. Solicito a {{vehiculo}} que se realicen las transferencias abajo descritas...
+</p>
+
+<table>
+<thead>
+<tr>
+<th>N°</th>
+<th>Fecha</th>
+<th>Cantidad</th>
+<th>Concepto</th>
+</tr>
+</thead>
+
+<tbody>
+{% for fila in tabla %}
+<tr>
+<td>{{ loop.index }}</td>
+<td>{{ fila.fecha }}</td>
+<td>{{ fila.valor }}</td>
+<td>{{ fila.concepto }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<p>
+3. Me comprometo a realizar los apartados mensuales descritos...
+</p>
+
+<p>
+4. Comprendo que si no sigo las instrucciones...
+</p>
+
+<p>
+5. Una vez completado el pago de la obligación {{numero_producto}}...
+</p>
+
+</body>
+</html>
