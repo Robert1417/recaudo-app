@@ -15,6 +15,7 @@ from datetime import datetime
 import os
 import html as html_lib
 from io import BytesIO
+from zipfile import ZipFile
 import xml.etree.ElementTree as ET
 import zlib
 import subprocess
@@ -183,28 +184,6 @@ def _sum_rounded_parts(values, digits=2):
     if rounded:
         rounded[-1] = round(sum(values) - sum(rounded[:-1]), digits)
     return rounded
-
-def _split_total_by_weights(total: float, weights: list[float], digits: int = 2) -> list[float]:
-    total = max(float(total or 0.0), 0.0)
-    if not weights:
-        return []
-    clean = [max(float(w or 0.0), 0.0) for w in weights]
-    w_sum = sum(clean)
-    if w_sum <= 0:
-        clean = [1.0] * len(weights)
-        w_sum = float(len(weights))
-    raw = [total * (w / w_sum) for w in clean]
-    return _sum_rounded_parts(raw, digits=digits)
-
-
-def _split_integer_equitable(total: int, n_parts: int) -> list[int]:
-    total = max(int(total or 0), 0)
-    n_parts = max(int(n_parts or 0), 0)
-    if n_parts == 0:
-        return []
-    base = total // n_parts
-    rem = total % n_parts
-    return [base + (1 if i < rem else 0) for i in range(n_parts)]
 
 
 def _last_day_of_month(base_date: date, months_ahead: int) -> date:
@@ -760,73 +739,6 @@ def build_recaudo_docx(
     output.seek(0)
     return output.getvalue()
 
-
-def _element_text(elem) -> str:
-    texts = []
-    for node in elem.iter():
-        if node.tag.endswith("}t") and node.text:
-            texts.append(str(node.text))
-    return "".join(texts).strip()
-
-
-def _build_page_break_paragraph():
-    p = OxmlElement("w:p")
-    r = OxmlElement("w:r")
-    br = OxmlElement("w:br")
-    br.set(qn("w:type"), "page")
-    r.append(br)
-    p.append(r)
-    return p
-
-
-def _extract_first_liquidacion_block_elements(document: Document) -> list:
-    body_children = list(document.element.body.iterchildren())
-    first_table_idx = next((i for i, child in enumerate(body_children) if child.tag.endswith("}tbl")), None)
-    if first_table_idx is None:
-        return []
-    start_idx = next(
-        (
-            i for i, child in enumerate(body_children[: first_table_idx + 1])
-            if child.tag.endswith("}p") and ("Liquidación de Deuda" in _element_text(child) or "Colombia, Bogotá" in _element_text(child))
-        ),
-        0,
-    )
-    end_idx = next(
-        (
-            i for i, child in enumerate(body_children[first_table_idx + 1 :], start=first_table_idx + 1)
-            if child.tag.endswith("}p") and _element_text(child).startswith("Ref No")
-        ),
-        first_table_idx,
-    )
-    return [deepcopy(child) for child in body_children[start_idx : end_idx + 1]]
-
-
-def insert_extra_liquidacion_blocks(base_docx: bytes, extra_blocks: list[list]) -> bytes:
-    document = Document(BytesIO(base_docx))
-    body = document.element.body
-    children = list(body.iterchildren())
-    first_table_idx = next((i for i, child in enumerate(children) if child.tag.endswith("}tbl")), None)
-    if first_table_idx is None:
-        return base_docx
-    insert_idx = next(
-        (
-            i for i, child in enumerate(children[first_table_idx + 1 :], start=first_table_idx + 1)
-            if child.tag.endswith("}p") and _element_text(child).startswith("Ref No")
-        ),
-        first_table_idx,
-    ) + 1
-
-    for block in extra_blocks:
-        block_nodes = [_build_page_break_paragraph()] + [deepcopy(node) for node in block]
-        for node in block_nodes:
-            body.insert(insert_idx, node)
-            insert_idx += 1
-
-    output = BytesIO()
-    document.save(output)
-    output.seek(0)
-    return output.getvalue()
-
 def convert_docx_bytes_to_pdf_bytes(docx_bytes: bytes) -> bytes:
     """
     Convierte un DOCX a PDF usando LibreOffice en modo headless.
@@ -964,7 +876,6 @@ def aplicar_overrides_cronograma(
     dia_pago_comision: int | None,
     primer_pago_banco_input: float,
     comision_inicial_input: float,
-    lock_initial_rows: bool = True,
 ):
     if cronograma_df.empty:
         return cronograma_df.copy(), []
@@ -979,7 +890,7 @@ def aplicar_overrides_cronograma(
         if not matches:
             continue
         idx = matches[0]
-        if lock_initial_rows and int(df.at[idx, "months_ahead"]) == 0:
+        if int(df.at[idx, "months_ahead"]) == 0:
             continue
         if "Fecha" in cambios and cambios["Fecha"]:
             try:
@@ -994,13 +905,12 @@ def aplicar_overrides_cronograma(
             except Exception:
                 advertencias.append(f"No pude interpretar el monto editado de {row_key}.")
 
-    if lock_initial_rows:
-        for tipo, input_value in [("banco", primer_pago_banco_input), ("comision", comision_inicial_input)]:
-            mask = (df["tipo"] == tipo) & (df["months_ahead"] == 0)
-            if mask.any():
-                idx = df.index[mask][0]
-                df.at[idx, "Cantidad"] = max(float(input_value or 0.0), 0.0)
-                df.at[idx, "cantidad_editada"] = True
+    for tipo, input_value in [("banco", primer_pago_banco_input), ("comision", comision_inicial_input)]:
+        mask = (df["tipo"] == tipo) & (df["months_ahead"] == 0)
+        if mask.any():
+            idx = df.index[mask][0]
+            df.at[idx, "Cantidad"] = max(float(input_value or 0.0), 0.0)
+            df.at[idx, "cantidad_editada"] = True
 
     partes = []
     for tipo, group in df.groupby("tipo", sort=False):
@@ -2347,18 +2257,6 @@ if not ids_sel:
     st.info("Selecciona al menos un Id deuda para continuar.")
     st.stop()
 
-if "modo_sin_portafolio" not in st.session_state:
-    st.session_state.modo_sin_portafolio = False
-
-if len(ids_sel) <= 1:
-    st.session_state.modo_sin_portafolio = False
-else:
-    st.toggle(
-        "Liquidar sin portafolio",
-        key="modo_sin_portafolio",
-        help="Activa un flujo separado por deuda (una tabla por Id deuda).",
-    )
-
 sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 col_tipo_liquidacion = _find_col(sel, ["Tipo de Liquidacion", "Tipo Liquidacion", "Tipo de liquidación"]) or _find_col_contains(sel, ["tipo", "liquid"])
 tipo_liquidacion_val = _join_unique_values(sel[col_tipo_liquidacion].tolist()) if col_tipo_liquidacion else ""
@@ -2634,279 +2532,86 @@ cronograma_df, cronograma_meta = construir_cronograma_pagos(
 )
 
 totales_por_tipo = {"banco": float(pago_banco), "comision": float(comision_exito)}
-cronogramas_individuales: dict[str, pd.DataFrame] = {}
-expected_flow_for_pdf_validation = None
-if st.session_state.get("modo_sin_portafolio", False) and len(ids_sel) > 1:
-    st.info("Modo sin portafolio activo: se crea un flujo independiente por cada Id deuda seleccionado.")
-    per_debt_key = f"sin_portafolio_config_{ref_input}"
-    deuda_detalle = (
-        sel[[col_id, col_deu]]
-        .rename(columns={col_id: "Id deuda", col_deu: "Deuda Resuelve"})
-        .copy()
+cronograma_overrides = st.session_state.get("cronograma_overrides", {})
+cronograma_editor_state = st.session_state.get("cronograma_editor", {})
+
+cronograma_base_editado, _ = aplicar_overrides_cronograma(
+    cronograma_df=cronograma_df,
+    overrides_map=cronograma_overrides,
+    totales_por_tipo=totales_por_tipo,
+    fecha_inicial=date.today(),
+    dia_pago_banco=dia_pago_banco,
+    dia_pago_comision=dia_pago_comision,
+    primer_pago_banco_input=primer_pago_banco,
+    comision_inicial_input=ce_inicial,
+)
+
+cronograma_base_visible = cronograma_base_editado[cronograma_base_editado["Cantidad"] > 0.005].reset_index(drop=True)
+cronograma_locked_rows_changed = False
+for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {}) or {}).items():
+    try:
+        row_position = int(row_position_str)
+    except (TypeError, ValueError):
+        continue
+    if row_position < 0 or row_position >= len(cronograma_base_visible):
+        continue
+    row = cronograma_base_visible.iloc[row_position]
+    if int(row["months_ahead"]) == 0:
+        cronograma_locked_rows_changed = True
+        continue
+    row_key = str(row["row_key"])
+    existing = cronograma_overrides.get(row_key, {})
+    existing.update(cambios)
+    cronograma_overrides[row_key] = existing
+st.session_state["cronograma_overrides"] = cronograma_overrides
+
+if cronograma_locked_rows_changed:
+    st.session_state.pop("cronograma_editor", None)
+    st.info("Las filas 1 y 2 están bloqueadas y no se pueden editar.")
+    st.rerun()
+
+cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
+    cronograma_df=cronograma_df,
+    overrides_map=cronograma_overrides,
+    totales_por_tipo=totales_por_tipo,
+    fecha_inicial=date.today(),
+    dia_pago_banco=dia_pago_banco,
+    dia_pago_comision=dia_pago_comision,
+    primer_pago_banco_input=primer_pago_banco,
+    comision_inicial_input=ce_inicial,
+)
+
+for advertencia in advertencias_cronograma:
+    st.warning(advertencia)
+
+cronograma_visible = cronograma_editado[cronograma_editado["Cantidad"] > 0.005].copy()
+if not cronograma_visible.empty:
+    cronograma_view = cronograma_visible[["Fecha", "Cantidad", "Concepto"]].copy()
+    cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
+    cronograma_view["Cantidad"] = (
+        pd.to_numeric(cronograma_view["Cantidad"], errors="coerce")
+        .fillna(0.0)
+        .round(2)
+        .map(_format_currency0)
     )
-    deuda_detalle["Id deuda"] = deuda_detalle["Id deuda"].astype(str)
-    deuda_detalle["Deuda Resuelve"] = pd.to_numeric(deuda_detalle["Deuda Resuelve"], errors="coerce").fillna(0.0)
-    deuda_detalle = deuda_detalle.sort_values(["Deuda Resuelve", "Id deuda"], ascending=[False, True]).reset_index(drop=True)
-    pesos = deuda_detalle["Deuda Resuelve"].tolist()
-    pago_banco_sugerido = _split_total_by_weights(pago_banco, pesos, digits=2)
-    ce_base_mode = float(st.session_state.get("ce_base", 0.0) or 0.0)
-    config_rows: list[dict] = []
-    st.caption("Modo sin portafolio: cada deuda se configura y liquida por separado (como flujo normal), luego el plan se consolida.")
-    for i, deuda_row in deuda_detalle.iterrows():
-        deuda_id = str(deuda_row["Id deuda"])
-        deuda_resuelve_i = float(deuda_row["Deuda Resuelve"] or 0.0)
-        pago_key = f"sin_port_pago_total_{ref_input}_{deuda_id}"
-        ce_key = f"sin_port_ce_inicial_{ref_input}_{deuda_id}"
-        n_pab_key = f"sin_port_n_pab_{ref_input}_{deuda_id}"
-        plazo_key = f"sin_port_plazo_{ref_input}_{deuda_id}"
-        if pago_key not in st.session_state:
-            st.session_state[pago_key] = float(pago_banco_sugerido[i])
-        pago_i = max(float(_parse_amount_input(st.session_state.get(pago_key, 0.0))), 0.0)
-        comision_i = max((deuda_resuelve_i - pago_i) * 1.19 * ce_base_mode, 0.0)
-        if ce_key not in st.session_state:
-            st.session_state[ce_key] = float(min(ce_inicial, comision_i))
-        ce_i = min(max(float(_parse_amount_input(st.session_state.get(ce_key, 0.0))), 0.0), comision_i)
-        if n_pab_key not in st.session_state:
-            st.session_state[n_pab_key] = int(max(1, n_pab))
-        if plazo_key not in st.session_state:
-            st.session_state[plazo_key] = int(max(1, plazo))
-        r1, r2, r3, r4, r5, r6 = st.columns(6)
-        with r1:
-            st.text_input(f"Id deuda {deuda_id}", value=deuda_id, disabled=True, key=f"sin_port_id_label_{ref_input}_{deuda_id}")
-        with r2:
-            st.number_input(f"PAGO BANCO · {deuda_id}", min_value=0.0, value=pago_i, step=0.0, format="%.0f", key=pago_key)
-        with r3:
-            st.number_input(f"Comisión Éxito · {deuda_id}", min_value=0.0, value=float(comision_i), step=0.0, format="%.0f", disabled=True, key=f"sin_port_ce_total_{ref_input}_{deuda_id}")
-        with r4:
-            st.number_input(f"CE Inicial · {deuda_id}", min_value=0.0, max_value=float(comision_i), value=ce_i, step=0.0, format="%.0f", key=ce_key)
-        with r5:
-            n_pab_i = int(st.number_input(f"N PaB · {deuda_id}", min_value=1, step=1, value=int(st.session_state.get(n_pab_key, max(1, n_pab))), key=n_pab_key))
-        with r6:
-            plazo_i = int(st.number_input(f"PLAZO · {deuda_id}", min_value=1, step=1, value=int(st.session_state.get(plazo_key, max(1, plazo))), key=plazo_key))
-        config_rows.append({
-            "Id deuda": deuda_id,
-            "Deuda Resuelve": deuda_resuelve_i,
-            "Pago Banco Total": pago_i,
-            "Comisión Total": comision_i,
-            "CE Inicial": ce_i,
-            "N PaB": n_pab_i,
-            "PLAZO": plazo_i,
-        })
-
-    default_conf = pd.DataFrame(config_rows)
-    comision_exito = float(default_conf["Comisión Total"].sum()) if not default_conf.empty else 0.0
-    st.caption(f"Comisión de éxito total (suma de deudas): {_format_currency0(comision_exito)}")
-    ce_default_vals = default_conf["CE Inicial"].tolist() if not default_conf.empty else []
-    if not default_conf.empty:
-        plazo = int(default_conf["PLAZO"].max())
-        pct_vals = []
-        pct_weights = []
-        cuota_vals = []
-        for _, cfg in default_conf.iterrows():
-            com_i = float(cfg["Comisión Total"])
-            ce_i = float(cfg["CE Inicial"])
-            n_i = int(max(1, cfg["N PaB"]))
-            plazo_i = int(max(1, cfg["PLAZO"]))
-            pago_i = float(cfg["Pago Banco Total"])
-            primer_banco_i_kpi = pago_i if n_i == 1 else (pago_i / n_i if n_i > 0 else 0.0)
-            resto_i = max(0.0, pago_i - primer_banco_i_kpi)
-            pct_i = (ce_i / com_i) if com_i > 0 else np.nan
-            if not np.isnan(pct_i):
-                pct_vals.append(pct_i)
-                pct_weights.append(max(com_i, 0.0))
-            if (plazo_i - 1) > 0 and apartado_mensual > 0:
-                numerador_i = (com_i + resto_i - ce_i + comision_mensual)
-                cuota_vals.append((numerador_i / (plazo_i - 1)) / apartado_mensual)
-        pct_primer_pago = float(np.average(pct_vals, weights=pct_weights)) if pct_vals and sum(pct_weights) > 0 else np.nan
-        cuota_apartado = float(np.nanmean(cuota_vals)) if cuota_vals else np.nan
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.number_input("Comisión éxito total (sin portafolio)", value=float(comision_exito), step=0.0, format="%.0f", disabled=True)
-        with k2:
-            st.number_input("PLAZO máximo (sin portafolio)", value=float(plazo), step=1.0, format="%.0f", disabled=True)
-        with k3:
-            st.text_input("% Primer Pago ponderado", value=("—" if np.isnan(pct_primer_pago) else f"{pct_primer_pago:.2f}"), disabled=True)
-        with k4:
-            st.text_input("Cuota/Apartado promedio", value=("—" if np.isnan(cuota_apartado) else f"{cuota_apartado:.4f}"), disabled=True)
-
-    cronos = []
-    for i, row in default_conf.iterrows():
-        deuda_id = str(row["Id deuda"])
-        pago_total_i = max(float(row["Pago Banco Total"] or 0.0), 0.0)
-        comision_total_i = max(float(row["Comisión Total"] or 0.0), 0.0)
-        ce_inicial_i = min(max(float(row["CE Inicial"] or 0.0), 0.0), comision_total_i)
-        primer_banco_key = f"sin_port_primer_banco_{ref_input}_{deuda_id}"
-        if primer_banco_key not in st.session_state:
-            st.session_state[primer_banco_key] = float(min(primer_pago_banco * (pago_total_i / float(max(pago_banco, 1.0))), pago_total_i))
-        primer_banco_i = min(max(float(_parse_amount_input(st.session_state.get(primer_banco_key, 0.0))), 0.0), pago_total_i)
-        primera_com_i = ce_inicial_i
-        cr_df_i, _ = construir_cronograma_pagos(
-            fecha_inicial=date.today(),
-            plazo=int(max(1, row["PLAZO"])),
-            n_pab=int(max(1, row["N PaB"])),
-            pago_banco_total=pago_total_i,
-            primer_pago_banco=primer_banco_i,
-            comision_total=comision_total_i,
-            comision_inicial=primera_com_i,
-            dia_pago_banco=dia_pago_banco,
-            dia_pago_comision=dia_pago_comision,
-        )
-        cr_df_i["Id deuda"] = deuda_id
-        deuda_overrides_key = f"cronograma_overrides_sin_portafolio_{ref_input}_{deuda_id}"
-        deuda_editor_key = f"cronograma_editor_sin_portafolio_{ref_input}_{deuda_id}"
-        deuda_overrides = st.session_state.get(deuda_overrides_key, {})
-        deuda_editor_state = st.session_state.get(deuda_editor_key, {})
-        for row_position_str, cambios in (deuda_editor_state.get("edited_rows", {}) or {}).items():
-            try:
-                row_position = int(row_position_str)
-            except (TypeError, ValueError):
-                continue
-            visible_i = cr_df_i[cr_df_i["Cantidad"] > 0.005].reset_index(drop=True)
-            if row_position < 0 or row_position >= len(visible_i):
-                continue
-            row_key = str(visible_i.iloc[row_position]["row_key"])
-            existing = deuda_overrides.get(row_key, {})
-            existing.update(cambios)
-            deuda_overrides[row_key] = existing
-        st.session_state[deuda_overrides_key] = deuda_overrides
-
-        cr_df_i_editado, advertencias_i = aplicar_overrides_cronograma(
-            cronograma_df=cr_df_i,
-            overrides_map=deuda_overrides,
-            totales_por_tipo={"banco": float(row["Pago Banco Total"]), "comision": float(row["Comisión Total"])},
-            fecha_inicial=date.today(),
-            dia_pago_banco=dia_pago_banco,
-            dia_pago_comision=dia_pago_comision,
-            primer_pago_banco_input=primer_banco_i,
-            comision_inicial_input=primera_com_i,
-            lock_initial_rows=False,
-        )
-        for advertencia in advertencias_i:
-            st.warning(f"Id deuda {deuda_id}: {advertencia}")
-
-        cronogramas_individuales[deuda_id] = cr_df_i_editado.copy()
-        if expected_flow_for_pdf_validation is None:
-            expected_flow_for_pdf_validation = cr_df_i_editado[cr_df_i_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
-        cronos.append(cr_df_i_editado.copy())
-
-        st.markdown(f"#### Flujo Id deuda {deuda_id}")
-        st.caption(
-            f"Configuración aplicada → Pago Banco Total: {_format_currency0(pago_total_i)} · "
-            f"Comisión Total: {_format_currency0(comision_total_i)} · "
-            f"CE Inicial sugerida: {_format_currency0(ce_default_vals[i])}"
-        )
-        table_i = cr_df_i_editado[cr_df_i_editado["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
-        if not table_i.empty:
-            table_i["Fecha"] = pd.to_datetime(table_i["Fecha"])
-            table_i["Cantidad"] = table_i["Cantidad"].round(2).map(_format_currency0)
-            table_i.index = range(1, len(table_i) + 1)
-            st.data_editor(
-                table_i,
-                key=deuda_editor_key,
-                use_container_width=True,
-                hide_index=False,
-                num_rows="fixed",
-                disabled=["Concepto"],
-                column_config={
-                    "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-                    "Cantidad": st.column_config.TextColumn("Cantidad"),
-                    "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
-                },
-            )
-
-    if cronos:
-        cronograma_editado = pd.concat(cronos, ignore_index=True)
-        cronograma_editado = (
-            cronograma_editado
-            .groupby(["Fecha", "Concepto"], as_index=False)["Cantidad"]
-            .sum()
-            .sort_values("Fecha")
-            .reset_index(drop=True)
-        )
-    else:
-        cronograma_editado = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto"])
+    cronograma_view.index = range(1, len(cronograma_view) + 1)
+    st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
+    st.caption("Filas 1 y 2 bloqueadas (no editables).")
+    st.data_editor(
+        cronograma_view,
+        key="cronograma_editor",
+        use_container_width=True,
+        num_rows="fixed",
+        hide_index=False,
+        column_config={
+            "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+            "Cantidad": st.column_config.TextColumn("Cantidad"),
+            "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
+        },
+        disabled=["Concepto"],
+    )
 else:
-    cronograma_overrides = st.session_state.get("cronograma_overrides", {})
-    cronograma_editor_state = st.session_state.get("cronograma_editor", {})
-
-    cronograma_base_editado, _ = aplicar_overrides_cronograma(
-        cronograma_df=cronograma_df,
-        overrides_map=cronograma_overrides,
-        totales_por_tipo=totales_por_tipo,
-        fecha_inicial=date.today(),
-        dia_pago_banco=dia_pago_banco,
-        dia_pago_comision=dia_pago_comision,
-        primer_pago_banco_input=primer_pago_banco,
-        comision_inicial_input=ce_inicial,
-    )
-
-    cronograma_base_visible = cronograma_base_editado[cronograma_base_editado["Cantidad"] > 0.005].reset_index(drop=True)
-    cronograma_locked_rows_changed = False
-    for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {}) or {}).items():
-        try:
-            row_position = int(row_position_str)
-        except (TypeError, ValueError):
-            continue
-        if row_position < 0 or row_position >= len(cronograma_base_visible):
-            continue
-        row = cronograma_base_visible.iloc[row_position]
-        if int(row["months_ahead"]) == 0:
-            cronograma_locked_rows_changed = True
-            continue
-        row_key = str(row["row_key"])
-        existing = cronograma_overrides.get(row_key, {})
-        existing.update(cambios)
-        cronograma_overrides[row_key] = existing
-    st.session_state["cronograma_overrides"] = cronograma_overrides
-
-    if cronograma_locked_rows_changed:
-        st.session_state.pop("cronograma_editor", None)
-        st.info("Las filas 1 y 2 están bloqueadas y no se pueden editar.")
-        st.rerun()
-
-    cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
-        cronograma_df=cronograma_df,
-        overrides_map=cronograma_overrides,
-        totales_por_tipo=totales_por_tipo,
-        fecha_inicial=date.today(),
-        dia_pago_banco=dia_pago_banco,
-        dia_pago_comision=dia_pago_comision,
-        primer_pago_banco_input=primer_pago_banco,
-        comision_inicial_input=ce_inicial,
-    )
-
-    for advertencia in advertencias_cronograma:
-        st.warning(advertencia)
-
-    cronograma_visible = cronograma_editado[cronograma_editado["Cantidad"] > 0.005].copy()
-    expected_flow_for_pdf_validation = cronograma_visible[["Fecha", "Cantidad", "Concepto"]].copy() if not cronograma_visible.empty else None
-    if not cronograma_visible.empty:
-        cronograma_view = cronograma_visible[["Fecha", "Cantidad", "Concepto"]].copy()
-        cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
-        cronograma_view["Cantidad"] = (
-            pd.to_numeric(cronograma_view["Cantidad"], errors="coerce")
-            .fillna(0.0)
-            .round(2)
-            .map(_format_currency0)
-        )
-        cronograma_view.index = range(1, len(cronograma_view) + 1)
-        st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
-        st.caption("Filas 1 y 2 bloqueadas (no editables).")
-        st.data_editor(
-            cronograma_view,
-            key="cronograma_editor",
-            use_container_width=True,
-            num_rows="fixed",
-            hide_index=False,
-            column_config={
-                "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-                "Cantidad": st.column_config.TextColumn("Cantidad"),
-                "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
-            },
-            disabled=["Concepto"],
-        )
-    else:
-        st.info("Aún no hay valores suficientes para construir el cronograma.")
+    st.info("Aún no hay valores suficientes para construir el cronograma.")
 
 st.markdown("### PLAN DE LIQUIDACIÓN ESTRUCTURADA")
 
@@ -3116,52 +2821,13 @@ if not cronograma_editado.empty and not plan_df.empty:
             suma_comisiones_total=suma_comisiones_total,
         )
         template_context = _build_document_context_inputs(template_context_default)
-        if st.session_state.get("modo_sin_portafolio", False) and cronogramas_individuales:
-            deuda_ids = list(cronogramas_individuales.keys())
-            deuda_principal = deuda_ids[0]
-            cronograma_principal = cronogramas_individuales[deuda_principal]
-            sel_principal = sel[sel[col_id].astype(str) == str(deuda_principal)].copy()
-            numero_producto_principal = _join_unique_values(sel_principal[col_numero_producto].tolist()) if (col_numero_producto and not sel_principal.empty) else ""
-            bancos_principal = sel_principal[col_banco].astype(str).tolist() if not sel_principal.empty else sel[col_banco].astype(str).tolist()
-            context_principal = template_context.copy()
-            context_principal["numero_producto"] = numero_producto_principal or context_principal.get("numero_producto", "")
-            context_principal["pago_banco"] = _format_currency_cop(float(cronograma_principal.loc[cronograma_principal["Concepto"].str.contains("Entidad Financiera", na=False), "Cantidad"].sum()))
-            context_principal["comision_total"] = _format_currency_cop(float(cronograma_principal.loc[cronograma_principal["Concepto"].str.contains("Comisión Resuelve", na=False), "Cantidad"].sum()))
-            export_docx_bytes = build_recaudo_docx(
-                template_path=DOCX_TEMPLATE_PATH,
-                cronograma_df=cronograma_principal,
-                plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
-                template_context={**context_principal, "entidad_financiera": _join_unique_values(bancos_principal)},
-                include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
-            )
-
-            extra_blocks = []
-            for deuda_id in deuda_ids[1:]:
-                cronograma_deuda = cronogramas_individuales[deuda_id]
-                sel_deuda = sel[sel[col_id].astype(str) == str(deuda_id)].copy()
-                numero_producto_deuda = _join_unique_values(sel_deuda[col_numero_producto].tolist()) if (col_numero_producto and not sel_deuda.empty) else ""
-                bancos_deuda = sel_deuda[col_banco].astype(str).tolist() if not sel_deuda.empty else sel[col_banco].astype(str).tolist()
-                context_deuda = template_context.copy()
-                context_deuda["numero_producto"] = numero_producto_deuda or context_deuda.get("numero_producto", "")
-                context_deuda["pago_banco"] = _format_currency_cop(float(cronograma_deuda.loc[cronograma_deuda["Concepto"].str.contains("Entidad Financiera", na=False), "Cantidad"].sum()))
-                context_deuda["comision_total"] = _format_currency_cop(float(cronograma_deuda.loc[cronograma_deuda["Concepto"].str.contains("Comisión Resuelve", na=False), "Cantidad"].sum()))
-                deuda_docx = build_recaudo_docx(
-                    template_path=DOCX_TEMPLATE_PATH,
-                    cronograma_df=cronograma_deuda,
-                    plan_df=construir_plan_liquidacion(cronograma_deuda, comision_mensual).drop(columns=["plan_key"], errors="ignore"),
-                    template_context={**context_deuda, "entidad_financiera": _join_unique_values(bancos_deuda)},
-                    include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
-                )
-                extra_blocks.append(_extract_first_liquidacion_block_elements(Document(BytesIO(deuda_docx))))
-            export_docx_bytes = insert_extra_liquidacion_blocks(export_docx_bytes, extra_blocks)
-        else:
-            export_docx_bytes = build_recaudo_docx(
-                template_path=DOCX_TEMPLATE_PATH,
-                cronograma_df=cronograma_editado,
-                plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
-                template_context=template_context,
-                include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
-            )
+        export_docx_bytes = build_recaudo_docx(
+            template_path=DOCX_TEMPLATE_PATH,
+            cronograma_df=cronograma_editado,
+            plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
+            template_context=template_context,
+            include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
+        )
         export_pdf_bytes = convert_docx_bytes_to_pdf_bytes(export_docx_bytes)
     except Exception as export_exc:
         export_pdf_error = str(export_exc)
@@ -3497,7 +3163,7 @@ if enviar_aprobacion:
         is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(
             carta_pagare_file,
             ref_input,
-            expected_flow_for_pdf_validation,
+            cronograma_visible,
         )
         if not is_valid_pdf:
             st.warning(pdf_validation_message)
