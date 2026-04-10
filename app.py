@@ -15,7 +15,6 @@ from datetime import datetime
 import os
 import html as html_lib
 from io import BytesIO
-from zipfile import ZipFile
 import xml.etree.ElementTree as ET
 import zlib
 import subprocess
