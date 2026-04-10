@@ -675,6 +675,12 @@ def _remove_paragraph(paragraph: Paragraph):
     if parent is not None:
         parent.remove(element)
 
+def _remove_table(table):
+    tbl = table._element
+    parent = tbl.getparent()
+    if parent is not None:
+        parent.remove(tbl)
+
 
 def _remove_graduation_section(document):
     start_markers = [
@@ -773,6 +779,26 @@ def merge_docx_documents(docx_documents: list[bytes]) -> bytes:
             base_doc.element.body.append(deepcopy(element))
     output = BytesIO()
     base_doc.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def keep_only_first_flow_table_docx(docx_bytes: bytes) -> bytes:
+    document = Document(BytesIO(docx_bytes))
+    while len(document.tables) > 1:
+        _remove_table(document.tables[-1])
+    output = BytesIO()
+    document.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def keep_only_plan_table_docx(docx_bytes: bytes) -> bytes:
+    document = Document(BytesIO(docx_bytes))
+    if len(document.tables) >= 2:
+        _remove_table(document.tables[0])
+    output = BytesIO()
+    document.save(output)
     output.seek(0)
     return output.getvalue()
 
@@ -2808,7 +2834,6 @@ else:
         )
     else:
         st.info("Aún no hay valores suficientes para construir el cronograma.")
-
 st.markdown("### PLAN DE LIQUIDACIÓN ESTRUCTURADA")
 
 plan_df = construir_plan_liquidacion(cronograma_editado, comision_mensual)
@@ -3041,8 +3066,8 @@ if not cronograma_editado.empty and not plan_df.empty:
                     template_context={**context_deuda, "entidad_financiera": _join_unique_values(bancos_deuda)},
                     include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
                 )
-                docs_to_merge.append(deuda_docx)
-            docs_to_merge.append(export_docx_bytes)
+                docs_to_merge.append(keep_only_first_flow_table_docx(deuda_docx))
+            docs_to_merge.append(keep_only_plan_table_docx(export_docx_bytes))
             export_docx_bytes = merge_docx_documents(docs_to_merge)
         export_pdf_bytes = convert_docx_bytes_to_pdf_bytes(export_docx_bytes)
     except Exception as export_exc:
