@@ -184,7 +184,28 @@ def _sum_rounded_parts(values, digits=2):
     if rounded:
         rounded[-1] = round(sum(values) - sum(rounded[:-1]), digits)
     return rounded
+    
+def _split_total_by_weights(total: float, weights: list[float], digits: int = 2) -> list[float]:
+    total = max(float(total or 0.0), 0.0)
+    if not weights:
+        return []
+    clean = [max(float(w or 0.0), 0.0) for w in weights]
+    w_sum = sum(clean)
+    if w_sum <= 0:
+        clean = [1.0] * len(weights)
+        w_sum = float(len(weights))
+    raw = [total * (w / w_sum) for w in clean]
+    return _sum_rounded_parts(raw, digits=digits)
 
+
+def _split_integer_equitable(total: int, n_parts: int) -> list[int]:
+    total = max(int(total or 0), 0)
+    n_parts = max(int(n_parts or 0), 0)
+    if n_parts == 0:
+        return []
+    base = total // n_parts
+    rem = total % n_parts
+    return [base + (1 if i < rem else 0) for i in range(n_parts)]
 
 def _last_day_of_month(base_date: date, months_ahead: int) -> date:
     shifted = pd.Timestamp(base_date) + pd.DateOffset(months=months_ahead)
@@ -2256,6 +2277,17 @@ st.session_state[selector_key] = set(ids_sel)
 if not ids_sel:
     st.info("Selecciona al menos un Id deuda para continuar.")
     st.stop()
+if "modo_sin_portafolio" not in st.session_state:
+    st.session_state.modo_sin_portafolio = False
+
+if len(ids_sel) <= 1:
+    st.session_state.modo_sin_portafolio = False
+else:
+    st.toggle(
+        "Liquidar sin portafolio",
+        key="modo_sin_portafolio",
+        help="Activa un flujo separado por deuda (una tabla por Id deuda).",
+    )
 
 sel = df_ref[df_ref[col_id].astype(str).isin(ids_sel)].copy()
 col_tipo_liquidacion = _find_col(sel, ["Tipo de Liquidacion", "Tipo Liquidacion", "Tipo de liquidación"]) or _find_col_contains(sel, ["tipo", "liquid"])
@@ -2532,86 +2564,180 @@ cronograma_df, cronograma_meta = construir_cronograma_pagos(
 )
 
 totales_por_tipo = {"banco": float(pago_banco), "comision": float(comision_exito)}
-cronograma_overrides = st.session_state.get("cronograma_overrides", {})
-cronograma_editor_state = st.session_state.get("cronograma_editor", {})
-
-cronograma_base_editado, _ = aplicar_overrides_cronograma(
-    cronograma_df=cronograma_df,
-    overrides_map=cronograma_overrides,
-    totales_por_tipo=totales_por_tipo,
-    fecha_inicial=date.today(),
-    dia_pago_banco=dia_pago_banco,
-    dia_pago_comision=dia_pago_comision,
-    primer_pago_banco_input=primer_pago_banco,
-    comision_inicial_input=ce_inicial,
-)
-
-cronograma_base_visible = cronograma_base_editado[cronograma_base_editado["Cantidad"] > 0.005].reset_index(drop=True)
-cronograma_locked_rows_changed = False
-for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {}) or {}).items():
-    try:
-        row_position = int(row_position_str)
-    except (TypeError, ValueError):
-        continue
-    if row_position < 0 or row_position >= len(cronograma_base_visible):
-        continue
-    row = cronograma_base_visible.iloc[row_position]
-    if int(row["months_ahead"]) == 0:
-        cronograma_locked_rows_changed = True
-        continue
-    row_key = str(row["row_key"])
-    existing = cronograma_overrides.get(row_key, {})
-    existing.update(cambios)
-    cronograma_overrides[row_key] = existing
-st.session_state["cronograma_overrides"] = cronograma_overrides
-
-if cronograma_locked_rows_changed:
-    st.session_state.pop("cronograma_editor", None)
-    st.info("Las filas 1 y 2 están bloqueadas y no se pueden editar.")
-    st.rerun()
-
-cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
-    cronograma_df=cronograma_df,
-    overrides_map=cronograma_overrides,
-    totales_por_tipo=totales_por_tipo,
-    fecha_inicial=date.today(),
-    dia_pago_banco=dia_pago_banco,
-    dia_pago_comision=dia_pago_comision,
-    primer_pago_banco_input=primer_pago_banco,
-    comision_inicial_input=ce_inicial,
-)
-
-for advertencia in advertencias_cronograma:
-    st.warning(advertencia)
-
-cronograma_visible = cronograma_editado[cronograma_editado["Cantidad"] > 0.005].copy()
-if not cronograma_visible.empty:
-    cronograma_view = cronograma_visible[["Fecha", "Cantidad", "Concepto"]].copy()
-    cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
-    cronograma_view["Cantidad"] = (
-        pd.to_numeric(cronograma_view["Cantidad"], errors="coerce")
-        .fillna(0.0)
-        .round(2)
-        .map(_format_currency0)
+cronogramas_individuales: dict[str, pd.DataFrame] = {}
+if st.session_state.get("modo_sin_portafolio", False) and len(ids_sel) > 1:
+    st.info("Modo sin portafolio activo: se crea un flujo independiente por cada Id deuda seleccionado.")
+    per_debt_key = f"sin_portafolio_config_{ref_input}"
+    deuda_detalle = (
+        sel[[col_id, col_deu]]
+        .rename(columns={col_id: "Id deuda", col_deu: "Deuda Resuelve"})
+        .copy()
     )
-    cronograma_view.index = range(1, len(cronograma_view) + 1)
-    st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
-    st.caption("Filas 1 y 2 bloqueadas (no editables).")
-    st.data_editor(
-        cronograma_view,
-        key="cronograma_editor",
+    deuda_detalle["Id deuda"] = deuda_detalle["Id deuda"].astype(str)
+    deuda_detalle["Deuda Resuelve"] = pd.to_numeric(deuda_detalle["Deuda Resuelve"], errors="coerce").fillna(0.0)
+    deuda_detalle = deuda_detalle.sort_values(["Deuda Resuelve", "Id deuda"], ascending=[False, True]).reset_index(drop=True)
+    pesos = deuda_detalle["Deuda Resuelve"].tolist()
+    pago_banco_deuda = _split_total_by_weights(pago_banco, pesos, digits=2)
+    comision_deuda = _split_total_by_weights(comision_exito, pesos, digits=2)
+    primer_banco_deuda = _split_total_by_weights(primer_pago_banco, pesos, digits=2)
+    primer_comision_deuda = _split_total_by_weights(ce_inicial, pesos, digits=2)
+    n_pab_deuda = _split_integer_equitable(n_pab, len(deuda_detalle))
+
+    default_conf = pd.DataFrame({
+        "Id deuda": deuda_detalle["Id deuda"],
+        "Deuda Resuelve": deuda_detalle["Deuda Resuelve"],
+        "Pago Banco Total": pago_banco_deuda,
+        "Comisión Total": comision_deuda,
+        "Primer Pago Banco": primer_banco_deuda,
+        "Primera Comisión": primer_comision_deuda,
+        "N PaB": n_pab_deuda,
+    })
+    config_view = default_conf[["Id deuda", "Deuda Resuelve", "Pago Banco Total", "Comisión Total", "Primer Pago Banco", "Primera Comisión", "N PaB"]].copy()
+    config_view["Deuda Resuelve"] = config_view["Deuda Resuelve"].map(_format_currency0)
+    config_view["Pago Banco Total"] = config_view["Pago Banco Total"].map(_format_currency0)
+    config_view["Comisión Total"] = config_view["Comisión Total"].map(_format_currency0)
+    config_view["Primer Pago Banco"] = config_view["Primer Pago Banco"].map(_format_currency0)
+    config_view["Primera Comisión"] = config_view["Primera Comisión"].map(_format_currency0)
+    st.caption("Los totales por deuda se asignan por proporción de Deuda Resuelve. Puedes editar el primer pago banco y la primera comisión.")
+    edited_conf = st.data_editor(
+        config_view,
+        key=per_debt_key,
         use_container_width=True,
+        hide_index=True,
         num_rows="fixed",
-        hide_index=False,
-        column_config={
-            "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-            "Cantidad": st.column_config.TextColumn("Cantidad"),
-            "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
-        },
-        disabled=["Concepto"],
+        disabled=["Id deuda", "Deuda Resuelve", "Pago Banco Total", "Comisión Total", "N PaB"],
     )
+    primeres_banco_edit = [_parse_amount_input(x) for x in edited_conf["Primer Pago Banco"].tolist()]
+    primeras_com_edit = [_parse_amount_input(x) for x in edited_conf["Primera Comisión"].tolist()]
+    limite_banco = float(pago_banco)
+    limite_comision = float(comision_exito)
+    if sum(primeres_banco_edit) > limite_banco + 0.01:
+        st.warning("La suma de Primer Pago Banco por deuda no puede superar el PAGO BANCO total. Se ajustó automáticamente.")
+        primeres_banco_edit = _split_total_by_weights(min(limite_banco, sum(primeres_banco_edit)), pesos, digits=2)
+    if sum(primeras_com_edit) > limite_comision + 0.01:
+        st.warning("La suma de Primera Comisión por deuda no puede superar la Comisión de éxito total. Se ajustó automáticamente.")
+        primeras_com_edit = _split_total_by_weights(min(limite_comision, sum(primeras_com_edit)), pesos, digits=2)
+
+    cronos = []
+    for i, row in default_conf.iterrows():
+        deuda_id = str(row["Id deuda"])
+        primer_banco_i = min(max(primeres_banco_edit[i], 0.0), float(row["Pago Banco Total"]))
+        primera_com_i = min(max(primeras_com_edit[i], 0.0), float(row["Comisión Total"]))
+        cr_df_i, _ = construir_cronograma_pagos(
+            fecha_inicial=date.today(),
+            plazo=int(plazo),
+            n_pab=int(max(1, row["N PaB"])),
+            pago_banco_total=float(row["Pago Banco Total"]),
+            primer_pago_banco=primer_banco_i,
+            comision_total=float(row["Comisión Total"]),
+            comision_inicial=primera_com_i,
+            dia_pago_banco=dia_pago_banco,
+            dia_pago_comision=dia_pago_comision,
+        )
+        cr_df_i["Id deuda"] = deuda_id
+        cronogramas_individuales[deuda_id] = cr_df_i.copy()
+        cronos.append(cr_df_i.copy())
+
+        st.markdown(f"#### Flujo Id deuda {deuda_id}")
+        table_i = cr_df_i[cr_df_i["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
+        if not table_i.empty:
+            table_i["Fecha"] = pd.to_datetime(table_i["Fecha"])
+            table_i["Cantidad"] = table_i["Cantidad"].round(2).map(_format_currency0)
+            table_i.index = range(1, len(table_i) + 1)
+            st.dataframe(table_i, use_container_width=True)
+
+    if cronos:
+        cronograma_editado = pd.concat(cronos, ignore_index=True)
+        cronograma_editado = (
+            cronograma_editado
+            .groupby(["Fecha", "Concepto"], as_index=False)["Cantidad"]
+            .sum()
+            .sort_values("Fecha")
+            .reset_index(drop=True)
+        )
+    else:
+        cronograma_editado = pd.DataFrame(columns=["Fecha", "Cantidad", "Concepto"])
 else:
-    st.info("Aún no hay valores suficientes para construir el cronograma.")
+    cronograma_overrides = st.session_state.get("cronograma_overrides", {})
+    cronograma_editor_state = st.session_state.get("cronograma_editor", {})
+
+    cronograma_base_editado, _ = aplicar_overrides_cronograma(
+        cronograma_df=cronograma_df,
+        overrides_map=cronograma_overrides,
+        totales_por_tipo=totales_por_tipo,
+        fecha_inicial=date.today(),
+        dia_pago_banco=dia_pago_banco,
+        dia_pago_comision=dia_pago_comision,
+        primer_pago_banco_input=primer_pago_banco,
+        comision_inicial_input=ce_inicial,
+    )
+
+    cronograma_base_visible = cronograma_base_editado[cronograma_base_editado["Cantidad"] > 0.005].reset_index(drop=True)
+    cronograma_locked_rows_changed = False
+    for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {}) or {}).items():
+        try:
+            row_position = int(row_position_str)
+        except (TypeError, ValueError):
+            continue
+        if row_position < 0 or row_position >= len(cronograma_base_visible):
+            continue
+        row = cronograma_base_visible.iloc[row_position]
+        if int(row["months_ahead"]) == 0:
+            cronograma_locked_rows_changed = True
+            continue
+        row_key = str(row["row_key"])
+        existing = cronograma_overrides.get(row_key, {})
+        existing.update(cambios)
+        cronograma_overrides[row_key] = existing
+    st.session_state["cronograma_overrides"] = cronograma_overrides
+
+    if cronograma_locked_rows_changed:
+        st.session_state.pop("cronograma_editor", None)
+        st.info("Las filas 1 y 2 están bloqueadas y no se pueden editar.")
+        st.rerun()
+
+    cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
+        cronograma_df=cronograma_df,
+        overrides_map=cronograma_overrides,
+        totales_por_tipo=totales_por_tipo,
+        fecha_inicial=date.today(),
+        dia_pago_banco=dia_pago_banco,
+        dia_pago_comision=dia_pago_comision,
+        primer_pago_banco_input=primer_pago_banco,
+        comision_inicial_input=ce_inicial,
+    )
+
+    for advertencia in advertencias_cronograma:
+        st.warning(advertencia)
+
+    cronograma_visible = cronograma_editado[cronograma_editado["Cantidad"] > 0.005].copy()
+    if not cronograma_visible.empty:
+        cronograma_view = cronograma_visible[["Fecha", "Cantidad", "Concepto"]].copy()
+        cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
+        cronograma_view["Cantidad"] = (
+            pd.to_numeric(cronograma_view["Cantidad"], errors="coerce")
+            .fillna(0.0)
+            .round(2)
+            .map(_format_currency0)
+        )
+        cronograma_view.index = range(1, len(cronograma_view) + 1)
+        st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
+        st.caption("Filas 1 y 2 bloqueadas (no editables).")
+        st.data_editor(
+            cronograma_view,
+            key="cronograma_editor",
+            use_container_width=True,
+            num_rows="fixed",
+            hide_index=False,
+            column_config={
+                "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+                "Cantidad": st.column_config.TextColumn("Cantidad"),
+                "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
+            },
+            disabled=["Concepto"],
+        )
+    else:
+        st.info("Aún no hay valores suficientes para construir el cronograma.")
 
 st.markdown("### PLAN DE LIQUIDACIÓN ESTRUCTURADA")
 
@@ -2792,6 +2918,7 @@ elif st.session_state.doc_graduacion_check and st.session_state.doc_graduacion_c
 
 export_pdf_bytes = None
 export_pdf_error = None
+export_zip_bytes = None
 if not cronograma_editado.empty and not plan_df.empty:
     try:
         col_nombre_cliente = _find_col(sel, ["Nombre del cliente", "Nombre Cliente", "Nombre"]) or _find_col_contains(sel, ["nombre", "cliente"])
@@ -2829,6 +2956,25 @@ if not cronograma_editado.empty and not plan_df.empty:
             include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
         )
         export_pdf_bytes = convert_docx_bytes_to_pdf_bytes(export_docx_bytes)
+        if st.session_state.get("modo_sin_portafolio", False) and cronogramas_individuales:
+            zip_buffer = BytesIO()
+            with ZipFile(zip_buffer, mode="w") as zf:
+                for deuda_id, cronograma_deuda in cronogramas_individuales.items():
+                    plan_deuda = construir_plan_liquidacion(cronograma_deuda, comision_mensual)
+                    deuda_docx = build_recaudo_docx(
+                        template_path=DOCX_TEMPLATE_PATH,
+                        cronograma_df=cronograma_deuda,
+                        plan_df=plan_deuda.drop(columns=["plan_key"], errors="ignore"),
+                        template_context=template_context,
+                        include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
+                    )
+                    deuda_pdf = convert_docx_bytes_to_pdf_bytes(deuda_docx)
+                    deuda_safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(deuda_id))
+                    ref_safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(ref_input))
+                    zf.writestr(f"{date.today().isoformat()}_ref_{ref_safe}_id_{deuda_safe}.pdf", deuda_pdf)
+            zip_buffer.seek(0)
+            export_zip_bytes = zip_buffer.getvalue()
+    
     except Exception as export_exc:
         export_pdf_error = str(export_exc)
         st.error(f"No pude preparar el documento PDF: {export_exc}")
@@ -2864,6 +3010,15 @@ if export_pdf_bytes:
         use_container_width=True,
         disabled=bool(missing_document_fields),
     )
+    if export_zip_bytes:
+        st.download_button(
+            "⬇️ Descargar ZIP (un PDF por Id deuda)",
+            data=export_zip_bytes,
+            file_name=f"{date.today().isoformat()} - ref {referencia_export} - sin_portafolio.zip",
+            mime="application/zip",
+            use_container_width=True,
+            disabled=bool(missing_document_fields),
+        )
 else:
     if not export_pdf_error:
         st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el PDF.")
