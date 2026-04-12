@@ -2274,7 +2274,7 @@ def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str, expected_
 def _complete_drive_oauth_with_code(code: str):
     cfg = st.session_state.get("drive_auth_client_config")
     if not cfg:
-        cfg = _load_google_oauth_client_config()
+        raise RuntimeError("No existe configuración OAuth en sesión. Inicia de nuevo.")
     flow = Flow.from_client_config(cfg, scopes=GOOGLE_DRIVE_UPLOAD_SCOPES)
     flow.redirect_uri = _get_oauth_redirect_uri()
     code_verifier = st.session_state.get("drive_oauth_code_verifier")
@@ -2284,80 +2284,6 @@ def _complete_drive_oauth_with_code(code: str):
     creds = flow.credentials
     st.session_state.drive_user_token = json.loads(creds.to_json())
     st.session_state.drive_auth_in_progress = False
-
-
-def _redirect_in_same_tab(url: str) -> None:
-    safe_url = str(url or "").strip()
-    if not safe_url:
-        return
-    encoded_url = json.dumps(safe_url)
-    components.html(
-        f"""
-        <script>
-          window.top.location.href = {encoded_url};
-        </script>
-        """,
-        height=0,
-    )
-
-
-def _require_drive_authentication() -> None:
-    """
-    Bloquea el uso de la app hasta autenticar Drive.
-    Flujo único: OAuth automático con redirección (sin copy/paste de code).
-    """
-    st.markdown("### 🔐 Autenticación obligatoria")
-    if not _oauth_drive_configurado():
-        st.error(
-            "Esta app requiere autenticación de Google Drive para usarse, "
-            "pero faltan secretos OAuth (GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET)."
-        )
-        st.stop()
-
-    redirect_uri = _get_oauth_redirect_uri()
-    if "localhost" in redirect_uri:
-        st.error(
-            "La app está en modo localhost para OAuth. "
-            "Configura GOOGLE_OAUTH_REDIRECT_URI con la URL pública de la app para continuar."
-        )
-        st.stop()
-
-    query_code = str(st.query_params.get("code", "")).strip() if hasattr(st, "query_params") else ""
-    last_processed_code = str(st.session_state.get("drive_last_processed_code", "")).strip()
-    has_token = bool(st.session_state.get("drive_user_token"))
-
-    if query_code and query_code != last_processed_code and not has_token:
-        try:
-            _complete_drive_oauth_with_code(query_code)
-            st.session_state.drive_last_processed_code = query_code
-            try:
-                st.query_params.clear()
-            except Exception:
-                pass
-            st.rerun()
-        except Exception as e:
-            st.error(f"No fue posible completar OAuth automáticamente: {e}")
-
-    if not st.session_state.get("drive_user_token"):
-        st.info("Antes de usar la calculadora debes autenticar tu cuenta Google.")
-        if st.button("🔐 Iniciar sesión con Google Drive", use_container_width=True, key="drive_auth_required_start"):
-            try:
-                flow, auth_url, oauth_state, client_config = _get_drive_flow_and_auth_url()
-                st.session_state.drive_oauth_state = oauth_state
-                st.session_state.drive_oauth_code_verifier = getattr(flow, "code_verifier", None)
-                st.session_state.drive_auth_client_config = client_config
-                st.session_state.drive_auth_url = auth_url
-            except Exception as e:
-                st.error(f"No se pudo iniciar autenticación OAuth: {e}")
-        auth_url = str(st.session_state.get("drive_auth_url", "")).strip()
-        if auth_url:
-            st.link_button("➡️ Continuar autenticación con Google", auth_url, use_container_width=True)
-        st.stop()
-
-    st.success("Cuenta Drive autenticada. Ya puedes usar la calculadora normalmente.")
-
-
-_require_drive_authentication()
 
 
 def _is_corporate_email(email: str) -> bool:
@@ -3558,10 +3484,74 @@ if not oauth_disponible:
         "Configura GOOGLE_OAUTH_CLIENT_ID y GOOGLE_OAUTH_CLIENT_SECRET."
     )
 else:
-    if st.session_state.get("drive_user_token"):
-        st.success("Cuenta Drive autenticada en esta sesión.")
-    else:
-        st.error("Sin autenticación activa. Recarga la app para autenticar desde el inicio.")
+    auth_col1, auth_col2 = st.columns([1, 2])
+    with auth_col1:
+        iniciar_auth_drive = st.button("🔐 Iniciar autenticación Drive", use_container_width=True)
+    with auth_col2:
+        if st.session_state.get("drive_user_token"):
+            st.success("Cuenta Drive autenticada en esta sesión.")
+        else:
+            st.info("Sin autenticación activa.")
+
+    if iniciar_auth_drive:
+        try:
+            flow, auth_url, oauth_state, client_config = _get_drive_flow_and_auth_url()
+            st.session_state.drive_oauth_state = oauth_state
+            st.session_state.drive_oauth_code_verifier = getattr(flow, "code_verifier", None)
+            st.session_state.drive_auth_url = auth_url
+            st.session_state.drive_auth_client_config = client_config
+            st.session_state.drive_auth_in_progress = True
+        except Exception as e:
+            st.error(f"No se pudo iniciar autenticación OAuth: {e}")
+
+    if st.session_state.get("drive_auth_in_progress"):
+        auth_url = st.session_state.get("drive_auth_url", "")
+        redirect_uri = _get_oauth_redirect_uri()
+        query_code = str(st.query_params.get("code", "")).strip() if hasattr(st, "query_params") else ""
+        last_processed_code = str(st.session_state.get("drive_last_processed_code", "")).strip()
+
+        if auth_url:
+            if "localhost" in redirect_uri:
+                st.markdown(
+                    f"1) Abre este enlace y autoriza tu cuenta: [Autorizar Drive]({auth_url})  \n"
+                    "2) Copia el `code` de la URL de redirección (o pega la URL completa)."
+                )
+            else:
+                st.markdown(
+                    f"1) Abre este enlace y autoriza tu cuenta: [Autorizar Drive]({auth_url})  \n"
+                    "2) Serás redirigido automáticamente a esta app."
+                )
+
+        if query_code and "localhost" not in redirect_uri and query_code != last_processed_code:
+            try:
+                _complete_drive_oauth_with_code(query_code)
+                st.session_state.drive_last_processed_code = query_code
+                st.success("Autenticación de Drive completada automáticamente.")
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"No fue posible completar OAuth automáticamente: {e}")
+
+        auth_code_input = st.text_input(
+            "Código OAuth / URL de redirección",
+            value=query_code,
+            key="drive_oauth_code_input",
+            help="Si usas redirect localhost, pega la URL completa o solo el code.",
+        )
+        finalizar_auth_drive = st.button("✅ Confirmar autenticación", use_container_width=True)
+        if finalizar_auth_drive:
+            try:
+                code = _extract_oauth_code(auth_code_input)
+                if not code:
+                    st.warning("Debes pegar un código OAuth válido.")
+                else:
+                    _complete_drive_oauth_with_code(code)
+                    st.session_state.drive_last_processed_code = code
+                    st.success("Autenticación de Drive completada.")
+            except Exception as e:
+                st.error(f"No fue posible completar OAuth: {e}")
 
     carta_pagare_file = st.file_uploader(
         "📎 Adjuntar carta con pagaré firmado (PDF)",
