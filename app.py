@@ -2286,21 +2286,6 @@ def _complete_drive_oauth_with_code(code: str):
     st.session_state.drive_auth_in_progress = False
 
 
-def _redirect_in_same_tab(url: str) -> None:
-    safe_url = str(url or "").strip()
-    if not safe_url:
-        return
-    encoded_url = json.dumps(safe_url)
-    components.html(
-        f"""
-        <script>
-          window.top.location.href = {encoded_url};
-        </script>
-        """,
-        height=0,
-    )
-
-
 def _is_corporate_email(email: str) -> bool:
     return str(email or "").strip().lower().endswith("@gobravo.com.co")
 
@@ -3526,25 +3511,16 @@ else:
         last_processed_code = str(st.session_state.get("drive_last_processed_code", "")).strip()
 
         if auth_url:
-            is_localhost_redirect = "localhost" in redirect_uri
-            if is_localhost_redirect:
+            if "localhost" in redirect_uri:
                 st.markdown(
                     f"1) Abre este enlace y autoriza tu cuenta: [Autorizar Drive]({auth_url})  \n"
                     "2) Copia el `code` de la URL de redirección (o pega la URL completa)."
-                )
-                st.warning(
-                    "Actualmente el redirect OAuth está en `localhost`, por eso te pide copiar/pegar el código. "
-                    "Si configuras `GOOGLE_OAUTH_REDIRECT_URI` con la URL pública de esta app, "
-                    "la autenticación quedará automática sin pegar links."
                 )
             else:
                 st.markdown(
                     f"1) Abre este enlace y autoriza tu cuenta: [Autorizar Drive]({auth_url})  \n"
                     "2) Serás redirigido automáticamente a esta app."
                 )
-                if st.button("➡️ Autenticar en esta misma pestaña", key="drive_auth_same_tab"):
-                    _redirect_in_same_tab(auth_url)
-                    st.stop()
 
         if query_code and "localhost" not in redirect_uri and query_code != last_processed_code:
             try:
@@ -3558,25 +3534,24 @@ else:
             except Exception as e:
                 st.error(f"No fue posible completar OAuth automáticamente: {e}")
 
-        if "localhost" in redirect_uri:
-            auth_code_input = st.text_input(
-                "Código OAuth / URL de redirección",
-                value=query_code,
-                key="drive_oauth_code_input",
-                help="Si usas redirect localhost, pega la URL completa o solo el code.",
-            )
-            finalizar_auth_drive = st.button("✅ Confirmar autenticación", use_container_width=True)
-            if finalizar_auth_drive:
-                try:
-                    code = _extract_oauth_code(auth_code_input)
-                    if not code:
-                        st.warning("Debes pegar un código OAuth válido.")
-                    else:
-                        _complete_drive_oauth_with_code(code)
-                        st.session_state.drive_last_processed_code = code
-                        st.success("Autenticación de Drive completada.")
-                except Exception as e:
-                    st.error(f"No fue posible completar OAuth: {e}")
+        auth_code_input = st.text_input(
+            "Código OAuth / URL de redirección",
+            value=query_code,
+            key="drive_oauth_code_input",
+            help="Si usas redirect localhost, pega la URL completa o solo el code.",
+        )
+        finalizar_auth_drive = st.button("✅ Confirmar autenticación", use_container_width=True)
+        if finalizar_auth_drive:
+            try:
+                code = _extract_oauth_code(auth_code_input)
+                if not code:
+                    st.warning("Debes pegar un código OAuth válido.")
+                else:
+                    _complete_drive_oauth_with_code(code)
+                    st.session_state.drive_last_processed_code = code
+                    st.success("Autenticación de Drive completada.")
+            except Exception as e:
+                st.error(f"No fue posible completar OAuth: {e}")
 
     carta_pagare_file = st.file_uploader(
         "📎 Adjuntar carta con pagaré firmado (PDF)",
