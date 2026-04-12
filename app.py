@@ -225,7 +225,6 @@ def _rebalance_group_amounts(df_group: pd.DataFrame, total_objetivo: float) -> p
     return df_group
 
 
-
 def _parse_amount_input(value, *, max_decimals: int = 2) -> float:
     if value is None:
         return 0.0
@@ -689,230 +688,8 @@ def _remove_graduation_section(document):
             end_idx += 1
 
     for paragraph in paragraphs[start_idx : end_idx + 1]:
-        _remove_paragraph(paragraph)
+        _remove_paragraph(paragraph)              
 
-
-def _to_float_or_nan(x):
-    try:
-        return float(x)
-    except Exception:
-        return np.nan
-
-
-def _build_liquidacion_sin_portafolio(
-    sel: pd.DataFrame,
-    ids_sel: list[str],
-    col_id: str,
-    col_banco: str,
-    col_deu: str,
-    col_ce: str,
-):
-    st.markdown("### 2.1) Modo opcional")
-    modo_activo = False
-    if len(ids_sel) > 1:
-        modo_activo = st.checkbox(
-            "Liquidar sin portafolio",
-            value=bool(st.session_state.get("liquidar_sin_portafolio_mode", False)),
-            key="liquidar_sin_portafolio_mode",
-            help="Crea un flujo por cada deuda seleccionada y consolida una sola liquidación estructurada al final.",
-        )
-
-    prev_mode = bool(st.session_state.get("liquidar_sin_portafolio_prev_mode", False))
-    if modo_activo != prev_mode:
-        st.session_state["liquidar_sin_portafolio_prev_mode"] = modo_activo
-        if modo_activo:
-            for key in [
-                "cronograma_editor",
-                "cronograma_overrides",
-                "plan_liquidacion_editor",
-                "plan_liquidacion_overrides",
-            ]:
-                st.session_state.pop(key, None)
-        else:
-            st.session_state.pop("lsp_cronograma_overrides", None)
-            st.session_state.pop("lsp_cronogramas_editados", None)
-        st.rerun()
-
-    if not modo_activo:
-        return {
-            "active": False,
-            "cronogramas": {},
-            "cronograma_total": pd.DataFrame(),
-            "features": None,
-            "totals": {},
-        }
-
-    st.caption("Configura cada deuda de forma independiente. El plan de liquidación estructurada se consolida al final.")
-
-    cronogramas = {}
-    detalles = {}
-    resumen = []
-
-    for idx_deuda, deuda_id in enumerate(ids_sel, start=1):
-        row = sel[sel[col_id].astype(str) == str(deuda_id)].iloc[0]
-        banco = str(row[col_banco])
-        deuda_default = float(pd.to_numeric(row[col_deu], errors="coerce") or 0.0)
-        ce_base_default = float(pd.to_numeric(row[col_ce], errors="coerce") or 0.0)
-
-        base_key = f"lsp_{deuda_id}"
-        if f"{base_key}_init" not in st.session_state:
-            st.session_state[f"{base_key}_deuda_res"] = deuda_default
-            st.session_state[f"{base_key}_pago_banco"] = 0.0
-            st.session_state[f"{base_key}_n_pab"] = 1
-            st.session_state[f"{base_key}_primer_pago"] = 0.0
-            st.session_state[f"{base_key}_ce_base"] = ce_base_default
-            auto_ce_ini = max(0.0, (deuda_default - 0.0) * 1.19 * ce_base_default)
-            st.session_state[f"{base_key}_comision_exito"] = auto_ce_ini
-            st.session_state[f"{base_key}_ce_inicial"] = 0.0
-            st.session_state[f"{base_key}_plazo"] = 1
-            st.session_state[f"{base_key}_comision_exito_auto"] = auto_ce_ini
-            st.session_state[f"{base_key}_comision_exito_overridden"] = False
-            st.session_state[f"{base_key}_last_pab"] = 0.0
-            st.session_state[f"{base_key}_last_n"] = 1
-            st.session_state[f"{base_key}_init"] = True
-
-        with st.expander(f"Deuda {idx_deuda}: ID {deuda_id} • {banco}", expanded=(idx_deuda == 1)):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                pesos_input("Deuda Resuelve", key=f"{base_key}_deuda_res")
-            with c2:
-                pesos_input("PAGO BANCO", key=f"{base_key}_pago_banco")
-            with c3:
-                st.number_input("N PaB", min_value=1, step=1, key=f"{base_key}_n_pab")
-
-            pago_banco = float(st.session_state.get(f"{base_key}_pago_banco", 0.0) or 0.0)
-            n_pab = int(st.session_state.get(f"{base_key}_n_pab", 1) or 1)
-            prev_n = int(st.session_state.get(f"{base_key}_last_n", n_pab) or n_pab)
-            prev_pab = float(st.session_state.get(f"{base_key}_last_pab", pago_banco) or pago_banco)
-
-            if n_pab != prev_n:
-                st.session_state[f"{base_key}_primer_pago"] = (pago_banco / n_pab) if n_pab > 1 else pago_banco
-
-            if n_pab > 1:
-                pesos_input("Primer PAGO BANCO", key=f"{base_key}_primer_pago")
-            else:
-                st.session_state[f"{base_key}_primer_pago"] = pago_banco
-
-            deuda_res = float(st.session_state.get(f"{base_key}_deuda_res", 0.0) or 0.0)
-            ce_base = float(st.session_state.get(f"{base_key}_ce_base", ce_base_default) or 0.0)
-            auto_ce = max(0.0, (deuda_res - pago_banco) * 1.19 * ce_base)
-            st.session_state[f"{base_key}_comision_exito_auto"] = auto_ce
-
-            cambian_derivados = (abs(prev_pab - pago_banco) > 0.5) or (prev_n != n_pab)
-            if cambian_derivados:
-                st.session_state[f"{base_key}_comision_exito"] = auto_ce
-            st.session_state[f"{base_key}_last_pab"] = pago_banco
-            st.session_state[f"{base_key}_last_n"] = n_pab
-
-            c4, c5, c6 = st.columns(3)
-            with c4:
-                ce_actual = pesos_input("Comisión de éxito", key=f"{base_key}_comision_exito")
-            with c5:
-                pesos_input("CE inicial", key=f"{base_key}_ce_inicial")
-            with c6:
-                st.number_input("PLAZO", min_value=1, step=1, key=f"{base_key}_plazo")
-
-            primer_pago = min(max(float(st.session_state.get(f"{base_key}_primer_pago", 0.0) or 0.0), 0.0), pago_banco)
-            comision_exito = max(0.0, float(st.session_state.get(f"{base_key}_comision_exito", auto_ce) or 0.0))
-            ce_inicial = min(max(float(st.session_state.get(f"{base_key}_ce_inicial", 0.0) or 0.0), 0.0), comision_exito)
-            plazo = int(st.session_state.get(f"{base_key}_plazo", 1) or 1)
-
-            pct_primer_pago = (ce_inicial / comision_exito) if comision_exito > 0 else np.nan
-            cuota_apartado = np.nan
-            apartado_base = float(st.session_state.get("apartado_edit", 0.0) or 0.0)
-            comision_mensual_base = float(st.session_state.get("comision_m_edit", 0.0) or 0.0)
-            resto_pago_banco = max(0.0, pago_banco - primer_pago)
-            if (plazo - 1) > 0 and apartado_base > 0:
-                numerador = (comision_exito + resto_pago_banco - ce_inicial + comision_mensual_base)
-                cuota_apartado = (numerador / (plazo - 1)) / apartado_base
-
-            cronograma_deuda, _ = construir_cronograma_pagos(
-                fecha_inicial=date.today(),
-                plazo=plazo,
-                n_pab=n_pab,
-                pago_banco_total=pago_banco,
-                primer_pago_banco=primer_pago,
-                comision_total=comision_exito,
-                comision_inicial=ce_inicial,
-            )
-            cronogramas[str(deuda_id)] = cronograma_deuda
-            detalles[str(deuda_id)] = {
-                "cronograma": cronograma_deuda.copy(),
-                "totales_por_tipo": {"banco": float(pago_banco), "comision": float(comision_exito)},
-                "primer_pago_banco": float(primer_pago),
-                "ce_inicial": float(ce_inicial),
-            }
-
-            st.caption(
-                f"Resumen deuda {deuda_id}: CE total {_format_currency0(comision_exito)} · "
-                f"Ratio_PP {0.0 if np.isnan(pct_primer_pago) else pct_primer_pago:.4f} · "
-                f"C/A {'—' if np.isnan(cuota_apartado) else f'{cuota_apartado:.4f}'}"
-            )
-
-            resumen.append({
-                "deuda_id": str(deuda_id),
-                "plazo": float(plazo),
-                "ce_inicial": float(ce_inicial),
-                "comision_exito": float(comision_exito),
-                "ca": float(0.0 if np.isnan(cuota_apartado) else cuota_apartado),
-                "pago_banco": float(pago_banco),
-            })
-
-    resumen_df = pd.DataFrame(resumen)
-    cronograma_total = pd.concat(list(cronogramas.values()), ignore_index=True) if cronogramas else pd.DataFrame()
-
-    total_ce_inicial = float(resumen_df["ce_inicial"].sum()) if not resumen_df.empty else np.nan
-    total_ce = float(resumen_df["comision_exito"].sum()) if not resumen_df.empty else np.nan
-    pri_ult = float(resumen_df["plazo"].max()) if not resumen_df.empty else np.nan
-    ratio_pp = (total_ce_inicial / total_ce) if total_ce and total_ce > 0 else np.nan
-    c_a = float(resumen_df["ca"].sum()) if not resumen_df.empty else np.nan
-
-    feature_vals = {
-        "PRI-ULT": _to_float_or_nan(pri_ult),
-        "Ratio_PP": _to_float_or_nan(ratio_pp),
-        "C/A": _to_float_or_nan(c_a),
-        "AMOUNT_TOTAL": _to_float_or_nan(total_ce),
-    }
-
-    return {
-        "active": True,
-        "cronogramas": cronogramas,
-        "detalles": detalles,
-        "cronograma_total": cronograma_total,
-        "features": feature_vals,
-        "totals": {
-            "comision_exito": float(total_ce or 0.0),
-            "pago_banco": float(resumen_df["pago_banco"].sum()) if not resumen_df.empty else 0.0,
-            "ce_inicial": float(total_ce_inicial or 0.0) if not np.isnan(total_ce_inicial) else 0.0,
-            "plazo": int(pri_ult) if not np.isnan(pri_ult) else 1,
-        },
-    }
-
-
-def _compose_multi_flujo_pdf(base_pdf_bytes: bytes, extra_first_page_pdf_bytes: list[bytes]) -> bytes:
-    pypdf_spec = importlib.util.find_spec("pypdf")
-    if not pypdf_spec:
-        raise RuntimeError("No está disponible pypdf para consolidar múltiples flujos en un único PDF.")
-    from pypdf import PdfReader, PdfWriter
-
-    base_reader = PdfReader(BytesIO(base_pdf_bytes))
-    if len(base_reader.pages) == 0:
-        raise RuntimeError("El PDF base no contiene páginas.")
-
-    writer = PdfWriter()
-
-    for extra_pdf in extra_first_page_pdf_bytes:
-        extra_reader = PdfReader(BytesIO(extra_pdf))
-        if len(extra_reader.pages) > 0:
-            writer.add_page(extra_reader.pages[0])
-
-    for page in base_reader.pages[1:]:
-        writer.add_page(page)
-
-    output = BytesIO()
-    writer.write(output)
-    output.seek(0)
-    return output.getvalue()
 
 def build_recaudo_docx(
     template_path: Path,
@@ -2540,15 +2317,6 @@ col_tipo_liquidacion = _find_col(sel, ["Tipo de Liquidacion", "Tipo Liquidacion"
 tipo_liquidacion_val = _join_unique_values(sel[col_tipo_liquidacion].tolist()) if col_tipo_liquidacion else ""
 bancos_sel_text = _join_unique_values(sel[col_banco].astype(str).tolist())
 
-liquidacion_sin_portafolio = _build_liquidacion_sin_portafolio(
-    sel=sel,
-    ids_sel=ids_sel,
-    col_id=col_id,
-    col_banco=col_banco,
-    col_deu=col_deu,
-    col_ce=col_ce,
-)
-
 # =================== 3) Valores base (reactivo) ===================
 st.markdown("### 3) Valores base (puedes editarlos)")
 
@@ -2620,181 +2388,167 @@ with col6:
     pesos_input("💵 Depósito", key="deposito_edit",
                 help="Monto extra aportado al inicio; por defecto 0")
 
-if not liquidacion_sin_portafolio.get("active", False):
-    # =================== 4) PAGO BANCO y derivados ===================
-    st.markdown("### 4) PAGO BANCO y parámetros derivados")
+# =================== 4) PAGO BANCO y derivados ===================
+st.markdown("### 4) PAGO BANCO y parámetros derivados")
 
-    c1, c2, c3 = st.columns([1,1,1])
-    with c1:
-        pesos_input("🏦 PAGO BANCO", key="pago_banco")
-    with c2:
-        descuento = None
-        if st.session_state.deuda_res_edit and st.session_state.deuda_res_edit > 0:
-            descuento = max(0.0, 1.0 - (st.session_state.pago_banco / st.session_state.deuda_res_edit)) * 100.0
-        st.text_input(
-            "📉 DESCUENTO (%)",
-            value=(f"{descuento:.2f} %" if descuento is not None else ""),
-            disabled=True
-        )
-    with c3:
-        st.number_input(
-            "🧮 N PaB",
-            min_value=1,
-            step=1,
-            value=int(st.session_state.n_pab),
-            key="n_pab"
-        )
+c1, c2, c3 = st.columns([1,1,1])
+with c1:
+    pesos_input("🏦 PAGO BANCO", key="pago_banco")
+with c2:
+    descuento = None
+    if st.session_state.deuda_res_edit and st.session_state.deuda_res_edit > 0:
+        descuento = max(0.0, 1.0 - (st.session_state.pago_banco / st.session_state.deuda_res_edit)) * 100.0
+    st.text_input(
+        "📉 DESCUENTO (%)",
+        value=(f"{descuento:.2f} %" if descuento is not None else ""),
+        disabled=True
+    )
+with c3:
+    st.number_input(
+        "🧮 N PaB",
+        min_value=1,
+        step=1,
+        value=int(st.session_state.n_pab),
+        key="n_pab"
+    )
 
-    # --- Lógica: si cambia N PaB, recalculamos Primer PAGO BANCO ---
-    pago_banco = float(st.session_state.get("pago_banco", 0.0) or 0.0)
-    n_pab = int(st.session_state.get("n_pab", 1) or 1)
+# --- Lógica: si cambia N PaB, recalculamos Primer PAGO BANCO ---
+pago_banco = float(st.session_state.get("pago_banco", 0.0) or 0.0)
+n_pab = int(st.session_state.get("n_pab", 1) or 1)
 
-    prev_n_pab = st.session_state.get("_prev_n_pab_for_primer", n_pab)
-    if n_pab != prev_n_pab:
-        # Cambió el N PaB → recalculamos primer pago
-        if n_pab > 1:
-            if pago_banco > 0:
-                st.session_state.primer_pago_banco = pago_banco / n_pab
-            else:
-                st.session_state.primer_pago_banco = 0.0
-        else:
-            # Si vuelve a 1, todo el PAGO BANCO va al primer pago
-            st.session_state.primer_pago_banco = pago_banco
-    st.session_state._prev_n_pab_for_primer = n_pab
-    # --------------------------------------------------------
-
-    # Campo adicional: Primer PAGO BANCO solo si N PaB > 1
+prev_n_pab = st.session_state.get("_prev_n_pab_for_primer", n_pab)
+if n_pab != prev_n_pab:
+    # Cambió el N PaB → recalculamos primer pago
     if n_pab > 1:
-        pago_banco_actual = float(st.session_state.pago_banco or 0.0)
-
-        # Aseguramos que no supere el total ni sea negativo
-        st.session_state.primer_pago_banco = min(
-            max(float(st.session_state.get("primer_pago_banco", 0.0) or 0.0), 0.0),
-            pago_banco_actual
-        )
-
-        pesos_input(
-            "💳 Primer PAGO BANCO",
-            key="primer_pago_banco",
-            help="Monto del primer pago al banco (el resto se reparte en los siguientes PaB)."
-        )
+        if pago_banco > 0:
+            st.session_state.primer_pago_banco = pago_banco / n_pab
+        else:
+            st.session_state.primer_pago_banco = 0.0
     else:
-        # Si solo hay un PaB, el primer pago es todo el PAGO BANCO
-        st.session_state.primer_pago_banco = float(st.session_state.pago_banco or 0.0)
+        # Si vuelve a 1, todo el PAGO BANCO va al primer pago
+        st.session_state.primer_pago_banco = pago_banco
+st.session_state._prev_n_pab_for_primer = n_pab
+# --------------------------------------------------------
 
-    # Detectar cambios en PAGO BANCO / N PaB para recalcular CE
-    if (st.session_state._last_pab != st.session_state.pago_banco) or (st.session_state._last_n != st.session_state.n_pab):
-        st.session_state._last_pab = st.session_state.pago_banco
-        st.session_state._last_n   = st.session_state.n_pab
-        _prefill_ce()
+# Campo adicional: Primer PAGO BANCO solo si N PaB > 1
+if n_pab > 1:
+    pago_banco_actual = float(st.session_state.pago_banco or 0.0)
 
-    # Comisión de éxito (editable) y CE inicial
-    c4, c5 = st.columns(2)
-    with c4:
-        # Valor automático de referencia
-        auto_ce = float(st.session_state.get("comision_exito_auto", st.session_state.get("comision_exito", 0.0)) or 0.0)
-        new_ce = pesos_input(
-            "🏁 Comisión de éxito (editable)",
-            key="comision_exito",
-            help="Por defecto se calcula con la fórmula, pero puedes ajustarla manualmente."
-        )
-
-        # Si el valor actual se separa del valor "auto", marcamos override
-        if not st.session_state.get("comision_exito_overridden", False):
-            if abs(new_ce - auto_ce) > 0.5:
-                st.session_state.comision_exito_overridden = True
-
-    with c5:
-        pesos_input("🧪 CE inicial", key="ce_inicial_val")
-
-    # Avance CE inicial vs Comisión de éxito
-    st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
-    ce_inicial = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
-    base = float(st.session_state.get("comision_exito", 0.0) or 0.0)
-    if ce_inicial <= 0:
-        st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
-    elif base <= 0:
-        st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular el porcentaje.")
-    else:
-        porcentaje = (ce_inicial / base) * 100.0
-        porcentaje_capped = max(0.0, min(porcentaje, 100.0))
-        st.progress(int(round(porcentaje_capped)))
-        st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
-
-    # =================== 6) Validación y KPIs (sin tabla) ===================
-    st.markdown("### 6) Validación y KPIs")
-
-    pago_banco        = float(st.session_state.get("pago_banco", 0.0) or 0.0)
-    n_pab             = int(st.session_state.get("n_pab", 1) or 1)
-    comision_mensual  = float(st.session_state.get("comision_m_edit", 0.0) or 0.0)
-    apartado_mensual  = float(st.session_state.get("apartado_edit", 0.0) or 0.0)
-    comision_exito    = float(st.session_state.get("comision_exito", 0.0) or 0.0)
-    ce_inicial        = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
-
-    plazo = st.number_input("📅 PLAZO (meses) (lo ingresas tú)", min_value=1, step=1, value=1)
-
-    # Primer PAGO BANCO: si hay más de un PaB, usamos el input; si no, todo el pago
-    primer_pago_banco = float(
-        st.session_state.get(
-            "primer_pago_banco",
-            pago_banco if n_pab == 1 else (pago_banco / n_pab if n_pab > 0 else 0.0)
-        )
-    )
-    primer_pago_banco = min(max(primer_pago_banco, 0.0), pago_banco)
-    resto_pago_banco = max(0.0, pago_banco - primer_pago_banco)
-
-    pct_primer_pago = (ce_inicial / comision_exito) if comision_exito > 0 else np.nan
-
-    if (plazo - 1) > 0 and apartado_mensual > 0:
-        numerador = (comision_exito + resto_pago_banco - ce_inicial + comision_mensual)
-        cuota_apartado = (numerador / (plazo - 1)) / apartado_mensual
-    else:
-        cuota_apartado = np.nan
-
-    cronograma_df, cronograma_meta = construir_cronograma_pagos(
-        fecha_inicial=date.today(),
-        plazo=int(plazo),
-        n_pab=n_pab,
-        pago_banco_total=pago_banco,
-        primer_pago_banco=primer_pago_banco,
-        comision_total=comision_exito,
-        comision_inicial=ce_inicial,
+    # Aseguramos que no supere el total ni sea negativo
+    st.session_state.primer_pago_banco = min(
+        max(float(st.session_state.get("primer_pago_banco", 0.0) or 0.0), 0.0),
+        pago_banco_actual
     )
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.number_input("🏁 Comisión de éxito total", value=float(comision_exito), step=0.0, format="%.0f", disabled=True)
-    with c2:
-        st.number_input("📅 PLAZO (meses)", value=float(plazo), step=1.0, format="%.0f", disabled=True)
-    with c3:
-        st.text_input(
-            "% Primer Pago (CE inicial / CE)",
-            value=("—" if np.isnan(pct_primer_pago) else f"{pct_primer_pago:.2f}"),
-            disabled=True
-        )
-    with c4:
-        st.text_input(
-            "Cuota/Apartado",
-            value=("—" if np.isnan(cuota_apartado) else f"{cuota_apartado:.4f}"),
-            disabled=True
-        )
-
-    if st.session_state.get("comision_exito_overridden", False):
-        st.caption("🔒 Comisión de éxito fijada manualmente: no se recalcula con cambios en PAGO BANCO/N PaB.")
-    ############################################################################################################################################################################
+    pesos_input(
+        "💳 Primer PAGO BANCO",
+        key="primer_pago_banco",
+        help="Monto del primer pago al banco (el resto se reparte en los siguientes PaB)."
+    )
 else:
-    totals_lsp = liquidacion_sin_portafolio.get("totals", {})
-    comision_mensual = float(st.session_state.get("comision_m_edit", 0.0) or 0.0)
-    apartado_mensual = float(st.session_state.get("apartado_edit", 0.0) or 0.0)
-    pago_banco = float(totals_lsp.get("pago_banco", 0.0) or 0.0)
-    comision_exito = float(totals_lsp.get("comision_exito", 0.0) or 0.0)
-    ce_inicial = float(totals_lsp.get("ce_inicial", 0.0) or 0.0)
-    n_pab = 1
-    plazo = int(totals_lsp.get("plazo", 1) or 1)
-    primer_pago_banco = float(pago_banco)
-    pct_primer_pago = (ce_inicial / comision_exito) if comision_exito > 0 else np.nan
-    cuota_apartado = _to_float_or_nan((liquidacion_sin_portafolio.get("features") or {}).get("C/A", np.nan))
+    # Si solo hay un PaB, el primer pago es todo el PAGO BANCO
+    st.session_state.primer_pago_banco = float(st.session_state.pago_banco or 0.0)
 
+# Detectar cambios en PAGO BANCO / N PaB para recalcular CE
+if (st.session_state._last_pab != st.session_state.pago_banco) or (st.session_state._last_n != st.session_state.n_pab):
+    st.session_state._last_pab = st.session_state.pago_banco
+    st.session_state._last_n   = st.session_state.n_pab
+    _prefill_ce()
+
+# Comisión de éxito (editable) y CE inicial
+c4, c5 = st.columns(2)
+with c4:
+    # Valor automático de referencia
+    auto_ce = float(st.session_state.get("comision_exito_auto", st.session_state.get("comision_exito", 0.0)) or 0.0)
+    new_ce = pesos_input(
+        "🏁 Comisión de éxito (editable)",
+        key="comision_exito",
+        help="Por defecto se calcula con la fórmula, pero puedes ajustarla manualmente."
+    )
+
+    # Si el valor actual se separa del valor "auto", marcamos override
+    if not st.session_state.get("comision_exito_overridden", False):
+        if abs(new_ce - auto_ce) > 0.5:
+            st.session_state.comision_exito_overridden = True
+
+with c5:
+    pesos_input("🧪 CE inicial", key="ce_inicial_val")
+
+# Avance CE inicial vs Comisión de éxito
+st.markdown("#### Avance de CE inicial sobre la Comisión de éxito")
+ce_inicial = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
+base = float(st.session_state.get("comision_exito", 0.0) or 0.0)
+if ce_inicial <= 0:
+    st.info("Escribe un valor en **CE inicial** para ver el porcentaje.")
+elif base <= 0:
+    st.warning("La **Comisión de éxito** debe ser mayor a 0 para calcular el porcentaje.")
+else:
+    porcentaje = (ce_inicial / base) * 100.0
+    porcentaje_capped = max(0.0, min(porcentaje, 100.0))
+    st.progress(int(round(porcentaje_capped)))
+    st.caption(f"CE inicial: {ce_inicial:,.0f}  |  Comisión de éxito: {base:,.0f}  →  **{porcentaje:,.2f}%**")
+
+# =================== 6) Validación y KPIs (sin tabla) ===================
+st.markdown("### 6) Validación y KPIs")
+
+pago_banco        = float(st.session_state.get("pago_banco", 0.0) or 0.0)
+n_pab             = int(st.session_state.get("n_pab", 1) or 1)
+comision_mensual  = float(st.session_state.get("comision_m_edit", 0.0) or 0.0)
+apartado_mensual  = float(st.session_state.get("apartado_edit", 0.0) or 0.0)
+comision_exito    = float(st.session_state.get("comision_exito", 0.0) or 0.0)
+ce_inicial        = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
+
+plazo = st.number_input("📅 PLAZO (meses) (lo ingresas tú)", min_value=1, step=1, value=1)
+
+# Primer PAGO BANCO: si hay más de un PaB, usamos el input; si no, todo el pago
+primer_pago_banco = float(
+    st.session_state.get(
+        "primer_pago_banco",
+        pago_banco if n_pab == 1 else (pago_banco / n_pab if n_pab > 0 else 0.0)
+    )
+)
+primer_pago_banco = min(max(primer_pago_banco, 0.0), pago_banco)
+resto_pago_banco = max(0.0, pago_banco - primer_pago_banco)
+
+pct_primer_pago = (ce_inicial / comision_exito) if comision_exito > 0 else np.nan
+
+if (plazo - 1) > 0 and apartado_mensual > 0:
+    numerador = (comision_exito + resto_pago_banco - ce_inicial + comision_mensual)
+    cuota_apartado = (numerador / (plazo - 1)) / apartado_mensual
+else:
+    cuota_apartado = np.nan
+
+cronograma_df, cronograma_meta = construir_cronograma_pagos(
+    fecha_inicial=date.today(),
+    plazo=int(plazo),
+    n_pab=n_pab,
+    pago_banco_total=pago_banco,
+    primer_pago_banco=primer_pago_banco,
+    comision_total=comision_exito,
+    comision_inicial=ce_inicial,
+)
+
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    st.number_input("🏁 Comisión de éxito total", value=float(comision_exito), step=0.0, format="%.0f", disabled=True)
+with c2:
+    st.number_input("📅 PLAZO (meses)", value=float(plazo), step=1.0, format="%.0f", disabled=True)
+with c3:
+    st.text_input(
+        "% Primer Pago (CE inicial / CE)",
+        value=("—" if np.isnan(pct_primer_pago) else f"{pct_primer_pago:.2f}"),
+        disabled=True
+    )
+with c4:
+    st.text_input(
+        "Cuota/Apartado",
+        value=("—" if np.isnan(cuota_apartado) else f"{cuota_apartado:.4f}"),
+        disabled=True
+    )
+
+if st.session_state.get("comision_exito_overridden", False):
+    st.caption("🔒 Comisión de éxito fijada manualmente: no se recalcula con cambios en PAGO BANCO/N PaB.")
+############################################################################################################################################################################
 st.markdown("### 6.1) Flujo sugerido de pagos")
 
 fecha_cfg_1, fecha_cfg_2, fecha_cfg_3, fecha_cfg_4, fecha_cfg_5 = st.columns([1.2, 1, 1.2, 1, 1])
@@ -2885,109 +2639,8 @@ cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
 for advertencia in advertencias_cronograma:
     st.warning(advertencia)
 
-if liquidacion_sin_portafolio.get("active", False):
-    lsp_detalles = liquidacion_sin_portafolio.get("detalles", {})
-    lsp_overrides_all = st.session_state.get("lsp_cronograma_overrides", {})
-    lsp_total_partes = []
-    lsp_cronogramas_editados = {}
-    st.caption("Modo sin portafolio: cada flujo es editable como en el modo original.")
-
-    for deuda_id, detalle in lsp_detalles.items():
-        cronograma_deuda_base = detalle.get("cronograma", pd.DataFrame()).copy()
-        if cronograma_deuda_base.empty:
-            continue
-
-        deuda_overrides = lsp_overrides_all.get(str(deuda_id), {})
-        editor_key = f"lsp_cronograma_editor_{deuda_id}"
-        editor_state = st.session_state.get(editor_key, {})
-
-        cronograma_base_editado_deuda, _ = aplicar_overrides_cronograma(
-            cronograma_df=cronograma_deuda_base,
-            overrides_map=deuda_overrides,
-            totales_por_tipo=detalle.get("totales_por_tipo", {}),
-            fecha_inicial=date.today(),
-            dia_pago_banco=dia_pago_banco,
-            dia_pago_comision=dia_pago_comision,
-            primer_pago_banco_input=float(detalle.get("primer_pago_banco", 0.0) or 0.0),
-            comision_inicial_input=float(detalle.get("ce_inicial", 0.0) or 0.0),
-        )
-
-        deuda_visible_base = cronograma_base_editado_deuda[cronograma_base_editado_deuda["Cantidad"] > 0.005].reset_index(drop=True)
-        deuda_locked_rows_changed = False
-        for row_position_str, cambios in (editor_state.get("edited_rows", {}) or {}).items():
-            try:
-                row_position = int(row_position_str)
-            except (TypeError, ValueError):
-                continue
-            if row_position < 0 or row_position >= len(deuda_visible_base):
-                continue
-            row = deuda_visible_base.iloc[row_position]
-            if int(row["months_ahead"]) == 0:
-                deuda_locked_rows_changed = True
-                continue
-            row_key = str(row["row_key"])
-            existing = deuda_overrides.get(row_key, {})
-            existing.update(cambios)
-            deuda_overrides[row_key] = existing
-
-        if deuda_locked_rows_changed:
-            st.session_state.pop(editor_key, None)
-            st.info(f"Deuda {deuda_id}: filas 1 y 2 bloqueadas (no editables).")
-            st.rerun()
-
-        lsp_overrides_all[str(deuda_id)] = deuda_overrides
-        cronograma_editado_deuda, advertencias_deuda = aplicar_overrides_cronograma(
-            cronograma_df=cronograma_deuda_base,
-            overrides_map=deuda_overrides,
-            totales_por_tipo=detalle.get("totales_por_tipo", {}),
-            fecha_inicial=date.today(),
-            dia_pago_banco=dia_pago_banco,
-            dia_pago_comision=dia_pago_comision,
-            primer_pago_banco_input=float(detalle.get("primer_pago_banco", 0.0) or 0.0),
-            comision_inicial_input=float(detalle.get("ce_inicial", 0.0) or 0.0),
-        )
-        for advertencia in advertencias_deuda:
-            st.warning(f"Deuda {deuda_id}: {advertencia}")
-
-        st.markdown(f"#### Flujo deuda {deuda_id}")
-        deuda_visible = cronograma_editado_deuda[cronograma_editado_deuda["Cantidad"] > 0.005].copy()
-        deuda_view = deuda_visible[["Fecha", "Cantidad", "Concepto"]].copy()
-        deuda_view["Fecha"] = pd.to_datetime(deuda_view["Fecha"])
-        deuda_view["Cantidad"] = (
-            pd.to_numeric(deuda_view["Cantidad"], errors="coerce")
-            .fillna(0.0)
-            .round(2)
-            .map(_format_currency0)
-        )
-        deuda_view.index = range(1, len(deuda_view) + 1)
-        st.data_editor(
-            deuda_view,
-            key=editor_key,
-            use_container_width=True,
-            num_rows="fixed",
-            hide_index=False,
-            column_config={
-                "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-                "Cantidad": st.column_config.TextColumn("Cantidad"),
-                "Concepto": st.column_config.TextColumn("Concepto", disabled=True),
-            },
-            disabled=["Concepto"],
-        )
-
-        lsp_total_partes.append(cronograma_editado_deuda)
-        lsp_cronogramas_editados[str(deuda_id)] = cronograma_editado_deuda.copy()
-
-    st.session_state["lsp_cronograma_overrides"] = lsp_overrides_all
-    st.session_state["lsp_cronogramas_editados"] = lsp_cronogramas_editados
-    if lsp_total_partes:
-        cronograma_editado = pd.concat(lsp_total_partes, ignore_index=True)
-    st.info("Modo 'Liquidar sin portafolio' activo: el cronograma consolidado suma los flujos editados de todas las deudas seleccionadas.")
-
 cronograma_visible = cronograma_editado[cronograma_editado["Cantidad"] > 0.005].copy()
-if liquidacion_sin_portafolio.get("active", False):
-    if cronograma_visible.empty:
-        st.info("Aún no hay valores suficientes para construir los flujos por deuda.")
-elif not cronograma_visible.empty:
+if not cronograma_visible.empty:
     cronograma_view = cronograma_visible[["Fecha", "Cantidad", "Concepto"]].copy()
     cronograma_view["Fecha"] = pd.to_datetime(cronograma_view["Fecha"])
     cronograma_view["Cantidad"] = (
@@ -3205,20 +2858,13 @@ if not cronograma_editado.empty and not plan_df.empty:
         cedula_cliente_value = _join_unique_values(sel[col_cedula_cliente].tolist()) if col_cedula_cliente else ""
         cliente_lookup = _lookup_cliente_info(ref_input, cedula_cliente_value)
 
-        comision_exito_doc = float(comision_exito)
-        pago_banco_doc = float(pago_banco)
-        if liquidacion_sin_portafolio.get("active", False):
-            totals_lsp = liquidacion_sin_portafolio.get("totals", {})
-            comision_exito_doc = float(totals_lsp.get("comision_exito", comision_exito_doc) or 0.0)
-            pago_banco_doc = float(totals_lsp.get("pago_banco", pago_banco_doc) or 0.0)
-
-        suma_comisiones_total = float(comision_exito_doc) + float(plan_df["Comisión Mensual"].sum())
+        suma_comisiones_total = float(comision_exito) + float(plan_df["Comisión Mensual"].sum())
 
         template_context_default = _build_document_context(
             referencia=ref_input,
             bancos=sel[col_banco].astype(str).tolist(),
-            pago_banco=pago_banco_doc,
-            comision_total=comision_exito_doc,
+            pago_banco=pago_banco,
+            comision_total=comision_exito,
             nombre_cliente=_join_unique_values(sel[col_nombre_cliente].tolist()) if col_nombre_cliente else "",
             numero_producto=_join_unique_values(sel[col_numero_producto].tolist()) if col_numero_producto else "",
             vehiculo=_join_unique_values(sel[col_vehiculo].tolist()) if col_vehiculo else "",
@@ -3238,75 +2884,6 @@ if not cronograma_editado.empty and not plan_df.empty:
             include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
         )
         export_pdf_bytes = convert_docx_bytes_to_pdf_bytes(export_docx_bytes)
-
-        if liquidacion_sin_portafolio.get("active", False):
-            cronos_lsp = st.session_state.get("lsp_cronogramas_editados") or liquidacion_sin_portafolio.get("cronogramas", {})
-            extra_first_pages = []
-            for deuda_id, cronograma_deuda in cronos_lsp.items():
-                sel_deuda = sel[sel[col_id].astype(str) == str(deuda_id)].copy()
-                banco_deuda = _join_unique_values(sel_deuda[col_banco].astype(str).tolist()) if not sel_deuda.empty else ""
-                numero_producto_deuda = (
-                    _join_unique_values(sel_deuda[col_numero_producto].tolist())
-                    if (not sel_deuda.empty and col_numero_producto)
-                    else ""
-                )
-                pago_banco_deuda = float(
-                    cronograma_deuda.loc[
-                        cronograma_deuda["Concepto"].str.contains("Entidad Financiera", na=False),
-                        "Cantidad",
-                    ].sum()
-                )
-                comision_deuda = float(
-                    cronograma_deuda.loc[
-                        cronograma_deuda["Concepto"].str.contains("Comisión Resuelve", na=False),
-                        "Cantidad",
-                    ].sum()
-                )
-
-                default_context_deuda = _build_document_context(
-                    referencia=ref_input,
-                    bancos=[banco_deuda] if banco_deuda else [],
-                    pago_banco=pago_banco_deuda,
-                    comision_total=comision_deuda,
-                    nombre_cliente=_join_unique_values(sel_deuda[col_nombre_cliente].tolist()) if (not sel_deuda.empty and col_nombre_cliente) else "",
-                    numero_producto=numero_producto_deuda,
-                    vehiculo=_join_unique_values(sel_deuda[col_vehiculo].tolist()) if (not sel_deuda.empty and col_vehiculo) else "",
-                    cedula_cliente=_join_unique_values(sel_deuda[col_cedula_cliente].tolist()) if (not sel_deuda.empty and col_cedula_cliente) else cedula_cliente_value,
-                    correo_cliente=_join_unique_values(sel_deuda[col_correo_cliente].tolist()) if (not sel_deuda.empty and col_correo_cliente) else "",
-                    telefono_cliente=cliente_lookup.get("telefono_cliente", ""),
-                    ciudad_cliente=cliente_lookup.get("ciudad_cliente", ""),
-                    direccion_cliente=cliente_lookup.get("direccion_cliente", ""),
-                    suma_comisiones_total=comision_deuda,
-                )
-
-                template_context_deuda = template_context.copy()
-                for field_key in [
-                    "entidad_financiera",
-                    "numero_producto",
-                    "vehiculo",
-                    "cedula_cliente",
-                    "correo_cliente",
-                    "pago_banco",
-                    "comision_total",
-                    "suma_comisiones",
-                    "Suma_comisiones",
-                    "suma comisiones",
-                    "suma_comisiones_letras",
-                ]:
-                    if field_key in default_context_deuda:
-                        template_context_deuda[field_key] = default_context_deuda[field_key]
-
-                export_docx_bytes_deuda = build_recaudo_docx(
-                    template_path=DOCX_TEMPLATE_PATH,
-                    cronograma_df=cronograma_deuda,
-                    plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
-                    template_context=template_context_deuda,
-                    include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
-                )
-                extra_first_pages.append(convert_docx_bytes_to_pdf_bytes(export_docx_bytes_deuda))
-
-            if extra_first_pages:
-                export_pdf_bytes = _compose_multi_flujo_pdf(export_pdf_bytes, extra_first_pages)
     except Exception as export_exc:
         export_pdf_error = str(export_exc)
         st.error(f"No pude preparar el documento PDF: {export_exc}")
@@ -3326,9 +2903,9 @@ if export_pdf_bytes:
         ].sum()
     )
 
-    if suma_comision_resuelve > float(comision_exito_doc if "comision_exito_doc" in locals() else comision_exito) + 0.01:
+    if suma_comision_resuelve > float(comision_exito) + 0.01:
         missing_document_fields.append("Ajustar cronograma: la suma de Comisión Resuelve no puede ser mayor a la Comisión de éxito total")
-    if suma_pago_entidad > float(pago_banco_doc if "pago_banco_doc" in locals() else pago_banco) + 0.01:
+    if suma_pago_entidad > float(pago_banco) + 0.01:
         missing_document_fields.append("Ajustar cronograma: Pago a Entidad Financiera no puede ser mayor a PAGO BANCO")
     referencia_export = re.sub(r"[^A-Za-z0-9._-]+", " ", str(ref_input or "sin referencia")).strip() or "sin referencia"
     export_filename = f"{date.today().isoformat()} - ref {referencia_export}.pdf"
@@ -3352,14 +2929,18 @@ else:
 # =================== 7) Predicción con el modelo ===================
 st.markdown("### 7) Predicción de **recaudo_real** con MLP")
 
+def _to_float_or_nan(x):
+    try:
+        return float(x)
+    except Exception:
+        return np.nan
+
 feature_vals = {
     "PRI-ULT": _to_float_or_nan(plazo),
     "Ratio_PP": _to_float_or_nan(pct_primer_pago if not np.isnan(pct_primer_pago) else np.nan),
     "C/A": _to_float_or_nan(cuota_apartado if not np.isnan(cuota_apartado) else np.nan),
     "AMOUNT_TOTAL": _to_float_or_nan(comision_exito),
 }
-if liquidacion_sin_portafolio.get("active", False) and liquidacion_sin_portafolio.get("features"):
-    feature_vals = liquidacion_sin_portafolio["features"].copy()
 
 with st.expander("🔎 Ver features que se enviarán al modelo (crudas)", expanded=False):
     st.json(feature_vals)
@@ -3636,17 +3217,10 @@ if enviar_aprobacion:
                 "Por favor contacta al equipo de estructurados."
             )
             
-        flow_validacion_pdf = cronograma_visible
-        if liquidacion_sin_portafolio.get("active", False):
-            cronos_lsp = st.session_state.get("lsp_cronogramas_editados") or liquidacion_sin_portafolio.get("cronogramas", {})
-            if cronos_lsp:
-                first_key = next(iter(cronos_lsp))
-                flow_validacion_pdf = cronos_lsp.get(first_key, cronograma_visible)
-
         is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(
             carta_pagare_file,
             ref_input,
-            flow_validacion_pdf,
+            cronograma_visible,
         )
         if not is_valid_pdf:
             st.warning(pdf_validation_message)
