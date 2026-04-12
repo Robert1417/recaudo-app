@@ -225,7 +225,6 @@ def _rebalance_group_amounts(df_group: pd.DataFrame, total_objetivo: float) -> p
     return df_group
 
 
-
 def _parse_amount_input(value, *, max_decimals: int = 2) -> float:
     if value is None:
         return 0.0
@@ -691,182 +690,6 @@ def _remove_graduation_section(document):
     for paragraph in paragraphs[start_idx : end_idx + 1]:
         _remove_paragraph(paragraph)              
 
-
-
-
-def _build_liquidacion_sin_portafolio(
-    sel: pd.DataFrame,
-    ids_sel: list[str],
-    col_id: str,
-    col_banco: str,
-    col_deu: str,
-    col_ce: str,
-):
-    st.markdown("### 2.1) Modo opcional")
-    modo_activo = False
-    if len(ids_sel) > 1:
-        modo_activo = st.checkbox(
-            "Liquidar sin portafolio",
-            value=bool(st.session_state.get("liquidar_sin_portafolio_mode", False)),
-            key="liquidar_sin_portafolio_mode",
-            help="Crea un flujo por cada deuda seleccionada y consolida una sola liquidación estructurada al final.",
-        )
-
-    if not modo_activo:
-        return {
-            "active": False,
-            "cronogramas": {},
-            "cronograma_total": pd.DataFrame(),
-            "features": None,
-            "totals": {},
-        }
-
-    st.caption("Configura cada deuda de forma independiente. El plan de liquidación estructurada se consolida al final.")
-
-    cronogramas = {}
-    resumen = []
-
-    for idx_deuda, deuda_id in enumerate(ids_sel, start=1):
-        row = sel[sel[col_id].astype(str) == str(deuda_id)].iloc[0]
-        banco = str(row[col_banco])
-        deuda_default = float(pd.to_numeric(row[col_deu], errors="coerce") or 0.0)
-        ce_base_default = float(pd.to_numeric(row[col_ce], errors="coerce") or 0.0)
-
-        base_key = f"lsp_{deuda_id}"
-        if f"{base_key}_init" not in st.session_state:
-            st.session_state[f"{base_key}_deuda_res"] = deuda_default
-            st.session_state[f"{base_key}_pago_banco"] = 0.0
-            st.session_state[f"{base_key}_n_pab"] = 1
-            st.session_state[f"{base_key}_primer_pago"] = 0.0
-            st.session_state[f"{base_key}_ce_base"] = ce_base_default
-            auto_ce_ini = max(0.0, (deuda_default - 0.0) * 1.19 * ce_base_default)
-            st.session_state[f"{base_key}_comision_exito"] = auto_ce_ini
-            st.session_state[f"{base_key}_ce_inicial"] = 0.0
-            st.session_state[f"{base_key}_plazo"] = 1
-            st.session_state[f"{base_key}_init"] = True
-
-        with st.expander(f"Deuda {idx_deuda}: ID {deuda_id} • {banco}", expanded=(idx_deuda == 1)):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                pesos_input("Deuda Resuelve", key=f"{base_key}_deuda_res")
-            with c2:
-                pesos_input("PAGO BANCO", key=f"{base_key}_pago_banco")
-            with c3:
-                st.number_input("N PaB", min_value=1, step=1, key=f"{base_key}_n_pab")
-
-            pago_banco = float(st.session_state.get(f"{base_key}_pago_banco", 0.0) or 0.0)
-            n_pab = int(st.session_state.get(f"{base_key}_n_pab", 1) or 1)
-
-            if n_pab > 1:
-                pesos_input("Primer PAGO BANCO", key=f"{base_key}_primer_pago")
-            else:
-                st.session_state[f"{base_key}_primer_pago"] = pago_banco
-
-            deuda_res = float(st.session_state.get(f"{base_key}_deuda_res", 0.0) or 0.0)
-            ce_base = float(st.session_state.get(f"{base_key}_ce_base", ce_base_default) or 0.0)
-            auto_ce = max(0.0, (deuda_res - pago_banco) * 1.19 * ce_base)
-
-            c4, c5, c6 = st.columns(3)
-            with c4:
-                pesos_input("Comisión de éxito", key=f"{base_key}_comision_exito")
-            with c5:
-                pesos_input("CE inicial", key=f"{base_key}_ce_inicial")
-            with c6:
-                st.number_input("PLAZO", min_value=1, step=1, key=f"{base_key}_plazo")
-
-            primer_pago = min(max(float(st.session_state.get(f"{base_key}_primer_pago", 0.0) or 0.0), 0.0), pago_banco)
-            comision_exito = max(0.0, float(st.session_state.get(f"{base_key}_comision_exito", auto_ce) or 0.0))
-            ce_inicial = min(max(float(st.session_state.get(f"{base_key}_ce_inicial", 0.0) or 0.0), 0.0), comision_exito)
-            plazo = int(st.session_state.get(f"{base_key}_plazo", 1) or 1)
-
-            pct_primer_pago = (ce_inicial / comision_exito) if comision_exito > 0 else np.nan
-            cuota_apartado = np.nan
-            apartado_base = float(st.session_state.get("apartado_edit", 0.0) or 0.0)
-            comision_mensual_base = float(st.session_state.get("comision_m_edit", 0.0) or 0.0)
-            resto_pago_banco = max(0.0, pago_banco - primer_pago)
-            if (plazo - 1) > 0 and apartado_base > 0:
-                numerador = (comision_exito + resto_pago_banco - ce_inicial + comision_mensual_base)
-                cuota_apartado = (numerador / (plazo - 1)) / apartado_base
-
-            cronograma_deuda, _ = construir_cronograma_pagos(
-                fecha_inicial=date.today(),
-                plazo=plazo,
-                n_pab=n_pab,
-                pago_banco_total=pago_banco,
-                primer_pago_banco=primer_pago,
-                comision_total=comision_exito,
-                comision_inicial=ce_inicial,
-            )
-            cronogramas[str(deuda_id)] = cronograma_deuda
-
-            st.caption(
-                f"Resumen deuda {deuda_id}: CE total {_format_currency0(comision_exito)} · "
-                f"Ratio_PP {0.0 if np.isnan(pct_primer_pago) else pct_primer_pago:.4f} · "
-                f"C/A {'—' if np.isnan(cuota_apartado) else f'{cuota_apartado:.4f}'}"
-            )
-
-            resumen.append({
-                "deuda_id": str(deuda_id),
-                "plazo": float(plazo),
-                "ce_inicial": float(ce_inicial),
-                "comision_exito": float(comision_exito),
-                "ca": float(0.0 if np.isnan(cuota_apartado) else cuota_apartado),
-                "pago_banco": float(pago_banco),
-            })
-
-    resumen_df = pd.DataFrame(resumen)
-    cronograma_total = pd.concat(list(cronogramas.values()), ignore_index=True) if cronogramas else pd.DataFrame()
-
-    total_ce_inicial = float(resumen_df["ce_inicial"].sum()) if not resumen_df.empty else np.nan
-    total_ce = float(resumen_df["comision_exito"].sum()) if not resumen_df.empty else np.nan
-    pri_ult = float(resumen_df["plazo"].max()) if not resumen_df.empty else np.nan
-    ratio_pp = (total_ce_inicial / total_ce) if total_ce and total_ce > 0 else np.nan
-    c_a = float(resumen_df["ca"].sum()) if not resumen_df.empty else np.nan
-
-    feature_vals = {
-        "PRI-ULT": _to_float_or_nan(pri_ult),
-        "Ratio_PP": _to_float_or_nan(ratio_pp),
-        "C/A": _to_float_or_nan(c_a),
-        "AMOUNT_TOTAL": _to_float_or_nan(total_ce),
-    }
-
-    return {
-        "active": True,
-        "cronogramas": cronogramas,
-        "cronograma_total": cronograma_total,
-        "features": feature_vals,
-        "totals": {
-            "comision_exito": float(total_ce or 0.0),
-            "pago_banco": float(resumen_df["pago_banco"].sum()) if not resumen_df.empty else 0.0,
-            "plazo": int(pri_ult) if not np.isnan(pri_ult) else 1,
-        },
-    }
-
-
-def _compose_multi_flujo_pdf(base_pdf_bytes: bytes, extra_first_page_pdf_bytes: list[bytes]) -> bytes:
-    pypdf_spec = importlib.util.find_spec("pypdf")
-    if not pypdf_spec:
-        raise RuntimeError("No está disponible pypdf para consolidar múltiples flujos en un único PDF.")
-    from pypdf import PdfReader, PdfWriter
-
-    base_reader = PdfReader(BytesIO(base_pdf_bytes))
-    if len(base_reader.pages) == 0:
-        raise RuntimeError("El PDF base no contiene páginas.")
-
-    writer = PdfWriter()
-
-    for extra_pdf in extra_first_page_pdf_bytes:
-        extra_reader = PdfReader(BytesIO(extra_pdf))
-        if len(extra_reader.pages) > 0:
-            writer.add_page(extra_reader.pages[0])
-
-    for page in base_reader.pages[1:]:
-        writer.add_page(page)
-
-    output = BytesIO()
-    writer.write(output)
-    output.seek(0)
-    return output.getvalue()
 
 def build_recaudo_docx(
     template_path: Path,
@@ -2494,15 +2317,6 @@ col_tipo_liquidacion = _find_col(sel, ["Tipo de Liquidacion", "Tipo Liquidacion"
 tipo_liquidacion_val = _join_unique_values(sel[col_tipo_liquidacion].tolist()) if col_tipo_liquidacion else ""
 bancos_sel_text = _join_unique_values(sel[col_banco].astype(str).tolist())
 
-liquidacion_sin_portafolio = _build_liquidacion_sin_portafolio(
-    sel=sel,
-    ids_sel=ids_sel,
-    col_id=col_id,
-    col_banco=col_banco,
-    col_deu=col_deu,
-    col_ce=col_ce,
-)
-
 # =================== 3) Valores base (reactivo) ===================
 st.markdown("### 3) Valores base (puedes editarlos)")
 
@@ -2825,12 +2639,6 @@ cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
 for advertencia in advertencias_cronograma:
     st.warning(advertencia)
 
-if liquidacion_sin_portafolio.get("active", False):
-    cronograma_total_lsp = liquidacion_sin_portafolio.get("cronograma_total", pd.DataFrame())
-    if not cronograma_total_lsp.empty:
-        cronograma_editado = cronograma_total_lsp.copy()
-        st.info("Modo 'Liquidar sin portafolio' activo: el cronograma consolidado suma los flujos de todas las deudas seleccionadas.")
-
 cronograma_visible = cronograma_editado[cronograma_editado["Cantidad"] > 0.005].copy()
 if not cronograma_visible.empty:
     cronograma_view = cronograma_visible[["Fecha", "Cantidad", "Concepto"]].copy()
@@ -3050,20 +2858,13 @@ if not cronograma_editado.empty and not plan_df.empty:
         cedula_cliente_value = _join_unique_values(sel[col_cedula_cliente].tolist()) if col_cedula_cliente else ""
         cliente_lookup = _lookup_cliente_info(ref_input, cedula_cliente_value)
 
-        comision_exito_doc = float(comision_exito)
-        pago_banco_doc = float(pago_banco)
-        if liquidacion_sin_portafolio.get("active", False):
-            totals_lsp = liquidacion_sin_portafolio.get("totals", {})
-            comision_exito_doc = float(totals_lsp.get("comision_exito", comision_exito_doc) or 0.0)
-            pago_banco_doc = float(totals_lsp.get("pago_banco", pago_banco_doc) or 0.0)
-
-        suma_comisiones_total = float(comision_exito_doc) + float(plan_df["Comisión Mensual"].sum())
+        suma_comisiones_total = float(comision_exito) + float(plan_df["Comisión Mensual"].sum())
 
         template_context_default = _build_document_context(
             referencia=ref_input,
             bancos=sel[col_banco].astype(str).tolist(),
-            pago_banco=pago_banco_doc,
-            comision_total=comision_exito_doc,
+            pago_banco=pago_banco,
+            comision_total=comision_exito,
             nombre_cliente=_join_unique_values(sel[col_nombre_cliente].tolist()) if col_nombre_cliente else "",
             numero_producto=_join_unique_values(sel[col_numero_producto].tolist()) if col_numero_producto else "",
             vehiculo=_join_unique_values(sel[col_vehiculo].tolist()) if col_vehiculo else "",
@@ -3083,22 +2884,6 @@ if not cronograma_editado.empty and not plan_df.empty:
             include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
         )
         export_pdf_bytes = convert_docx_bytes_to_pdf_bytes(export_docx_bytes)
-
-        if liquidacion_sin_portafolio.get("active", False):
-            cronos_lsp = liquidacion_sin_portafolio.get("cronogramas", {})
-            extra_first_pages = []
-            for deuda_id, cronograma_deuda in cronos_lsp.items():
-                export_docx_bytes_deuda = build_recaudo_docx(
-                    template_path=DOCX_TEMPLATE_PATH,
-                    cronograma_df=cronograma_deuda,
-                    plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
-                    template_context=template_context,
-                    include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
-                )
-                extra_first_pages.append(convert_docx_bytes_to_pdf_bytes(export_docx_bytes_deuda))
-
-            if extra_first_pages:
-                export_pdf_bytes = _compose_multi_flujo_pdf(export_pdf_bytes, extra_first_pages)
     except Exception as export_exc:
         export_pdf_error = str(export_exc)
         st.error(f"No pude preparar el documento PDF: {export_exc}")
@@ -3118,9 +2903,9 @@ if export_pdf_bytes:
         ].sum()
     )
 
-    if suma_comision_resuelve > float(comision_exito_doc if "comision_exito_doc" in locals() else comision_exito) + 0.01:
+    if suma_comision_resuelve > float(comision_exito) + 0.01:
         missing_document_fields.append("Ajustar cronograma: la suma de Comisión Resuelve no puede ser mayor a la Comisión de éxito total")
-    if suma_pago_entidad > float(pago_banco_doc if "pago_banco_doc" in locals() else pago_banco) + 0.01:
+    if suma_pago_entidad > float(pago_banco) + 0.01:
         missing_document_fields.append("Ajustar cronograma: Pago a Entidad Financiera no puede ser mayor a PAGO BANCO")
     referencia_export = re.sub(r"[^A-Za-z0-9._-]+", " ", str(ref_input or "sin referencia")).strip() or "sin referencia"
     export_filename = f"{date.today().isoformat()} - ref {referencia_export}.pdf"
@@ -3156,8 +2941,6 @@ feature_vals = {
     "C/A": _to_float_or_nan(cuota_apartado if not np.isnan(cuota_apartado) else np.nan),
     "AMOUNT_TOTAL": _to_float_or_nan(comision_exito),
 }
-if liquidacion_sin_portafolio.get("active", False) and liquidacion_sin_portafolio.get("features"):
-    feature_vals = liquidacion_sin_portafolio["features"].copy()
 
 with st.expander("🔎 Ver features que se enviarán al modelo (crudas)", expanded=False):
     st.json(feature_vals)
@@ -3434,17 +3217,10 @@ if enviar_aprobacion:
                 "Por favor contacta al equipo de estructurados."
             )
             
-        flow_validacion_pdf = cronograma_visible
-        if liquidacion_sin_portafolio.get("active", False):
-            cronos_lsp = liquidacion_sin_portafolio.get("cronogramas", {})
-            if cronos_lsp:
-                first_key = next(iter(cronos_lsp))
-                flow_validacion_pdf = cronos_lsp.get(first_key, cronograma_visible)
-
         is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(
             carta_pagare_file,
             ref_input,
-            flow_validacion_pdf,
+            cronograma_visible,
         )
         if not is_valid_pdf:
             st.warning(pdf_validation_message)
