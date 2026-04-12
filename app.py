@@ -1641,8 +1641,7 @@ def enviar_aprobacion_estructurados(
     exact_rows_previas=None,
     
 ):
-    tipo_liquidacion_norm = _norm(tipo_liquidacion)
-    umbral_aprobacion = 0.8 if "tradicional" in tipo_liquidacion_norm else 0.74
+    umbral_aprobacion = 0.8 if _is_traditional_liquidation(tipo_liquidacion) else 0.74
     es_aprobado = float(prediccion or 0.0) >= float(umbral_aprobacion)
     condonacion_value = "Sí" if str(condonacion_mensualidades).strip().lower() == "si" else "No"
     correo_condonacion_link_value = (
@@ -1825,17 +1824,37 @@ def _normalize_reference_token(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper().strip()
 
 
-def _extract_reference_from_text(text: str) -> str:
+def _extract_reference_candidates_from_text(text: str) -> dict[str, list[str]]:
+    results = {"ref": [], "deposito": []}
     if not text:
-        return ""
-    patterns = [
-        r"ref(?:erencia)?\s*(?:no|nro|n\.°|n°|num(?:ero)?)?[:.\-\s]*([A-Za-z0-9\-]{6,})",
-        r"referencia[:.\-\s]*([A-Za-z0-9\-]{6,})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            return _normalize_reference_token(match.group(1))
+        return results
+
+    patterns = {
+        "ref": [
+            r"ref(?:erencia)?\s*(?:no|nro|n\.°|n°|num(?:ero)?)?[:.\-\s]*([A-Za-z0-9\-]{6,})",
+            r"referencia[:.\-\s]*([A-Za-z0-9\-]{6,})",
+        ],
+        "deposito": [
+            r"deposito\s*(?:no|nro|n\.°|n°|num(?:ero)?)?[:.\-\s]*([A-Za-z0-9\-]{6,})",
+            r"dep[oó]sito\s*(?:no|nro|n\.°|n°|num(?:ero)?)?[:.\-\s]*([A-Za-z0-9\-]{6,})",
+        ],
+    }
+
+    for bucket, bucket_patterns in patterns.items():
+        for pattern in bucket_patterns:
+            for match in re.findall(pattern, text, flags=re.IGNORECASE):
+                normalized = _normalize_reference_token(match)
+                if normalized and normalized not in results[bucket]:
+                    results[bucket].append(normalized)
+    return results
+
+
+def _extract_reference_from_text(text: str) -> str:
+    candidates = _extract_reference_candidates_from_text(text)
+    for value in candidates.get("ref", []):
+        return value
+    for value in candidates.get("deposito", []):
+        return value
     return ""
 
 
@@ -1955,14 +1974,23 @@ def _validate_flow_matches_pdf(first_page_text: str, expected_flow_df: pd.DataFr
         return False, "La columna Cantidad de la tabla no coincide entre calculadora y PDF."
 
     diferencias = []
+    filas_ok = 0
+    filas_totales = len(expected_by_n)
     for n_val in sorted(expected_by_n.keys()):
         expected_amount = expected_by_n.get(n_val)
         pdf_amount = pdf_by_n.get(n_val)
         if pdf_amount is None:
             diferencias.append((n_val, expected_amount, None))
             continue
-        if abs(float(expected_amount) - float(pdf_amount)) > 1.0:
+        tolerancia = max(1.0, abs(float(expected_amount)) * 0.02)
+        if abs(float(expected_amount) - float(pdf_amount)) > tolerancia:
             diferencias.append((n_val, expected_amount, pdf_amount))
+            continue
+        filas_ok += 1
+
+    similitud = (filas_ok / filas_totales) if filas_totales else 1.0
+    if similitud < 0.98:
+        diferencias.append(("similitud", filas_ok, filas_totales))
 
     if diferencias:
         def _fmt_cop_plain(value: float | int) -> str:
@@ -1971,6 +1999,12 @@ def _validate_flow_matches_pdf(first_page_text: str, expected_flow_df: pd.DataFr
             return f"{base} COP"
 
         n_val, expected_amount, pdf_amount = diferencias[0]
+        if n_val == "similitud":
+            return (
+                False,
+                "La tabla del PDF no cumple la similitud mínima del 98% "
+                f"({expected_amount}/{pdf_amount} filas coinciden)."
+            )
         if pdf_amount is None:
             return False, f"La columna Cantidad no coincide: falta la fila N° {n_val} en la tabla del PDF."
         return (
@@ -1992,6 +2026,7 @@ def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str, expected_
         return False, f"No pude leer el PDF adjunto: {exc}"
 
     expected_ref_norm = _normalize_reference_token(expected_reference)
+    found_candidates = _extract_reference_candidates_from_text(first_page_text)
     found_ref_norm = _extract_reference_from_text(first_page_text)
     has_qr = _has_qr_signal_in_last_page(last_page_text)
 
@@ -1999,8 +2034,13 @@ def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str, expected_
         return False, "Se subió el documento equivocado."
     if not found_ref_norm:
         return False, "Se subió el documento equivocado, no se encontró la referencia."
-    if expected_ref_norm and found_ref_norm != expected_ref_norm:
+    ref_candidates = found_candidates.get("ref", [])
+    deposito_candidates = found_candidates.get("deposito", [])
+    all_candidates = set(ref_candidates + deposito_candidates)
+    if expected_ref_norm and expected_ref_norm not in all_candidates:
         return False, "Subió el documento equivocado, la referencia no concuerda."
+    if deposito_candidates and expected_ref_norm and expected_ref_norm not in set(deposito_candidates):
+        return False, "Subió el documento equivocado, el número de depósito no concuerda con la referencia."
     if not has_qr:
         return False, "El documento no está firmado."
     flow_matches, flow_message = _validate_flow_matches_pdf(first_page_text, expected_flow_df)
@@ -2021,6 +2061,21 @@ def _complete_drive_oauth_with_code(code: str):
     creds = flow.credentials
     st.session_state.drive_user_token = json.loads(creds.to_json())
     st.session_state.drive_auth_in_progress = False
+
+
+def _is_corporate_email(email: str) -> bool:
+    return str(email or "").strip().lower().endswith("@gobravo.com.co")
+
+
+def _is_traditional_liquidation(tipo_liquidacion: str) -> bool:
+    tipo_norm = _norm(tipo_liquidacion)
+    if not tipo_norm:
+        return False
+    if "no tradicional" in tipo_norm:
+        return False
+    if "tradicional" in tipo_norm:
+        return True
+    return False
 
 def _find_col(df: pd.DataFrame, candidates):
     cols = {_norm(c): c for c in df.columns}
@@ -3123,6 +3178,8 @@ if enviar_aprobacion:
         st.warning("Primero debes presionar **Predecir recaudo**.")
     elif not correo_para_sheets:
         st.warning("Debes ingresar el correo electrónico antes de enviar.")
+    elif not _is_corporate_email(correo_para_sheets):
+        st.warning("Correo incorrecto: debe terminar en @gobravo.com.co.")
     elif condonacion_mensualidades not in {"Si", "No"}:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
     elif carta_pagare_file is None or pantallazo_file is None:
@@ -3211,6 +3268,7 @@ if enviar_aprobacion:
     if (
         pred_value is not None
         and correo_para_sheets
+        and _is_corporate_email(correo_para_sheets)
         and condonacion_mensualidades in {"Si", "No"}
         and carta_link_final
         and pantallazo_link_final
