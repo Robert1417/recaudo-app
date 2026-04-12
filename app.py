@@ -707,7 +707,7 @@ def _build_liquidacion_sin_portafolio(
     col_deu: str,
     col_ce: str,
 ):
-    st.markdown("### 2.1) Modo opcional")
+    
     modo_activo = False
     if len(ids_sel) > 1:
         modo_activo = st.checkbox(
