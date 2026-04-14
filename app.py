@@ -29,6 +29,7 @@ from urllib.parse import urlparse, parse_qs
 import gspread
 from google.oauth2.service_account import Credentials
 from google.oauth2.credentials import Credentials as UserCredentials
+from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -2059,13 +2060,35 @@ def _extract_oauth_code(redirect_text: str) -> str:
 
 
 def _build_drive_service_from_session():
+    creds = _get_drive_user_credentials()
+    if creds is None:
+        return None
+    return build("drive", "v3", credentials=creds)
+
+
+def _get_drive_user_credentials(*, refresh_if_needed: bool = True):
     token_data = st.session_state.get("drive_user_token")
     if not token_data:
         return None
-    creds = UserCredentials.from_authorized_user_info(token_data, GOOGLE_DRIVE_UPLOAD_SCOPES)
-    if not creds.valid:
+    try:
+        creds = UserCredentials.from_authorized_user_info(token_data, GOOGLE_DRIVE_UPLOAD_SCOPES)
+    except Exception:
         return None
-    return build("drive", "v3", credentials=creds)
+
+    if creds.valid:
+        return creds
+
+    can_refresh = bool(creds.expired and creds.refresh_token and refresh_if_needed)
+    if not can_refresh:
+        return None
+
+    try:
+        creds.refresh(Request())
+        st.session_state.drive_user_token = json.loads(creds.to_json())
+        _persist_drive_token_in_query()
+        return creds
+    except Exception:
+        return None
 
 
 def _upload_file_to_drive(
@@ -3619,10 +3642,13 @@ if not oauth_disponible:
         "Configura GOOGLE_OAUTH_CLIENT_ID y GOOGLE_OAUTH_CLIENT_SECRET."
     )
 else:
-    if st.session_state.get("drive_user_token"):
+    if _get_drive_user_credentials() is not None:
         st.success("Cuenta Drive autenticada en esta sesión.")
     else:
-        st.error("Sin autenticación activa. Recarga la app para autenticar desde el inicio.")
+        st.error(
+            "Sin autenticación activa. Tu sesión de Google pudo expirar; "
+            "recarga la app para autenticar de nuevo."
+        )
 
     carta_pagare_file = st.file_uploader(
         "📎 Adjuntar carta con pagaré firmado (PDF)",
