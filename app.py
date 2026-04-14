@@ -12,7 +12,7 @@ import ast
 import csv
 from joblib import load
 import re  # ✅ NUEVO
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import os
 import html as html_lib
 from io import BytesIO
@@ -2075,10 +2075,24 @@ def _get_drive_user_credentials(*, refresh_if_needed: bool = True):
     except Exception:
         return None
 
-    if creds.valid:
+    should_refresh_proactively = False
+    expiry = getattr(creds, "expiry", None)
+    if expiry is not None:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            expiry_utc = expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)
+            should_refresh_proactively = (expiry_utc - now_utc) <= timedelta(minutes=5)
+        except Exception:
+            should_refresh_proactively = False
+
+    if creds.valid and not should_refresh_proactively:
         return creds
 
-    can_refresh = bool(creds.expired and creds.refresh_token and refresh_if_needed)
+    can_refresh = bool(
+        refresh_if_needed
+        and creds.refresh_token
+        and (creds.expired or should_refresh_proactively)
+    )
     if not can_refresh:
         return None
 
@@ -2424,6 +2438,11 @@ def _require_drive_authentication() -> None:
             st.rerun()
         except Exception as e:
             st.error(f"No fue posible completar OAuth automáticamente: {e}")
+
+    if st.session_state.get("drive_user_token"):
+        active_creds = _get_drive_user_credentials(refresh_if_needed=True)
+        if active_creds is None:
+            st.session_state.pop("drive_user_token", None)
 
     if not st.session_state.get("drive_user_token"):
         st.info("Antes de usar la calculadora debes autenticar tu cuenta Google.")
