@@ -2084,7 +2084,11 @@ def _get_drive_user_credentials(*, refresh_if_needed: bool = True):
 
     try:
         creds.refresh(Request())
-        st.session_state.drive_user_token = json.loads(creds.to_json())
+        refreshed_token = json.loads(creds.to_json())
+        previous_refresh_token = str(token_data.get("refresh_token", "")).strip()
+        if previous_refresh_token and not str(refreshed_token.get("refresh_token", "")).strip():
+            refreshed_token["refresh_token"] = previous_refresh_token
+        st.session_state.drive_user_token = refreshed_token
         _persist_drive_token_in_query()
         return creds
     except Exception:
@@ -3645,9 +3649,9 @@ else:
     if _get_drive_user_credentials() is not None:
         st.success("Cuenta Drive autenticada en esta sesión.")
     else:
-        st.error(
-            "Sin autenticación activa. Tu sesión de Google pudo expirar; "
-            "recarga la app para autenticar de nuevo."
+        st.info(
+            "La sesión de Drive se validará y refrescará automáticamente "
+            "cuando envíes a aprobación."
         )
 
     carta_pagare_file = st.file_uploader(
@@ -3748,7 +3752,10 @@ if enviar_aprobacion:
         try:
             drive_service = _build_drive_service_from_session()
             if drive_service is None:
-                st.warning("Debes autenticar Drive antes de enviar la aprobación.")
+                st.warning(
+                    "No fue posible recuperar automáticamente la sesión de Drive. "
+                    "Recarga la app e intenta nuevamente."
+                )
                 st.stop()
 
             carta_upload = _upload_file_to_drive(
