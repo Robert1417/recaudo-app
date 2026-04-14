@@ -12,7 +12,7 @@ import ast
 import csv
 from joblib import load
 import re  # ✅ NUEVO
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import os
 import html as html_lib
 from io import BytesIO
@@ -29,6 +29,7 @@ from urllib.parse import urlparse, parse_qs
 import gspread
 from google.oauth2.service_account import Credentials
 from google.oauth2.credentials import Credentials as UserCredentials
+from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -2059,13 +2060,53 @@ def _extract_oauth_code(redirect_text: str) -> str:
 
 
 def _build_drive_service_from_session():
+    creds = _get_drive_user_credentials()
+    if creds is None:
+        return None
+    return build("drive", "v3", credentials=creds)
+
+
+def _get_drive_user_credentials(*, refresh_if_needed: bool = True):
     token_data = st.session_state.get("drive_user_token")
     if not token_data:
         return None
-    creds = UserCredentials.from_authorized_user_info(token_data, GOOGLE_DRIVE_UPLOAD_SCOPES)
-    if not creds.valid:
+    try:
+        creds = UserCredentials.from_authorized_user_info(token_data, GOOGLE_DRIVE_UPLOAD_SCOPES)
+    except Exception:
         return None
-    return build("drive", "v3", credentials=creds)
+
+    should_refresh_proactively = False
+    expiry = getattr(creds, "expiry", None)
+    if expiry is not None:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            expiry_utc = expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)
+            should_refresh_proactively = (expiry_utc - now_utc) <= timedelta(minutes=5)
+        except Exception:
+            should_refresh_proactively = False
+
+    if creds.valid and not should_refresh_proactively:
+        return creds
+
+    can_refresh = bool(
+        refresh_if_needed
+        and creds.refresh_token
+        and (creds.expired or should_refresh_proactively)
+    )
+    if not can_refresh:
+        return None
+
+    try:
+        creds.refresh(Request())
+        refreshed_token = json.loads(creds.to_json())
+        previous_refresh_token = str(token_data.get("refresh_token", "")).strip()
+        if previous_refresh_token and not str(refreshed_token.get("refresh_token", "")).strip():
+            refreshed_token["refresh_token"] = previous_refresh_token
+        st.session_state.drive_user_token = refreshed_token
+        _persist_drive_token_in_query()
+        return creds
+    except Exception:
+        return None
 
 
 def _upload_file_to_drive(
@@ -2397,6 +2438,11 @@ def _require_drive_authentication() -> None:
             st.rerun()
         except Exception as e:
             st.error(f"No fue posible completar OAuth automáticamente: {e}")
+
+    if st.session_state.get("drive_user_token"):
+        active_creds = _get_drive_user_credentials(refresh_if_needed=True)
+        if active_creds is None:
+            st.session_state.pop("drive_user_token", None)
 
     if not st.session_state.get("drive_user_token"):
         st.info("Antes de usar la calculadora debes autenticar tu cuenta Google.")
@@ -3619,10 +3665,13 @@ if not oauth_disponible:
         "Configura GOOGLE_OAUTH_CLIENT_ID y GOOGLE_OAUTH_CLIENT_SECRET."
     )
 else:
-    if st.session_state.get("drive_user_token"):
+    if _get_drive_user_credentials() is not None:
         st.success("Cuenta Drive autenticada en esta sesión.")
     else:
-        st.error("Sin autenticación activa. Recarga la app para autenticar desde el inicio.")
+        st.info(
+            "La sesión de Drive se validará y refrescará automáticamente "
+            "cuando envíes a aprobación."
+        )
 
     carta_pagare_file = st.file_uploader(
         "📎 Adjuntar carta con pagaré firmado (PDF)",
@@ -3722,7 +3771,10 @@ if enviar_aprobacion:
         try:
             drive_service = _build_drive_service_from_session()
             if drive_service is None:
-                st.warning("Debes autenticar Drive antes de enviar la aprobación.")
+                st.warning(
+                    "No fue posible recuperar automáticamente la sesión de Drive. "
+                    "Recarga la app e intenta nuevamente."
+                )
                 st.stop()
 
             carta_upload = _upload_file_to_drive(
