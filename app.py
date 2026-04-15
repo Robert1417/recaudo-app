@@ -24,7 +24,6 @@ import shutil
 import tempfile
 import importlib.util
 import secrets
-import uuid
 from urllib.parse import urlparse, parse_qs
 
 import gspread
@@ -152,9 +151,6 @@ GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 GOOGLE_DRIVE_UPLOAD_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-DRAFT_STATE_QUERY_KEY = "draft_id"
-DRAFT_STATE_DIR = Path(gettempdir()) / "recaudo_app_drafts"
-DRAFT_STATE_MAX_AGE_HOURS = 72
 DRIVE_FOLDER_CARTA_PAGARE_ID = "1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk"
 DRIVE_FOLDER_PANTALLAZOS_ID = "1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1"
 DRIVE_FOLDER_CONDONACION_CORREO_ID = "1CN73OI6DjyEVGLsu1m9iszPPJ4xKfTZM5aMQ-lHNwHnlgzck0VjdL3MX5RuObC_n3zs-MFNF"
@@ -2030,87 +2026,8 @@ def _persist_drive_token_in_query() -> None:
     if not token_data or not hasattr(st, "query_params"):
         return
     try:
+        st.query_params.clear()
         st.query_params["drive_token"] = _encode_token_for_query(token_data)
-    except Exception:
-        return
-
-
-def _get_or_create_draft_id() -> str:
-    draft_id = str(st.session_state.get(DRAFT_STATE_QUERY_KEY, "")).strip()
-    if not draft_id and hasattr(st, "query_params"):
-        draft_id = str(st.query_params.get(DRAFT_STATE_QUERY_KEY, "")).strip()
-    if not draft_id:
-        draft_id = uuid.uuid4().hex
-    st.session_state[DRAFT_STATE_QUERY_KEY] = draft_id
-    if hasattr(st, "query_params"):
-        try:
-            st.query_params[DRAFT_STATE_QUERY_KEY] = draft_id
-        except Exception:
-            pass
-    return draft_id
-
-
-def _draft_file_path() -> Path:
-    draft_id = _get_or_create_draft_id()
-    DRAFT_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    return DRAFT_STATE_DIR / f"{draft_id}.json"
-
-
-def _is_json_serializable(value) -> bool:
-    try:
-        json.dumps(value)
-        return True
-    except Exception:
-        return False
-
-
-def _restore_draft_state() -> None:
-    if st.session_state.get("_draft_state_restored", False):
-        return
-    st.session_state._draft_state_restored = True
-    path = _draft_file_path()
-    if not path.exists():
-        return
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        saved_at = datetime.fromisoformat(str(payload.get("saved_at")))
-        if (datetime.now() - saved_at).total_seconds() > DRAFT_STATE_MAX_AGE_HOURS * 3600:
-            return
-        state_data = payload.get("state", {})
-        if not isinstance(state_data, dict):
-            return
-        for key, value in state_data.items():
-            if key not in st.session_state:
-                st.session_state[key] = value
-    except Exception:
-        return
-
-
-def _persist_draft_state() -> None:
-    skip_prefixes = ("drive_", "_", "FormSubmitter")
-    skip_keys = {
-        DRAFT_STATE_QUERY_KEY,
-        "drive_token",
-        "drive_auth_url",
-        "drive_auth_client_config",
-        "drive_oauth_code_verifier",
-        "drive_oauth_state",
-        "drive_last_processed_code",
-        "_draft_state_restored",
-    }
-    state_data = {}
-    for key, value in st.session_state.items():
-        key_str = str(key)
-        if key_str in skip_keys or key_str.startswith(skip_prefixes):
-            continue
-        if _is_json_serializable(value):
-            state_data[key_str] = value
-    payload = {
-        "saved_at": datetime.now().isoformat(),
-        "state": state_data,
-    }
-    try:
-        _draft_file_path().write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception:
         return
 
@@ -2548,7 +2465,6 @@ def _require_drive_authentication() -> None:
 
 
 _require_drive_authentication()
-_restore_draft_state()
 
 
 def _is_corporate_email(email: str) -> bool:
@@ -2625,8 +2541,6 @@ def _format_pesos(value) -> str:
         return ""
     if np.isnan(v):
         return ""
-    if abs(v) < 1e-9:
-        return ""
     # Formato colombiano: punto miles, coma decimales (máx 2),
     # ocultando decimales cuando sean .00 por defecto.
     return _format_number_es(v, max_decimals=2, trim_trailing=True)
@@ -2678,51 +2592,6 @@ def _prefill_ce():
     ce = max(0.0, (deuda_res - pago_bco) * 1.19 * ce_base)
     st.session_state.comision_exito = ce
     st.session_state.comision_exito_auto = ce  # guardamos referencia del valor "auto"
-
-
-def _reset_reference_dependent_state(new_reference: str) -> None:
-    ref_now = str(new_reference or "").strip()
-    prev_ref = str(st.session_state.get("_active_reference", "")).strip()
-    if not ref_now or ref_now == prev_ref:
-        return
-
-    dynamic_prefixes = (
-        "selector_ids_",
-        "cronograma_",
-        "plan_liquidacion_",
-        "lsp_",
-    )
-    dynamic_exact_keys = {
-        "sig_sel",
-        "deuda_res_edit",
-        "comision_m_edit",
-        "apartado_edit",
-        "saldo_edit",
-        "ce_base",
-        "pago_banco",
-        "n_pab",
-        "primer_pago_banco",
-        "comision_exito",
-        "comision_exito_auto",
-        "comision_exito_overridden",
-        "ce_inicial_val",
-        "deposito_edit",
-        "_last_pab",
-        "_last_n",
-        "_prev_n_pab_for_primer",
-        "duplicate_confirm_key",
-        "last_prediction_value",
-        "last_prediction_ready",
-    }
-
-    for key in list(st.session_state.keys()):
-        key_str = str(key)
-        if key_str in dynamic_exact_keys or key_str.startswith(dynamic_prefixes):
-            st.session_state.pop(key, None)
-            st.session_state.pop(f"{key_str}_display", None)
-            st.session_state.pop(f"{key_str}_display_synced", None)
-
-    st.session_state["_active_reference"] = ref_now
     
 # =================== 1) Cargar base ===================
 st.markdown("### 1) Base `cartera_asignada_filtrada`")
@@ -2799,7 +2668,6 @@ st.success(f"✅ Base lista • filas: {len(df_base):,}")
 # =================== 2) Referencia → seleccionar id(s) ===================
 st.markdown("### 2) Referencia → seleccionar **Id deuda** (uno o varios)")
 ref_input = st.text_input("🔎 Escribe la **Referencia** (exacta como aparece en la base)")
-_reset_reference_dependent_state(ref_input)
 if not ref_input:
     st.stop()
 
@@ -2819,25 +2687,31 @@ df_preview["Banco"] = df_preview["Banco"].astype(str)
 df_preview["Deuda"] = pd.to_numeric(df_preview["Deuda"], errors="coerce").fillna(0.0)
 
 selector_key = f"selector_ids_{ref_input}"
-default_ids = df_preview["Id deuda"].head(1).astype(str).tolist()
+default_ids = set(df_preview["Id deuda"].head(1).tolist())
 if selector_key not in st.session_state:
     st.session_state[selector_key] = default_ids
 
 df_selector = df_preview.copy()
+df_selector["Seleccionar"] = df_selector["Id deuda"].isin(st.session_state[selector_key])
 df_selector["Deuda"] = df_selector["Deuda"].map(_format_currency0)
-st.dataframe(
-    df_selector[["Id deuda", "Banco", "Deuda"]],
+
+edited_selector = st.data_editor(
+    df_selector[["Seleccionar", "Id deuda", "Banco", "Deuda"]],
     hide_index=True,
     use_container_width=True,
+    disabled=["Id deuda", "Banco", "Deuda"],
+    column_config={
+        "Seleccionar": st.column_config.CheckboxColumn(
+            "✅ Seleccionar",
+            help="Marca los Id deuda que quieres incluir en el cálculo.",
+            default=False,
+        )
+    },
+    key=f"{selector_key}_editor",
 )
 
-ids_sel = st.multiselect(
-    "✅ Selecciona uno o varios Id deuda",
-    options=df_preview["Id deuda"].astype(str).tolist(),
-    default=st.session_state.get(selector_key, default_ids),
-    key=selector_key,
-    help="Selecciona los Id deuda a incluir en el cálculo.",
-)
+ids_sel = edited_selector.loc[edited_selector["Seleccionar"], "Id deuda"].astype(str).tolist()
+st.session_state[selector_key] = set(ids_sel)
 if not ids_sel:
     st.info("Selecciona al menos un Id deuda para continuar.")
     st.stop()
@@ -2892,6 +2766,8 @@ if st.session_state.get("sig_sel") != sig_sel:
 
     st.session_state._last_pab = st.session_state.pago_banco
     st.session_state._last_n   = st.session_state.n_pab
+
+    st.rerun()
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
