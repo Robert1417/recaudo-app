@@ -2691,6 +2691,10 @@ def _reset_reference_dependent_state(new_reference: str) -> None:
         "cronograma_",
         "plan_liquidacion_",
         "lsp_",
+        "doc_",
+        "carta_pagare_",
+        "pantallazo_",
+        "aprobacion_",
     )
     dynamic_exact_keys = {
         "sig_sel",
