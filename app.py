@@ -2258,29 +2258,32 @@ def _extract_reference_from_text(text: str) -> str:
     return ""
 
 
-def _extract_pdf_first_last_text(pdf_bytes: bytes) -> tuple[str, str]:
+def _extract_pdf_first_last_text(pdf_bytes: bytes) -> tuple[str, str, int]:
     first_page_text = ""
     last_page_text = ""
+    page_count = 0
 
     pypdf_spec = importlib.util.find_spec("pypdf")
     if pypdf_spec:
         from pypdf import PdfReader
 
         reader = PdfReader(BytesIO(pdf_bytes))
-        if len(reader.pages) > 0:
+        page_count = len(reader.pages)
+        if page_count > 0:
             first_page_text = str(reader.pages[0].extract_text() or "")
             last_page_text = str(reader.pages[-1].extract_text() or "")
-        return first_page_text, last_page_text
+        return first_page_text, last_page_text, page_count
 
     pypdf2_spec = importlib.util.find_spec("PyPDF2")
     if pypdf2_spec:
         from PyPDF2 import PdfReader
 
         reader = PdfReader(BytesIO(pdf_bytes))
-        if len(reader.pages) > 0:
+        page_count = len(reader.pages)
+        if page_count > 0:
             first_page_text = str(reader.pages[0].extract_text() or "")
             last_page_text = str(reader.pages[-1].extract_text() or "")
-        return first_page_text, last_page_text
+        return first_page_text, last_page_text, page_count
 
     raise RuntimeError("No hay librería instalada para leer PDFs (pypdf/PyPDF2).")
 
@@ -2421,9 +2424,12 @@ def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str, expected_
         return False, "Debes adjuntar Carta/Pagaré (solo PDF)."
     try:
         pdf_bytes = uploaded_file.getvalue()
-        first_page_text, last_page_text = _extract_pdf_first_last_text(pdf_bytes)
+        first_page_text, last_page_text, page_count = _extract_pdf_first_last_text(pdf_bytes)
     except Exception as exc:
         return False, f"No pude leer el PDF adjunto: {exc}"
+
+    if int(page_count or 0) < 6:
+        return False, "Te faltó adjuntar el pagaré firmado."
 
     expected_ref_norm = _normalize_reference_token(expected_reference)
     found_candidates = _extract_reference_candidates_from_text(first_page_text)
