@@ -143,6 +143,7 @@ MODEL_PATH   = Path("mlp_recaudo_pipeline.joblib")
 META_PATH    = Path("mlp_recaudo_meta.json")
 LOG_PATH     = Path("data/logs/logs_calculadora.csv")
 DOCX_TEMPLATE_PATH = Path("data/Documento Estructurados en Blanco.docx")
+DOCX_TEMPLATE_PATH_NUEVO = Path("data/Nuevo formato Otrosi P.E  en blanco.docx")
 CLIENTES_LOOKUP_PATH = Path("data/Consulta_F_Clientes_Parte_1.csv")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB = "Historico Calculadora"
@@ -963,6 +964,66 @@ def build_recaudo_docx(
     _populate_docx_table(document.tables[0], cronograma_rows)
     _apply_cronograma_table_layout(document.tables[0])
     _populate_docx_table(document.tables[1], plan_rows)
+
+    output = BytesIO()
+    document.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def build_recaudo_docx_nuevo_formato(
+    template_path: Path,
+    cronograma_df: pd.DataFrame,
+    plan_df: pd.DataFrame,
+    template_context: dict[str, str],
+    include_graduation_section: bool = False,
+) -> bytes:
+    """
+    Genera el nuevo pagaré firmado manteniendo la construcción del cronograma
+    (validación obligatoria del flujo) pero exportando:
+    - Tabla principal (primera hoja): plan de liquidación.
+    - Tabla pequeña (cuarta hoja): fecha límite + apartado total.
+    """
+    if not template_path.exists():
+        raise FileNotFoundError(f"No encontré la plantilla Word: {template_path}")
+
+    document = Document(str(template_path))
+    _apply_context_to_document(document, template_context)
+    if not include_graduation_section:
+        _remove_graduation_section(document)
+    if len(document.tables) < 3:
+        raise ValueError("La nueva plantilla Word debe tener al menos tres tablas para reemplazar.")
+
+    cronograma_export = cronograma_df[cronograma_df["Cantidad"] > 0.005][["Fecha", "Cantidad", "Concepto"]].copy()
+    _ = [
+        [
+            str(idx + 1),
+            _format_date_ddmmyyyy(row["Fecha"]),
+            _format_currency_cop(row["Cantidad"]),
+            str(row["Concepto"]),
+        ]
+        for idx, row in cronograma_export.reset_index(drop=True).iterrows()
+    ]
+
+    plan_export = plan_df.copy()
+    plan_rows = []
+    for _, row in plan_export.iterrows():
+        plan_rows.append([
+            _format_date_ddmmyyyy(row["Fecha Límite de Pago"]),
+            _table_cell_text(row["Pago a Banco"]),
+            _table_cell_text(row["Comisión de Éxito"]),
+            _table_cell_text(row["Comisión Mensual"]),
+            _table_cell_text(row["Apartado Requerido"]),
+        ])
+
+    fecha_limite_total = ""
+    apartado_total = 0.0
+    if not plan_export.empty:
+        fecha_limite_total = _format_date_ddmmyyyy(plan_export.iloc[0]["Fecha Límite de Pago"])
+        apartado_total = float(pd.to_numeric(plan_export["Apartado Requerido"], errors="coerce").fillna(0.0).sum())
+
+    _populate_docx_table(document.tables[1], plan_rows)
+    _populate_docx_table(document.tables[2], [[fecha_limite_total, _format_currency_cop(apartado_total)]])
 
     output = BytesIO()
     document.save(output)
@@ -3530,6 +3591,7 @@ elif st.session_state.doc_graduacion_check and st.session_state.doc_graduacion_c
     st.caption("Graduación confirmada: el Word incluirá el punto 6 en la primera página.")
 
 export_pdf_bytes = None
+export_pdf_bytes_nuevo_pagare = None
 export_pdf_error = None
 if not cronograma_editado.empty and not plan_df.empty:
     try:
@@ -3575,10 +3637,23 @@ if not cronograma_editado.empty and not plan_df.empty:
             include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
         )
         export_pdf_bytes = convert_docx_bytes_to_pdf_bytes(export_docx_bytes)
+        try:
+            export_docx_bytes_nuevo_pagare = build_recaudo_docx_nuevo_formato(
+                template_path=DOCX_TEMPLATE_PATH_NUEVO,
+                cronograma_df=cronograma_editado,
+                plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
+                template_context=template_context,
+                include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
+            )
+            export_pdf_bytes_nuevo_pagare = convert_docx_bytes_to_pdf_bytes(export_docx_bytes_nuevo_pagare)
+        except Exception as export_exc_nuevo_pagare:
+            export_pdf_bytes_nuevo_pagare = None
+            st.warning(f"No pude preparar el nuevo pagaré firmado: {export_exc_nuevo_pagare}")
 
         if liquidacion_sin_portafolio.get("active", False):
             cronos_lsp = st.session_state.get("lsp_cronogramas_editados") or liquidacion_sin_portafolio.get("cronogramas", {})
             extra_first_pages = []
+            extra_first_pages_nuevo_pagare = []
             for deuda_id, cronograma_deuda in cronos_lsp.items():
                 sel_deuda = sel[sel[col_id].astype(str) == str(deuda_id)].copy()
                 banco_deuda = _join_unique_values(sel_deuda[col_banco].astype(str).tolist()) if not sel_deuda.empty else ""
@@ -3638,9 +3713,20 @@ if not cronograma_editado.empty and not plan_df.empty:
                     include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
                 )
                 extra_first_pages.append(convert_docx_bytes_to_pdf_bytes(export_docx_bytes_deuda))
+                if export_pdf_bytes_nuevo_pagare:
+                    export_docx_bytes_deuda_nuevo_pagare = build_recaudo_docx_nuevo_formato(
+                        template_path=DOCX_TEMPLATE_PATH_NUEVO,
+                        cronograma_df=cronograma_deuda,
+                        plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
+                        template_context=template_context_deuda,
+                        include_graduation_section=bool(st.session_state.get("doc_graduacion_check", False) and st.session_state.get("doc_graduacion_confirmada", False)),
+                    )
+                    extra_first_pages_nuevo_pagare.append(convert_docx_bytes_to_pdf_bytes(export_docx_bytes_deuda_nuevo_pagare))
 
             if extra_first_pages:
                 export_pdf_bytes = _compose_multi_flujo_pdf(export_pdf_bytes, extra_first_pages)
+            if extra_first_pages_nuevo_pagare:
+                export_pdf_bytes_nuevo_pagare = _compose_multi_flujo_pdf(export_pdf_bytes_nuevo_pagare, extra_first_pages_nuevo_pagare)
     except Exception as export_exc:
         export_pdf_error = str(export_exc)
         st.error(f"No pude preparar el documento PDF: {export_exc}")
@@ -3675,6 +3761,14 @@ if export_pdf_bytes:
         mime="application/pdf",
         use_container_width=True,
         disabled=bool(missing_document_fields),
+    )
+    st.download_button(
+        "⬇️ Descargar Nuevo pagaré firmado",
+        data=export_pdf_bytes_nuevo_pagare,
+        file_name=f"{date.today().isoformat()} - ref {referencia_export} - nuevo pagare.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+        disabled=bool(missing_document_fields) or not bool(export_pdf_bytes_nuevo_pagare),
     )
 else:
     if not export_pdf_error:
