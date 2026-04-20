@@ -3493,6 +3493,8 @@ st.caption(
     "Las celdas exportadas se normalizan en Times New Roman 9.5 para que el estilo interno coincida con el resto del documento."
 )
 
+ce_inicial_minimo_aprobacion = 10000.0
+
 if "doc_graduacion_confirmada" not in st.session_state:
     st.session_state.doc_graduacion_confirmada = False
 if "doc_graduacion_pendiente" not in st.session_state:
@@ -3647,6 +3649,8 @@ if not cronograma_editado.empty and not plan_df.empty:
 
 if export_pdf_bytes:
     missing_document_fields = _missing_document_fields(template_context)
+    if float(ce_inicial or 0.0) < ce_inicial_minimo_aprobacion:
+        missing_document_fields.append("Cliente debe tener un abono a la comisión de éxito este mes")
     suma_comision_resuelve = float(
         cronograma_editado.loc[
             cronograma_editado["Concepto"].str.contains("Comisión Resuelve", na=False),
@@ -3881,6 +3885,8 @@ if enviar_aprobacion:
     duplicate_key = f"{datetime.now().strftime('%Y-%m')}|{_norm(ref_input)}|{'-'.join(sorted(_ids_to_set(ids_sel)))}"
     if pred_value is None:
         st.warning("Primero debes presionar **Predecir recaudo**.")
+    elif float(ce_inicial or 0.0) < ce_inicial_minimo_aprobacion:
+        st.warning("Cliente debe tener un abono a la comisión de éxito este mes.")
     elif not correo_para_sheets:
         st.warning("Debes ingresar el correo electrónico antes de enviar.")
     elif not _is_corporate_email(correo_para_sheets):
