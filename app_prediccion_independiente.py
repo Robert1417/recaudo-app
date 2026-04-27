@@ -7,8 +7,8 @@ from io import BytesIO
 from pathlib import Path
 
 import gspread
-import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -200,6 +200,41 @@ def _predict_recaudo(model, features: dict, pago_banco: float, primer_pago: floa
     return min(yhat, 0.99)
 
 
+def _to_float(value, default=0.0) -> float:
+    try:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _extract_case_data_from_record(record: dict) -> dict:
+    rec = {str(k).strip().lower(): v for k, v in dict(record or {}).items()}
+
+    def pick(*keys, default=""):
+        for key in keys:
+            if key in rec and rec[key] is not None:
+                return rec[key]
+        return default
+
+    return {
+        "referencia": str(pick("referencia", "reference", default="")).strip(),
+        "ids": str(pick("ids", "id_deuda", "id deuda", "ids_deuda", default="")).strip(),
+        "bancos": str(pick("bancos", "banco", default="")).strip(),
+        "correo": str(pick("correo", "correo_electronico", "email", default="")).strip(),
+        "tipo_liquidacion": str(pick("tipo_liquidacion", "tipo de liquidacion", default="No tradicional")).strip() or "No tradicional",
+        "condonacion": str(pick("condonacion", "condonacion_mensualidades", default="No")).strip() or "No",
+        "pri_ult": _to_float(pick("pri-ult", "pri_ult", "plazo"), 1.0),
+        "ratio_pp": _to_float(pick("ratio_pp", "ratio pp"), 0.0),
+        "c_a": _to_float(pick("c/a", "c_a", "cuota_apartado"), 1.0),
+        "amount_total": _to_float(pick("amount_total", "comision_exito_total"), 0.0),
+        "pago_banco": _to_float(pick("pago_banco", "pago banco"), 0.0),
+        "primer_pago": _to_float(pick("primer_pago", "primer pago", "primer_pago_banco"), 0.0),
+        "ce_inicial": _to_float(pick("ce_inicial", "ce inicial"), 0.0),
+    }
+
+
 def main():
     st.set_page_config(page_title="Predicción independiente", page_icon="⚡", layout="centered")
     st.title("⚡ Calculadora independiente (predicción + envío)")
@@ -208,26 +243,94 @@ def main():
         "y se envía automáticamente a aprobación."
     )
 
+    defaults = {
+        "referencia": "",
+        "ids": "",
+        "bancos": "",
+        "correo": "",
+        "tipo_liquidacion": "No tradicional",
+        "condonacion": "No",
+        "pri_ult": 1.0,
+        "ratio_pp": 0.0,
+        "c_a": 1.0,
+        "amount_total": 0.0,
+        "pago_banco": 0.0,
+        "primer_pago": 0.0,
+        "ce_inicial": 0.0,
+    }
+
+    st.markdown("### Fuente de datos de entrada")
+    source_mode = st.radio(
+        "¿Cómo quieres cargar los inputs?",
+        ["Manual", "Archivo (CSV/XLSX/JSON)", "Endpoint (JSON)"],
+        horizontal=True,
+    )
+
+    if source_mode == "Archivo (CSV/XLSX/JSON)":
+        up = st.file_uploader("Sube un archivo con una fila", type=["csv", "xlsx", "json"], key="fuente_archivo")
+        if up is not None:
+            try:
+                if up.name.lower().endswith(".csv"):
+                    df_src = pd.read_csv(up)
+                    record = df_src.iloc[0].to_dict()
+                elif up.name.lower().endswith(".xlsx"):
+                    df_src = pd.read_excel(up)
+                    record = df_src.iloc[0].to_dict()
+                else:
+                    raw = json.loads(up.getvalue().decode("utf-8"))
+                    if isinstance(raw, list):
+                        record = dict(raw[0] if raw else {})
+                    else:
+                        record = dict(raw)
+                defaults.update(_extract_case_data_from_record(record))
+                st.success("Inputs cargados desde archivo. Puedes editarlos antes de enviar.")
+            except Exception as exc:
+                st.error(f"No se pudo leer el archivo: {exc}")
+    elif source_mode == "Endpoint (JSON)":
+        endpoint_url = st.text_input("URL endpoint (GET)")
+        endpoint_token = st.text_input("Bearer token (opcional)", type="password")
+        if st.button("Cargar desde endpoint", use_container_width=True):
+            if not endpoint_url.strip():
+                st.warning("Ingresa la URL del endpoint.")
+            else:
+                try:
+                    headers = {}
+                    if endpoint_token.strip():
+                        headers["Authorization"] = f"Bearer {endpoint_token.strip()}"
+                    resp = requests.get(endpoint_url.strip(), headers=headers, timeout=20)
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    if isinstance(payload, list):
+                        record = dict(payload[0] if payload else {})
+                    else:
+                        record = dict(payload)
+                    defaults.update(_extract_case_data_from_record(record))
+                    st.success("Inputs cargados desde endpoint. Puedes editarlos antes de enviar.")
+                except Exception as exc:
+                    st.error(f"No se pudo cargar desde endpoint: {exc}")
+
     with st.form("form_prediccion_independiente"):
         st.markdown("### Datos del caso")
-        referencia = st.text_input("Referencia")
-        ids = st.text_input("IDs deuda (separados por guion o coma)")
-        bancos = st.text_input("Banco(s)")
-        correo = st.text_input("Correo corporativo")
-        tipo_liquidacion = st.selectbox("Tipo de liquidación", ["No tradicional", "Tradicional"])
-        condonacion = st.selectbox("Condonación de mensualidades", ["No", "Si"])
+        referencia = st.text_input("Referencia", value=str(defaults["referencia"]))
+        ids = st.text_input("IDs deuda (separados por guion o coma)", value=str(defaults["ids"]))
+        bancos = st.text_input("Banco(s)", value=str(defaults["bancos"]))
+        correo = st.text_input("Correo corporativo", value=str(defaults["correo"]))
+        tipo_index = 1 if _norm(str(defaults["tipo_liquidacion"])) == "tradicional" else 0
+        tipo_liquidacion = st.selectbox("Tipo de liquidación", ["No tradicional", "Tradicional"], index=tipo_index)
+        cond_index = 1 if _norm(str(defaults["condonacion"])) in {"si", "sí"} else 0
+        condonacion = st.selectbox("Condonación de mensualidades", ["No", "Si"], index=cond_index)
 
         st.markdown("### Features ya calculadas")
         c1, c2 = st.columns(2)
         with c1:
-            pri_ult = st.number_input("PRI-ULT (plazo)", min_value=1.0, step=1.0, value=1.0)
-            c_a = st.number_input("C/A", min_value=0.01, step=0.01, value=1.0)
-            amount_total = st.number_input("AMOUNT_TOTAL", min_value=0.0, step=1000.0, value=0.0)
+            pri_ult = st.number_input("PRI-ULT (plazo)", min_value=1.0, step=1.0, value=float(defaults["pri_ult"]))
+            c_a = st.number_input("C/A", min_value=0.01, step=0.01, value=float(defaults["c_a"]))
+            amount_total = st.number_input("AMOUNT_TOTAL", min_value=0.0, step=1000.0, value=float(defaults["amount_total"]))
         with c2:
-            ratio_pp = st.number_input("Ratio_PP", min_value=0.0, step=0.01, value=0.0)
-            pago_banco = st.number_input("PAGO BANCO", min_value=0.0, step=1000.0, value=0.0)
-            primer_pago = st.number_input("Primer pago banco", min_value=0.0, step=1000.0, value=0.0)
-            ce_inicial = st.number_input("CE inicial", min_value=0.0, step=1000.0, value=0.0)
+            ratio_pp = st.number_input("Ratio_PP", min_value=0.0, step=0.01, value=float(defaults["ratio_pp"]))
+            pago_banco = st.number_input("PAGO BANCO", min_value=0.0, step=1000.0, value=float(defaults["pago_banco"]))
+            primer_pago = st.number_input("Primer pago banco", min_value=0.0, step=1000.0, value=float(defaults["primer_pago"]))
+            ce_inicial = st.number_input("CE inicial", min_value=0.0, step=1000.0, value=float(defaults["ce_inicial"]))
 
         st.markdown("### Adjuntos requeridos")
         carta_firmada = st.file_uploader("Carta firmada (PDF)", type=["pdf"])
