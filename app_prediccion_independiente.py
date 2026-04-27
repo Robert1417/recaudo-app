@@ -227,8 +227,7 @@ def _extract_case_data_from_record(record: dict) -> dict:
         "ids": str(pick("ids", "id_deuda", "id deuda", "ids_deuda", default="")).strip(),
         "bancos": str(pick("bancos", "banco", default="")).strip(),
         "correo": str(pick("correo", "correo_electronico", "email", default="")).strip(),
-        "tipo_liquidacion": str(pick("tipo_liquidacion", "tipo de liquidacion", default="No tradicional")).strip() or "No tradicional",
-        "condonacion": str(pick("condonacion", "condonacion_mensualidades", default="No")).strip() or "No",
+        "tipo_liquidacion": str(pick("tipo_liquidacion", "tipo de liquidacion", default="")).strip(),
         "pri_ult": _to_float(pick("pri-ult", "pri_ult", "plazo"), 1.0),
         "ratio_pp": _to_float(pick("ratio_pp", "ratio pp"), 0.0),
         "c_a": _to_float(pick("c/a", "c_a", "cuota_apartado"), 1.0),
@@ -237,6 +236,30 @@ def _extract_case_data_from_record(record: dict) -> dict:
         "primer_pago": _to_float(pick("primer_pago", "primer pago", "primer_pago_banco"), 0.0),
         "ce_inicial": _to_float(pick("ce_inicial", "ce inicial"), 0.0),
     }
+
+
+def _resolver_tipo_liquidacion_desde_cartera(cartera_df: pd.DataFrame, referencia: str) -> str:
+    if cartera_df is None or cartera_df.empty:
+        return ""
+    ref_cols = [c for c in cartera_df.columns if _norm(c) in {"referencia", "reference"}]
+    tipo_cols = [
+        c
+        for c in cartera_df.columns
+        if _norm(c) in {"tipo de liquidacion", "tipo liquidacion", "tipo de liquidación", "tipo_liquidacion"}
+    ]
+    if not ref_cols or not tipo_cols:
+        return ""
+
+    ref_col = ref_cols[0]
+    tipo_col = tipo_cols[0]
+    target_ref = str(referencia or "").strip()
+    if not target_ref:
+        return ""
+
+    match = cartera_df[cartera_df[ref_col].astype(str).str.strip() == target_ref]
+    if match.empty:
+        return ""
+    return str(match.iloc[0][tipo_col]).strip()
 
 
 def main():
@@ -252,8 +275,7 @@ def main():
         "ids": "",
         "bancos": "",
         "correo": "",
-        "tipo_liquidacion": "No tradicional",
-        "condonacion": "No",
+        "tipo_liquidacion": "",
         "pri_ult": 1.0,
         "ratio_pp": 0.0,
         "c_a": 1.0,
@@ -313,16 +335,25 @@ def main():
                 except Exception as exc:
                     st.error(f"No se pudo cargar desde endpoint: {exc}")
 
+    st.markdown("### Cartera (obligatoria para validar Tipo de liquidación)")
+    cartera_file = st.file_uploader("Sube Cartera (CSV/XLSX)", type=["csv", "xlsx"], key="cartera_file")
+    cartera_df = None
+    if cartera_file is not None:
+        try:
+            if cartera_file.name.lower().endswith(".csv"):
+                cartera_df = pd.read_csv(cartera_file)
+            else:
+                cartera_df = pd.read_excel(cartera_file)
+        except Exception as exc:
+            st.error(f"No se pudo leer la cartera: {exc}")
+
     with st.form("form_prediccion_independiente"):
         st.markdown("### Datos del caso")
         referencia = st.text_input("Referencia", value=str(defaults["referencia"]))
         ids = st.text_input("IDs deuda (separados por guion o coma)", value=str(defaults["ids"]))
         bancos = st.text_input("Banco(s)", value=str(defaults["bancos"]))
         correo = st.text_input("Correo corporativo", value=str(defaults["correo"]))
-        tipo_index = 1 if _norm(str(defaults["tipo_liquidacion"])) == "tradicional" else 0
-        tipo_liquidacion = st.selectbox("Tipo de liquidación", ["No tradicional", "Tradicional"], index=tipo_index)
-        cond_index = 1 if _norm(str(defaults["condonacion"])) in {"si", "sí"} else 0
-        condonacion = st.selectbox("Condonación de mensualidades", ["No", "Si"], index=cond_index)
+        st.caption("Tipo de liquidación se toma automáticamente desde el archivo de Cartera.")
 
         st.markdown("### Features ya calculadas")
         c1, c2 = st.columns(2)
@@ -337,8 +368,7 @@ def main():
             ce_inicial = st.number_input("CE inicial", min_value=0.0, step=1000.0, value=float(defaults["ce_inicial"]))
 
         st.markdown("### Adjuntos requeridos")
-        carta_firmada = st.file_uploader("Carta firmada (PDF)", type=["pdf"])
-        pagare_firmado = st.file_uploader("Pagaré firmado (PDF)", type=["pdf"])
+        carta_pagare_firmado = st.file_uploader("Carta + pagaré firmado (un solo PDF)", type=["pdf"])
 
         submit = st.form_submit_button("🔮 Predecir y enviar a aprobación", use_container_width=True)
 
@@ -351,8 +381,16 @@ def main():
     if not correo.strip().lower().endswith("@gobravo.com.co"):
         st.error("El correo debe terminar en @gobravo.com.co")
         return
-    if carta_firmada is None or pagare_firmado is None:
-        st.error("Debes adjuntar carta y pagaré firmados (PDF).")
+    if carta_pagare_firmado is None:
+        st.error("Debes adjuntar carta + pagaré firmado en un solo PDF.")
+        return
+    if cartera_df is None:
+        st.error("Debes subir la cartera para obtener el Tipo de liquidación.")
+        return
+
+    tipo_liquidacion = _resolver_tipo_liquidacion_desde_cartera(cartera_df, referencia)
+    if not tipo_liquidacion:
+        st.error("No encontré el Tipo de liquidación de esa referencia en la Cartera.")
         return
 
     try:
@@ -366,9 +404,7 @@ def main():
         pred = _predict_recaudo(model, features, float(pago_banco), float(primer_pago))
 
         _, drive_service = _google_clients()
-        carta_link = _upload_pdf_to_drive(drive_service, carta_firmada, DRIVE_FOLDER_CARTA_PAGARE_ID)
-        pagare_link = _upload_pdf_to_drive(drive_service, pagare_firmado, DRIVE_FOLDER_CARTA_PAGARE_ID)
-        carta_pagare_link = " | ".join([link for link in [carta_link, pagare_link] if link])
+        carta_pagare_link = _upload_pdf_to_drive(drive_service, carta_pagare_firmado, DRIVE_FOLDER_CARTA_PAGARE_ID)
 
         umbral = 0.8 if _is_traditional_liquidation(tipo_liquidacion) else 0.74
         aprobado = pred >= umbral
@@ -381,7 +417,7 @@ def main():
             "bancos": bancos.strip(),
             "carta_pagare_link": carta_pagare_link,
             "pantallazo_aceptacion_link": "No requerido (flujo independiente)",
-            "condonacion_mensualidades": "Sí" if condonacion == "Si" else "No",
+            "condonacion_mensualidades": "No",
             "pantallazo_correo_condonacion_link": "",
             "comision_exito_total": float(amount_total),
             "ce_inicial": float(ce_inicial),
@@ -394,8 +430,8 @@ def main():
 
         st.success(f"Predicción calculada: {pred:.4f}")
         st.success("Envío automático a aprobación realizado correctamente.")
-        st.caption(f"Carta: {carta_link}")
-        st.caption(f"Pagaré: {pagare_link}")
+        st.caption(f"Carta + pagaré: {carta_pagare_link}")
+        st.caption(f"Tipo liquidación (cartera): {tipo_liquidacion}")
         st.caption(f"Criterio: umbral {umbral:.2f} → {'Aprobado' if aprobado else 'No aprobado'}")
     except Exception as exc:
         st.error(f"No se pudo completar el envío: {exc}")
