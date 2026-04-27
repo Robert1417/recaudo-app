@@ -318,15 +318,17 @@ def _append_respuesta(row_data: dict):
         elif "banco" in h:
             normalized[idx] = payload.get("bancos", "")
         elif "carta" in h and "pagare" in h:
-            normalized[idx] = payload.get("carta_pagare_link", "")
+            normalized[idx] = ""
         elif "pantallazo" in h and "aceptacion" in h:
-            normalized[idx] = payload.get("pantallazo_aceptacion_link", "")
+            normalized[idx] = ""
         elif "condonacion" in h and "mensualidades" in h:
-            normalized[idx] = payload.get("condonacion_mensualidades", "")
+            normalized[idx] = ""
         elif "pantallazo" in h and "correo" in h and "condonacion" in h:
-            normalized[idx] = payload.get("pantallazo_correo_condonacion_link", "")
+            normalized[idx] = ""
         elif "total de comision" in h:
             normalized[idx] = payload.get("comision_exito_total", "")
+        elif "1er pago comision" in h or "% 1er pago comision" in h:
+            normalized[idx] = payload.get("ratio_pp", "")
         elif "primera comision" in h or "pago de la primera comision" in h:
             normalized[idx] = payload.get("ce_inicial", "")
         elif "aprobacion estructurados" in h:
@@ -638,7 +640,7 @@ def main():
         ce_inicial = st.number_input("CE inicial", min_value=0.0, step=1000.0, value=float(defaults["ce_inicial"]))
 
     st.markdown("### Soporte documental")
-    carta_pagare_firmado = st.file_uploader("Carta + pagaré firmado (un solo PDF)", type=["pdf"])
+    st.caption("En este flujo independiente no se suben adjuntos; solo se envían datos a Sheets.")
 
     enviar_desde_archivo = str(defaults.get("enviar", "No")).strip()
     st.caption(f"Valor 'enviar' detectado en archivo/fuente: **{enviar_desde_archivo or 'No'}**")
@@ -705,12 +707,7 @@ def main():
             estado_aprobacion = "Aprobado" if aprobado else "Rechazado"
 
         try:
-            drive_service = _build_drive_service_from_session()
-            if drive_service is None:
-                if show_messages:
-                    st.error("No hay sesión OAuth de Drive. Completa la autenticación antes de enviar.")
-                return
-            carta_pagare_link = _upload_pdf_to_drive(drive_service, carta_pagare_firmado, DRIVE_FOLDER_CARTA_PAGARE_ID)
+            carta_pagare_link = ""
             payload = {
                 "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
                 "correo_electronico": correo.strip(),
@@ -723,6 +720,7 @@ def main():
                 "pantallazo_correo_condonacion_link": "",
                 "comision_exito_total": float(amount_total),
                 "ce_inicial": float(ce_inicial),
+                "ratio_pp": float(ratio_pp),
                 "es_aprobado_bool": es_aprobado_bool,
                 "estado_aprobacion": estado_aprobacion,
                 "prediccion": round(float(pred), 4),
@@ -734,7 +732,7 @@ def main():
                     st.info("Se detectó duplicado exacto: anterior marcado como Duplicado.")
                 elif duplicate_mode == "reference_duplicate":
                     st.info("Referencia repetida con otro ID: se envió sin check de aprobación ni comentario.")
-                st.caption(f"Carta + pagaré cargado: {carta_pagare_link}")
+                st.caption("Carta + pagaré: no aplica en flujo independiente (solo envío de datos).")
                 st.caption(f"Tipo liquidación (cartera): {tipo_liquidacion}")
                 st.caption(f"Criterio: umbral {umbral:.2f} → {'Aprobado' if aprobado else 'No aprobado'}")
         except Exception as exc:
@@ -750,9 +748,6 @@ def main():
             return
         if not correo.strip().lower().endswith("@gobravo.com.co"):
             st.error("El correo debe terminar en @gobravo.com.co")
-            return
-        if carta_pagare_firmado is None:
-            st.error("Debes adjuntar carta + pagaré firmado en un solo PDF.")
             return
         pred = st.session_state.get("ind_pred_value")
         if pred is None:
@@ -777,8 +772,6 @@ def main():
             if pred_info and auto_flag:
                 if not correo.strip().lower().endswith("@gobravo.com.co"):
                     st.error("Modo automático: correo inválido para enviar.")
-                elif carta_pagare_firmado is None:
-                    st.warning("Modo automático: faltó adjuntar carta + pagaré PDF, solo se calculó la predicción.")
                 else:
                     _run_send(pred_info, show_messages=True)
             st.session_state.ind_auto_sig = auto_sig
