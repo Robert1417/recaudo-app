@@ -15,6 +15,10 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from joblib import load
 
+# Nota de entorno:
+# Esta app puede instalarse de forma aislada con `requirements_independiente.txt`
+# sin tocar el `requirements.txt` principal de la calculadora original.
+
 MODEL_PATH = Path("mlp_recaudo_pipeline.joblib")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB_RESPUESTAS = "Respuestas Estr"
