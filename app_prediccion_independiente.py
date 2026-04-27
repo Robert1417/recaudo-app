@@ -773,10 +773,7 @@ def main():
         if st.session_state.get("ind_auto_sig") != auto_sig:
             pred_info = _run_prediction(show_messages=True)
             if pred_info and auto_flag:
-                if not correo.strip().lower().endswith("@gobravo.com.co"):
-                    st.error("Modo automático: correo inválido para enviar.")
-                else:
-                    _run_send(pred_info, show_messages=True)
+                _run_send(pred_info, show_messages=True)
             elif pred_info and not auto_flag:
                 st.caption("Archivo procesado: se calculó predicción automática y no se envió (enviar=No).")
             st.session_state.ind_auto_sig = auto_sig
