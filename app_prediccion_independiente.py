@@ -638,11 +638,7 @@ def main():
         ce_inicial = st.number_input("CE inicial", min_value=0.0, step=1000.0, value=float(defaults["ce_inicial"]))
 
     st.markdown("### Soporte documental")
-    carta_pagare_confirmado = st.selectbox(
-        "¿Carta + pagaré firmado ya quedó cargado en la calculadora principal?",
-        options=["Sí", "No"],
-        index=0,
-    )
+    carta_pagare_firmado = st.file_uploader("Carta + pagaré firmado (un solo PDF)", type=["pdf"])
 
     enviar_desde_archivo = str(defaults.get("enviar", "No")).strip()
     st.caption(f"Valor 'enviar' detectado en archivo/fuente: **{enviar_desde_archivo or 'No'}**")
@@ -709,7 +705,12 @@ def main():
             estado_aprobacion = "Aprobado" if aprobado else "Rechazado"
 
         try:
-            carta_pagare_link = ""
+            drive_service = _build_drive_service_from_session()
+            if drive_service is None:
+                if show_messages:
+                    st.error("No hay sesión OAuth de Drive. Completa la autenticación antes de enviar.")
+                return
+            carta_pagare_link = _upload_pdf_to_drive(drive_service, carta_pagare_firmado, DRIVE_FOLDER_CARTA_PAGARE_ID)
             payload = {
                 "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
                 "correo_electronico": correo.strip(),
@@ -733,7 +734,7 @@ def main():
                     st.info("Se detectó duplicado exacto: anterior marcado como Duplicado.")
                 elif duplicate_mode == "reference_duplicate":
                     st.info("Referencia repetida con otro ID: se envió sin check de aprobación ni comentario.")
-                st.caption(f"Carta + pagaré en calculadora principal: {carta_pagare_confirmado}")
+                st.caption(f"Carta + pagaré cargado: {carta_pagare_link}")
                 st.caption(f"Tipo liquidación (cartera): {tipo_liquidacion}")
                 st.caption(f"Criterio: umbral {umbral:.2f} → {'Aprobado' if aprobado else 'No aprobado'}")
         except Exception as exc:
@@ -750,8 +751,8 @@ def main():
         if not correo.strip().lower().endswith("@gobravo.com.co"):
             st.error("El correo debe terminar en @gobravo.com.co")
             return
-        if carta_pagare_confirmado != "Sí":
-            st.error("Marca que Carta + pagaré firmado ya está cargado en la calculadora principal.")
+        if carta_pagare_firmado is None:
+            st.error("Debes adjuntar carta + pagaré firmado en un solo PDF.")
             return
         pred = st.session_state.get("ind_pred_value")
         if pred is None:
@@ -776,8 +777,8 @@ def main():
             if pred_info and auto_flag:
                 if not correo.strip().lower().endswith("@gobravo.com.co"):
                     st.error("Modo automático: correo inválido para enviar.")
-                elif carta_pagare_confirmado != "Sí":
-                    st.warning("Modo automático: carta + pagaré no confirmado, solo se calculó la predicción.")
+                elif carta_pagare_firmado is None:
+                    st.warning("Modo automático: faltó adjuntar carta + pagaré PDF, solo se calculó la predicción.")
                 else:
                     _run_send(pred_info, show_messages=True)
             st.session_state.ind_auto_sig = auto_sig
