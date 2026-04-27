@@ -651,6 +651,9 @@ def main():
     with send_col:
         btn_enviar = st.button("📤 Enviar a aprobación", use_container_width=True)
 
+    if st.session_state.get("ind_pred_value") is not None:
+        st.info(f"Predicción actual: **{float(st.session_state.get('ind_pred_value')):.4f}**")
+
     def _run_prediction(show_messages: bool = True):
         if not referencia.strip():
             if show_messages:
@@ -774,6 +777,8 @@ def main():
                     st.error("Modo automático: correo inválido para enviar.")
                 else:
                     _run_send(pred_info, show_messages=True)
+            elif pred_info and not auto_flag:
+                st.caption("Archivo procesado: se calculó predicción automática y no se envió (enviar=No).")
             st.session_state.ind_auto_sig = auto_sig
 
 
