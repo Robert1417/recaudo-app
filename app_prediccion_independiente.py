@@ -20,6 +20,8 @@ from joblib import load
 # sin tocar el `requirements.txt` principal de la calculadora original.
 
 MODEL_PATH = Path("mlp_recaudo_pipeline.joblib")
+DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
+DATA_CSV = Path("data/cartera_asignada_filtrada.csv")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB_RESPUESTAS = "Respuestas Estr"
 GOOGLE_SHEETS_SCOPES = [
@@ -262,6 +264,23 @@ def _resolver_tipo_liquidacion_desde_cartera(cartera_df: pd.DataFrame, referenci
     return str(match.iloc[0][tipo_col]).strip()
 
 
+@st.cache_data(show_spinner=False)
+def _load_repo_cartera() -> pd.DataFrame | None:
+    try:
+        if DATA_PARQUET.exists():
+            return pd.read_parquet(DATA_PARQUET)
+        if DATA_CSV.exists():
+            return pd.read_csv(DATA_CSV)
+        return None
+    except Exception:
+        try:
+            if DATA_CSV.exists():
+                return pd.read_csv(DATA_CSV)
+        except Exception:
+            return None
+    return None
+
+
 def main():
     st.set_page_config(page_title="Predicción independiente", page_icon="⚡", layout="centered")
     st.title("⚡ Calculadora independiente (predicción + envío)")
@@ -335,17 +354,15 @@ def main():
                 except Exception as exc:
                     st.error(f"No se pudo cargar desde endpoint: {exc}")
 
-    st.markdown("### Cartera (obligatoria para validar Tipo de liquidación)")
-    cartera_file = st.file_uploader("Sube Cartera (CSV/XLSX)", type=["csv", "xlsx"], key="cartera_file")
-    cartera_df = None
-    if cartera_file is not None:
-        try:
-            if cartera_file.name.lower().endswith(".csv"):
-                cartera_df = pd.read_csv(cartera_file)
-            else:
-                cartera_df = pd.read_excel(cartera_file)
-        except Exception as exc:
-            st.error(f"No se pudo leer la cartera: {exc}")
+    st.markdown("### Cartera (consulta automática desde el repositorio)")
+    cartera_df = _load_repo_cartera()
+    if cartera_df is not None and not cartera_df.empty:
+        st.success("Cartera cargada desde `data/cartera_asignada_filtrada`.")
+    else:
+        st.error(
+            "No encontré la cartera en el repositorio. "
+            "Asegúrate de tener `data/cartera_asignada_filtrada.parquet` o `.csv`."
+        )
 
     with st.form("form_prediccion_independiente"):
         st.markdown("### Datos del caso")
@@ -384,14 +401,16 @@ def main():
     if carta_pagare_firmado is None:
         st.error("Debes adjuntar carta + pagaré firmado en un solo PDF.")
         return
-    if cartera_df is None:
-        st.error("Debes subir la cartera para obtener el Tipo de liquidación.")
+    if cartera_df is None or cartera_df.empty:
+        st.error("No hay cartera disponible para obtener el Tipo de liquidación.")
         return
 
     tipo_liquidacion = _resolver_tipo_liquidacion_desde_cartera(cartera_df, referencia)
     if not tipo_liquidacion:
-        st.error("No encontré el Tipo de liquidación de esa referencia en la Cartera.")
-        return
+        tipo_liquidacion = "Tradicional"
+        st.warning(
+            "No encontré la referencia en cartera; se asumirá Tipo de liquidación = Tradicional."
+        )
 
     try:
         model = _load_model()
