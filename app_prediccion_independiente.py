@@ -2,10 +2,12 @@ import ast
 import json
 import os
 import re
+import secrets
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import gspread
 import numpy as np
@@ -13,7 +15,10 @@ import pandas as pd
 import requests
 import streamlit as st
 from sklearn.base import BaseEstimator, TransformerMixin
+from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials as UserCredentials
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from joblib import load
@@ -32,6 +37,7 @@ GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 DRIVE_FOLDER_CARTA_PAGARE_ID = "1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk"
+GOOGLE_DRIVE_UPLOAD_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 class LogAndDrop(BaseEstimator, TransformerMixin):
     def __init__(self, ca_col="C/A", amt_col="AMOUNT_TOTAL"):
@@ -142,6 +148,108 @@ def _load_service_account_info() -> dict:
         info["private_key"] = info["private_key"].replace("\\n", "\n")
 
     return info
+
+
+def _load_google_oauth_client_config() -> dict:
+    client_id = st.secrets.get("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = st.secrets.get("GOOGLE_OAUTH_CLIENT_SECRET")
+    if client_id and client_secret:
+        return {
+            "installed": {
+                "client_id": str(client_id),
+                "client_secret": str(client_secret),
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": ["http://localhost"],
+            }
+        }
+    raise RuntimeError("Faltan secretos OAuth: GOOGLE_OAUTH_CLIENT_ID y GOOGLE_OAUTH_CLIENT_SECRET.")
+
+
+def _oauth_drive_configurado() -> bool:
+    try:
+        _load_google_oauth_client_config()
+        return True
+    except Exception:
+        return False
+
+
+def _extract_oauth_code(redirect_text: str) -> str:
+    text = str(redirect_text or "").strip()
+    if not text:
+        return ""
+    if text.startswith("http://") or text.startswith("https://"):
+        parsed = urlparse(text)
+        q = parse_qs(parsed.query)
+        return str((q.get("code") or [""])[0]).strip()
+    return text
+
+
+def _start_drive_oauth_flow() -> str:
+    cfg = _load_google_oauth_client_config()
+    flow = Flow.from_client_config(cfg, scopes=GOOGLE_DRIVE_UPLOAD_SCOPES)
+    flow.redirect_uri = "http://localhost"
+    code_verifier = secrets.token_urlsafe(72)[:96]
+    flow.code_verifier = code_verifier
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+    st.session_state.drive_oauth_cfg = cfg
+    st.session_state.drive_oauth_code_verifier = code_verifier
+    return auth_url
+
+
+def _exchange_drive_oauth_code(code_or_url: str) -> None:
+    cfg = st.session_state.get("drive_oauth_cfg") or _load_google_oauth_client_config()
+    code_verifier = st.session_state.get("drive_oauth_code_verifier")
+    code = _extract_oauth_code(code_or_url)
+    if not code:
+        raise ValueError("No encontré el code OAuth en la URL/código pegado.")
+    flow = Flow.from_client_config(cfg, scopes=GOOGLE_DRIVE_UPLOAD_SCOPES)
+    flow.redirect_uri = "http://localhost"
+    if code_verifier:
+        flow.code_verifier = code_verifier
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    st.session_state.drive_user_token = json.loads(creds.to_json())
+
+
+def _get_drive_user_credentials(*, refresh_if_needed: bool = True):
+    token_data = st.session_state.get("drive_user_token")
+    if not token_data:
+        return None
+    try:
+        creds = UserCredentials.from_authorized_user_info(token_data, GOOGLE_DRIVE_UPLOAD_SCOPES)
+    except Exception:
+        return None
+    should_refresh_proactively = False
+    expiry = getattr(creds, "expiry", None)
+    if expiry is not None:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            expiry_utc = expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)
+            should_refresh_proactively = (expiry_utc - now_utc) <= timedelta(minutes=5)
+        except Exception:
+            should_refresh_proactively = False
+    if creds.valid and not should_refresh_proactively:
+        return creds
+    if refresh_if_needed and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            st.session_state.drive_user_token = json.loads(creds.to_json())
+            return creds
+        except Exception:
+            return None
+    return None
+
+
+def _build_drive_service_from_session():
+    creds = _get_drive_user_credentials()
+    if creds is None:
+        return None
+    return build("drive", "v3", credentials=creds)
 
 
 @st.cache_resource(show_spinner=False)
@@ -510,6 +618,30 @@ def main():
             "Asegúrate de tener `data/cartera_asignada_filtrada.parquet` o `.csv`."
         )
 
+    st.markdown("### Autenticación Drive (igual que app original)")
+    if not _oauth_drive_configurado():
+        st.error("Configura GOOGLE_OAUTH_CLIENT_ID y GOOGLE_OAUTH_CLIENT_SECRET en secrets.")
+    else:
+        if _get_drive_user_credentials(refresh_if_needed=False) is not None:
+            st.success("Cuenta Drive autenticada en esta sesión.")
+        else:
+            if st.button("🔐 Generar enlace OAuth Drive", use_container_width=True):
+                try:
+                    st.session_state.drive_auth_url = _start_drive_oauth_flow()
+                except Exception as exc:
+                    st.error(f"No pude iniciar OAuth: {exc}")
+            auth_url = st.session_state.get("drive_auth_url", "")
+            if auth_url:
+                st.info("Abre el enlace, autoriza y pega aquí la URL de retorno completa o solo el código.")
+                st.code(auth_url, language="text")
+                oauth_code_input = st.text_input("Código/URL de retorno OAuth", key="drive_oauth_code_input")
+                if st.button("✅ Confirmar OAuth Drive", use_container_width=True):
+                    try:
+                        _exchange_drive_oauth_code(oauth_code_input)
+                        st.success("OAuth de Drive configurado correctamente.")
+                    except Exception as exc:
+                        st.error(f"No pude confirmar OAuth: {exc}")
+
     st.markdown("### Datos del caso")
     referencia = st.text_input("Referencia", value=str(defaults["referencia"]))
     ids = st.text_input("IDs deuda (separados por guion o coma)", value=str(defaults["ids"]))
@@ -597,7 +729,11 @@ def main():
             estado_aprobacion = "Aprobado" if aprobado else "Rechazado"
 
         try:
-            _, drive_service = _google_clients()
+            drive_service = _build_drive_service_from_session()
+            if drive_service is None:
+                if show_messages:
+                    st.error("No hay sesión OAuth de Drive. Completa la autenticación antes de enviar.")
+                return
             carta_pagare_link = _upload_pdf_to_drive(drive_service, carta_pagare_firmado, DRIVE_FOLDER_CARTA_PAGARE_ID)
             payload = {
                 "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
