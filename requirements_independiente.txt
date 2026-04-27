@@ -1,0 +1,16 @@
+# Dependencias exclusivas para la app independiente:
+#   streamlit run app_prediccion_independiente.py
+#   pip install -r requirements_independiente.txt
+
+streamlit>=1.35.0
+pandas>=2.2.2
+numpy>=2.2.0
+scikit-learn>=1.6.0
+joblib>=1.4.2
+gspread>=6.0.0
+google-api-python-client>=2.0.0
+google-auth>=2.0.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+requests>=2.31.0
+openpyxl>=3.1
