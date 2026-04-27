@@ -686,7 +686,7 @@ def main():
                 st.error(f"No se pudo calcular la predicción: {exc}")
             return None
 
-    def _run_send(pred_info: dict, show_messages: bool = True):
+    def _run_send(pred_info: dict, show_messages: bool = True) -> bool:
         pred = float(pred_info["pred"])
         tipo_liquidacion = str(pred_info["tipo_liquidacion"])
         umbral = float(pred_info["umbral"])
@@ -696,7 +696,7 @@ def main():
         if not duplicate_check["ok"]:
             if show_messages:
                 st.error(f"No fue posible validar duplicados: {duplicate_check['error']}")
-            return
+            return False
         duplicate_mode = duplicate_check["mode"]
         exact_rows_previas = duplicate_check.get("exact_rows", [])
         if duplicate_mode == "exact_duplicate":
@@ -738,9 +738,11 @@ def main():
                 st.caption("Carta + pagaré: no aplica en flujo independiente (solo envío de datos).")
                 st.caption(f"Tipo liquidación (cartera): {tipo_liquidacion}")
                 st.caption(f"Criterio: umbral {umbral:.2f} → {'Aprobado' if aprobado else 'No aprobado'}")
+            return True
         except Exception as exc:
             if show_messages:
                 st.error(f"No se pudo completar el envío: {exc}")
+            return False
 
     if btn_predecir:
         _run_prediction(show_messages=True)
@@ -773,10 +775,14 @@ def main():
         if st.session_state.get("ind_auto_sig") != auto_sig:
             pred_info = _run_prediction(show_messages=True)
             if pred_info and auto_flag:
-                _run_send(pred_info, show_messages=True)
+                sent_ok = _run_send(pred_info, show_messages=True)
+                if sent_ok:
+                    st.session_state.ind_auto_sig = auto_sig
             elif pred_info and not auto_flag:
                 st.caption("Archivo procesado: se calculó predicción automática y no se envió (enviar=No).")
-            st.session_state.ind_auto_sig = auto_sig
+                st.session_state.ind_auto_sig = auto_sig
+            else:
+                st.warning("No se pudo calcular la predicción automática; no se marcó como procesado.")
 
 
 if __name__ == "__main__":
