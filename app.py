@@ -2419,7 +2419,13 @@ def _validate_flow_matches_pdf(first_page_text: str, expected_flow_df: pd.DataFr
     return True, ""
 
 
-def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str, expected_flow_df: pd.DataFrame | None = None) -> tuple[bool, str]:
+def _validate_carta_pagare_pdf(
+    uploaded_file,
+    expected_reference: str,
+    expected_flow_df: pd.DataFrame | None = None,
+    comision_exito_total: float | None = None,
+    ce_inicial: float | None = None,
+) -> tuple[bool, str]:
     if uploaded_file is None:
         return False, "Debes adjuntar Carta/Pagaré (solo PDF)."
     try:
@@ -2428,7 +2434,12 @@ def _validate_carta_pagare_pdf(uploaded_file, expected_reference: str, expected_
     except Exception as exc:
         return False, f"No pude leer el PDF adjunto: {exc}"
 
-    if int(page_count or 0) < 6:
+    comision_total = float(comision_exito_total or 0.0)
+    ce_inicial_total = float(ce_inicial or 0.0)
+    permite_paginas_reducidas = abs(comision_total - ce_inicial_total) <= 0.01
+    min_paginas_requeridas = 2 if permite_paginas_reducidas else 6
+
+    if int(page_count or 0) < min_paginas_requeridas:
         return False, "Te faltó adjuntar el pagaré firmado."
 
     expected_ref_norm = _normalize_reference_token(expected_reference)
@@ -3939,6 +3950,8 @@ if enviar_aprobacion:
             carta_pagare_file,
             ref_input,
             flow_validacion_pdf,
+            comision_exito_total=comision_exito,
+            ce_inicial=ce_inicial,
         )
         if not is_valid_pdf:
             st.warning(pdf_validation_message)
