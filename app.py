@@ -143,6 +143,7 @@ MODEL_PATH   = Path("mlp_recaudo_pipeline.joblib")
 META_PATH    = Path("mlp_recaudo_meta.json")
 LOG_PATH     = Path("data/logs/logs_calculadora.csv")
 DOCX_TEMPLATE_PATH = Path("data/Documento Estructurados en Blanco.docx")
+DOCX_TEMPLATE_PATH_CODEUDOR = Path("data/Documento Estructurados en Blanco con codeudor.docx")
 CLIENTES_LOOKUP_PATH = Path("data/Consulta_F_Clientes_Parte_1.csv")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB = "Historico Calculadora"
@@ -448,6 +449,8 @@ def _build_document_context(
         "Suma_comisiones": suma_comisiones_text,
         "suma comisiones": suma_comisiones_text,
         "suma_comisiones_letras": _format_currency_cop_words(suma_comisiones_value),
+        "nombre_codeudor": "",
+        "cedula_codeudor": "",
     }
 
 
@@ -3441,6 +3444,27 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
             pago_banco_doc = st.text_input("Pago banco documento", value=str(default_context.get("pago_banco", "")), key="doc_pago_banco", disabled=True)
             comision_total_doc = st.text_input("Comisión total documento", value=str(default_context.get("comision_total", "")), key="doc_comision_total", disabled=True)
 
+        hay_codeudor_doc = st.checkbox(
+            "¿Hay codeudor?",
+            value=bool(default_context.get("hay_codeudor", False)),
+            key="doc_hay_codeudor",
+        )
+        col_codeudor_1, col_codeudor_2 = st.columns(2)
+        with col_codeudor_1:
+            nombre_codeudor_doc = st.text_input(
+                "Nombre completo codeudor",
+                value=str(default_context.get("nombre_codeudor", "")),
+                key="doc_nombre_codeudor",
+                disabled=not hay_codeudor_doc,
+            )
+        with col_codeudor_2:
+            cedula_codeudor_doc = st.text_input(
+                "Cédula codeudor",
+                value=str(default_context.get("cedula_codeudor", "")),
+                key="doc_cedula_codeudor",
+                disabled=not hay_codeudor_doc,
+            )
+
     context = default_context.copy()
     context.update({
         "referencia": referencia_doc,
@@ -3462,6 +3486,9 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
         "Suma_comisiones": default_context.get("suma_comisiones", comision_total_doc),
         "suma comisiones": default_context.get("suma_comisiones", comision_total_doc),
         "suma_comisiones_letras": default_context.get("suma_comisiones_letras", ""),
+        "hay_codeudor": hay_codeudor_doc,
+        "nombre_codeudor": nombre_codeudor_doc if hay_codeudor_doc else "",
+        "cedula_codeudor": cedula_codeudor_doc if hay_codeudor_doc else "",
     })
     return context
 
@@ -3580,8 +3607,9 @@ if not cronograma_editado.empty and not plan_df.empty:
             suma_comisiones_total=suma_comisiones_total,
         )
         template_context = _build_document_context_inputs(template_context_default)
+        template_path_to_use = DOCX_TEMPLATE_PATH_CODEUDOR if bool(template_context.get("hay_codeudor")) else DOCX_TEMPLATE_PATH
         export_docx_bytes = build_recaudo_docx(
-            template_path=DOCX_TEMPLATE_PATH,
+            template_path=template_path_to_use,
             cronograma_df=cronograma_editado,
             plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
             template_context=template_context,
@@ -3644,7 +3672,7 @@ if not cronograma_editado.empty and not plan_df.empty:
                         template_context_deuda[field_key] = default_context_deuda[field_key]
 
                 export_docx_bytes_deuda = build_recaudo_docx(
-                    template_path=DOCX_TEMPLATE_PATH,
+                    template_path=template_path_to_use,
                     cronograma_df=cronograma_deuda,
                     plan_df=plan_df.drop(columns=["plan_key"], errors="ignore"),
                     template_context=template_context_deuda,
@@ -3863,8 +3891,8 @@ else:
         key="carta_pagare_pdf",
     )
     pantallazo_file = st.file_uploader(
-        "📎 Adjuntar pantallazo de aceptación del cliente (PDF o imagen)",
-        type=["pdf", "png", "jpg", "jpeg", "webp"],
+        "📎 Adjuntar PDF del codeudor (hoja 1: cédula, hoja 2: certificado de ingresos)",
+        type=["pdf"],
         key="pantallazo_pdf",
     )
     
@@ -3905,7 +3933,7 @@ if enviar_aprobacion:
     elif condonacion_mensualidades not in {"Si", "No"}:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
     elif carta_pagare_file is None or pantallazo_file is None:
-        st.warning("Debes adjuntar Carta/Pagaré (solo PDF) y Pantallazo de aceptación (PDF o imagen).")
+        st.warning("Debes adjuntar Carta/Pagaré (solo PDF) y PDF del codeudor (hoja 1 cédula, hoja 2 certificado de ingresos).")
     elif condonacion_mensualidades == "Si" and condonacion_correo_file is None:
         st.warning("Debes adjuntar el pantallazo de correo de aprobación de condonación (PDF o imagen).")
     else:
@@ -3976,8 +4004,8 @@ if enviar_aprobacion:
                 drive_service,
                 pantallazo_file,
                 DRIVE_FOLDER_PANTALLAZOS_ID,
-                allowed_extensions=(".pdf", ".png", ".jpg", ".jpeg", ".webp"),
-                invalid_message="Pantallazo de aceptación: solo PDF o imagen (PNG/JPG/JPEG/WEBP).",
+                allowed_extensions=(".pdf",),
+                invalid_message="Soporte de codeudor: solo se permite PDF (hoja 1 cédula, hoja 2 certificado de ingresos).",
             )
             carta_link_final = carta_upload.get("webViewLink", "")
             pantallazo_link_final = pantallazo_upload.get("webViewLink", "")
