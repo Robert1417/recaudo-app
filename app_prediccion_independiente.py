@@ -31,7 +31,18 @@ MODEL_PATH = Path("mlp_recaudo_pipeline.joblib")
 DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
 DATA_CSV = Path("data/cartera_asignada_filtrada.csv")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
+GOOGLE_SHEET_TAB = "Historico Calculadora"
 GOOGLE_SHEET_TAB_RESPUESTAS = "Respuestas Estr"
+GOOGLE_SHEET_HEADERS = [
+    "fecha",
+    "referencia",
+    "ids_deuda",
+    "plazo",
+    "ratio_pp",
+    "cuota_apartado",
+    "amount_total",
+    "prediccion",
+]
 GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -296,6 +307,48 @@ def _upload_pdf_to_drive(drive_service, uploaded_file, folder_id: str) -> str:
     return str(created.get("webViewLink", "")).strip()
 
 
+def _append_historico_calculadora(row_data: dict):
+    sheets_client, _ = _google_clients()
+    ws = sheets_client.open_by_key(GOOGLE_SHEET_ID).worksheet(GOOGLE_SHEET_TAB)
+    current_headers = ws.row_values(1)
+    if current_headers[: len(GOOGLE_SHEET_HEADERS)] != GOOGLE_SHEET_HEADERS:
+        end_col = _col_index_to_letter(len(GOOGLE_SHEET_HEADERS))
+        ws.update(f"A1:{end_col}1", [GOOGLE_SHEET_HEADERS])
+
+    ws.append_row(
+        [row_data.get(header, "") for header in GOOGLE_SHEET_HEADERS],
+        value_input_option="USER_ENTERED",
+    )
+
+
+def guardar_historico_calculadora(referencia, ids, features: dict, prediccion: float) -> dict:
+    row_data = {
+        "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "referencia": str(referencia),
+        "ids_deuda": re.sub(r"\s+", "", str(ids or "")),
+        "plazo": features.get("PRI-ULT"),
+        "ratio_pp": features.get("Ratio_PP"),
+        "cuota_apartado": features.get("C/A"),
+        "amount_total": features.get("AMOUNT_TOTAL"),
+        "prediccion": prediccion,
+    }
+    try:
+        _append_historico_calculadora(row_data)
+        return {
+            "ok": True,
+            "sheet_destination": f"Google Sheets > {GOOGLE_SHEET_TAB}",
+            "error": None,
+            "row": row_data,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "sheet_destination": f"Google Sheets > {GOOGLE_SHEET_TAB}",
+            "error": str(exc),
+            "row": row_data,
+        }
+
+
 def _append_respuesta(row_data: dict):
     sheets_client, _ = _google_clients()
     ws = sheets_client.open_by_key(GOOGLE_SHEET_ID).worksheet(GOOGLE_SHEET_TAB_RESPUESTAS)
@@ -535,6 +588,175 @@ def _load_repo_cartera() -> pd.DataFrame | None:
     return None
 
 
+def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict:
+    """Calcula la predicción desde parámetros externos (por ejemplo, JSON de Berex).
+
+    Retorna un diccionario con `ok=True` y los datos de predicción, o `ok=False` con
+    `error` si falta información o ocurre un problema al calcular.
+    """
+    case = _extract_case_data_from_record(params or {})
+    referencia = str(case.get("referencia", "")).strip()
+    if not referencia:
+        return {"ok": False, "error": "Para predecir debes enviar la referencia."}
+
+    tipo_liquidacion = str(case.get("tipo_liquidacion", "")).strip()
+    if not tipo_liquidacion:
+        if cartera_df is None:
+            cartera_df = _load_repo_cartera()
+        tipo_liquidacion = _resolver_tipo_liquidacion_desde_cartera(cartera_df, referencia) if cartera_df is not None else ""
+    tipo_liquidacion_encontrado = bool(tipo_liquidacion)
+    if not tipo_liquidacion:
+        tipo_liquidacion = "Tradicional"
+
+    try:
+        model = _load_model()
+        features = {
+            "PRI-ULT": float(case["pri_ult"]),
+            "Ratio_PP": float(case["ratio_pp"]),
+            "C/A": float(case["c_a"]),
+            "AMOUNT_TOTAL": float(case["amount_total"]),
+        }
+        pred = _predict_recaudo(model, features, float(case["pago_banco"]), float(case["primer_pago"]))
+        umbral = 0.8 if _is_traditional_liquidation(tipo_liquidacion) else 0.74
+        historico_result = guardar_historico_calculadora(
+            referencia=referencia,
+            ids=case.get("ids", ""),
+            features=features,
+            prediccion=float(pred),
+        )
+        return {
+            "ok": True,
+            "pred": float(pred),
+            "tipo_liquidacion": str(tipo_liquidacion),
+            "tipo_liquidacion_encontrado": tipo_liquidacion_encontrado,
+            "umbral": float(umbral),
+            "aprobado": float(pred) >= float(umbral),
+            "features": features,
+            "historico": historico_result,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": f"No se pudo calcular la predicción: {exc}"}
+
+
+def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFrame | None = None) -> dict:
+    """Calcula (si hace falta) y envía a aprobación usando parámetros externos.
+
+    `params` puede venir directamente del JSON de Berex. Si `pred_info` no se envía,
+    esta función ejecuta `run_prediction` antes de guardar el resultado en Sheets.
+    """
+    case = _extract_case_data_from_record(params or {})
+    referencia = str(case.get("referencia", "")).strip()
+    ids = str(case.get("ids", "")).strip()
+    bancos = str(case.get("bancos", "")).strip()
+    correo = str(case.get("correo", "")).strip()
+
+    missing = [
+        label
+        for label, value in {
+            "referencia": referencia,
+            "ids": ids,
+            "bancos": bancos,
+            "correo": correo,
+        }.items()
+        if not value
+    ]
+    if missing:
+        return {"ok": False, "sent": False, "error": f"Faltan campos requeridos: {', '.join(missing)}."}
+    if not correo.lower().endswith("@gobravo.com.co"):
+        return {"ok": False, "sent": False, "error": "El correo debe terminar en @gobravo.com.co."}
+
+    if pred_info is None:
+        pred_info = run_prediction(params, cartera_df=cartera_df)
+    if not pred_info or not pred_info.get("ok"):
+        return {
+            "ok": False,
+            "sent": False,
+            "error": (pred_info or {}).get("error", "No fue posible calcular la predicción antes de enviar."),
+        }
+
+    pred = float(pred_info["pred"])
+    tipo_liquidacion = str(pred_info["tipo_liquidacion"])
+    umbral = float(pred_info["umbral"])
+    aprobado = float(pred) >= umbral
+    if "historico" not in pred_info:
+        features = pred_info.get("features") or {
+            "PRI-ULT": float(case["pri_ult"]),
+            "Ratio_PP": float(case["ratio_pp"]),
+            "C/A": float(case["c_a"]),
+            "AMOUNT_TOTAL": float(case["amount_total"]),
+        }
+        pred_info["historico"] = guardar_historico_calculadora(
+            referencia=referencia,
+            ids=ids,
+            features=features,
+            prediccion=float(pred),
+        )
+
+    duplicate_check = _get_respuestas_duplicados_mes(referencia, ids)
+    if not duplicate_check["ok"]:
+        return {
+            "ok": False,
+            "sent": False,
+            "prediction": pred_info,
+            "error": f"No fue posible validar duplicados: {duplicate_check['error']}",
+        }
+    duplicate_mode = duplicate_check["mode"]
+    exact_rows_previas = duplicate_check.get("exact_rows", [])
+    if duplicate_mode == "exact_duplicate":
+        _marcar_anteriores_como_duplicado(exact_rows_previas)
+
+    if duplicate_mode == "reference_duplicate":
+        es_aprobado_bool = ""
+        estado_aprobacion = ""
+    else:
+        es_aprobado_bool = "TRUE" if aprobado else "FALSE"
+        estado_aprobacion = "Aprobado" if aprobado else "Rechazado"
+
+    try:
+        payload = {
+            "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            "correo_electronico": correo,
+            "referencia": referencia,
+            "ids": re.sub(r"\s+", "", ids),
+            "bancos": bancos,
+            "carta_pagare_link": "",
+            "pantallazo_aceptacion_link": "No requerido (flujo independiente)",
+            "condonacion_mensualidades": "No",
+            "pantallazo_correo_condonacion_link": "",
+            "comision_exito_total": float(case["amount_total"]),
+            "ce_inicial": float(case["ce_inicial"]),
+            "ratio_pp": float(case["ratio_pp"]),
+            "es_aprobado_bool": es_aprobado_bool,
+            "estado_aprobacion": estado_aprobacion,
+            "prediccion": round(float(pred), 4),
+        }
+        _append_respuesta(payload)
+        return {
+            "ok": True,
+            "sent": True,
+            "prediction": pred_info,
+            "duplicate_mode": duplicate_mode,
+            "aprobado": aprobado,
+            "payload": payload,
+        }
+    except Exception as exc:
+        return {"ok": False, "sent": False, "prediction": pred_info, "error": f"No se pudo completar el envío: {exc}"}
+
+
+def process_prediction_request(params: dict, cartera_df: pd.DataFrame | None = None) -> dict:
+    """Ejecuta el flujo completo para integraciones JSON.
+
+    Si `enviar` viene como Sí/Yes/True/1, calcula y envía a aprobación. En cualquier
+    otro caso solo calcula la predicción y retorna el resultado.
+    """
+    case = _extract_case_data_from_record(params or {})
+    should_send = _norm(case.get("enviar", "No")) in {"si", "sí", "yes", "true", "1"}
+    pred_info = run_prediction(params, cartera_df=cartera_df)
+    if not pred_info.get("ok") or not should_send:
+        return {"ok": pred_info.get("ok", False), "sent": False, "prediction": pred_info}
+    return run_send(params, pred_info=pred_info, cartera_df=cartera_df)
+
+
 def main():
     st.set_page_config(page_title="Predicción independiente", page_icon="⚡", layout="centered")
     st.title("⚡ Calculadora independiente (predicción + envío)")
@@ -654,131 +876,86 @@ def main():
     if st.session_state.get("ind_pred_value") is not None:
         st.info(f"Predicción actual: **{float(st.session_state.get('ind_pred_value')):.4f}**")
 
-    def _run_prediction(show_messages: bool = True):
-        if not referencia.strip():
-            if show_messages:
-                st.warning("Para predecir debes ingresar la referencia.")
-            return None
-        tipo_liquidacion = _resolver_tipo_liquidacion_desde_cartera(cartera_df, referencia) if cartera_df is not None else ""
-        if not tipo_liquidacion:
-            tipo_liquidacion = "Tradicional"
-            if show_messages:
-                st.warning("No encontré la referencia en cartera; se asumirá Tipo de liquidación = Tradicional.")
-        try:
-            model = _load_model()
-            features = {
-                "PRI-ULT": float(pri_ult),
-                "Ratio_PP": float(ratio_pp),
-                "C/A": float(c_a),
-                "AMOUNT_TOTAL": float(amount_total),
-            }
-            pred = _predict_recaudo(model, features, float(pago_banco), float(primer_pago))
-            umbral = 0.8 if _is_traditional_liquidation(tipo_liquidacion) else 0.74
-            st.session_state.ind_pred_value = float(pred)
-            st.session_state.ind_tipo_liquidacion = str(tipo_liquidacion)
-            st.session_state.ind_umbral = float(umbral)
-            if show_messages:
-                st.success(f"Predicción calculada: {pred:.4f}")
-                st.caption(f"Criterio: umbral {umbral:.2f} → {'Aprobado' if pred >= umbral else 'No aprobado'}")
-            return {"pred": float(pred), "tipo_liquidacion": str(tipo_liquidacion), "umbral": float(umbral)}
-        except Exception as exc:
-            if show_messages:
-                st.error(f"No se pudo calcular la predicción: {exc}")
-            return None
+    def _current_params() -> dict:
+        return {
+            "referencia": referencia,
+            "ids": ids,
+            "bancos": bancos,
+            "correo": correo,
+            "enviar": enviar_desde_archivo,
+            "pri_ult": float(pri_ult),
+            "ratio_pp": float(ratio_pp),
+            "c_a": float(c_a),
+            "amount_total": float(amount_total),
+            "pago_banco": float(pago_banco),
+            "primer_pago": float(primer_pago),
+            "ce_inicial": float(ce_inicial),
+        }
 
-    def _run_send(pred_info: dict, show_messages: bool = True) -> bool:
-        pred = float(pred_info["pred"])
-        tipo_liquidacion = str(pred_info["tipo_liquidacion"])
-        umbral = float(pred_info["umbral"])
-        aprobado = float(pred) >= umbral
-
-        duplicate_check = _get_respuestas_duplicados_mes(referencia, ids)
-        if not duplicate_check["ok"]:
-            if show_messages:
-                st.error(f"No fue posible validar duplicados: {duplicate_check['error']}")
+    def _show_prediction_result(pred_info: dict) -> bool:
+        if not pred_info.get("ok"):
+            st.error(pred_info.get("error", "No se pudo calcular la predicción."))
             return False
-        duplicate_mode = duplicate_check["mode"]
-        exact_rows_previas = duplicate_check.get("exact_rows", [])
-        if duplicate_mode == "exact_duplicate":
-            _marcar_anteriores_como_duplicado(exact_rows_previas)
-
-        if duplicate_mode == "reference_duplicate":
-            es_aprobado_bool = ""
-            estado_aprobacion = ""
+        if not pred_info.get("tipo_liquidacion_encontrado", True):
+            st.warning("No encontré la referencia en cartera; se asumirá Tipo de liquidación = Tradicional.")
+        st.session_state.ind_pred_value = float(pred_info["pred"])
+        st.session_state.ind_tipo_liquidacion = str(pred_info["tipo_liquidacion"])
+        st.session_state.ind_umbral = float(pred_info["umbral"])
+        st.success(f"Predicción calculada: {float(pred_info['pred']):.4f}")
+        st.caption(
+            f"Criterio: umbral {float(pred_info['umbral']):.2f} → "
+            f"{'Aprobado' if pred_info.get('aprobado') else 'No aprobado'}"
+        )
+        historico = pred_info.get("historico") or {}
+        if historico.get("ok"):
+            st.caption(f"📊 Histórico guardado en: `{historico.get('sheet_destination')}`")
         else:
-            es_aprobado_bool = "TRUE" if aprobado else "FALSE"
-            estado_aprobacion = "Aprobado" if aprobado else "Rechazado"
+            st.warning(
+                "No se pudo guardar el histórico en Google Sheets. "
+                f"Detalle: {historico.get('error', 'Sin detalle')}"
+            )
+        return True
 
-        try:
-            carta_pagare_link = ""
-            payload = {
-                "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                "correo_electronico": correo.strip(),
-                "referencia": referencia.strip(),
-                "ids": re.sub(r"\s+", "", ids.strip()),
-                "bancos": bancos.strip(),
-                "carta_pagare_link": carta_pagare_link,
-                "pantallazo_aceptacion_link": "No requerido (flujo independiente)",
-                "condonacion_mensualidades": "No",
-                "pantallazo_correo_condonacion_link": "",
-                "comision_exito_total": float(amount_total),
-                "ce_inicial": float(ce_inicial),
-                "ratio_pp": float(ratio_pp),
-                "es_aprobado_bool": es_aprobado_bool,
-                "estado_aprobacion": estado_aprobacion,
-                "prediccion": round(float(pred), 4),
-            }
-            _append_respuesta(payload)
-            if show_messages:
-                st.success("Envío automático a aprobación realizado correctamente.")
-                if duplicate_mode == "exact_duplicate":
-                    st.info("Se detectó duplicado exacto: anterior marcado como Duplicado.")
-                elif duplicate_mode == "reference_duplicate":
-                    st.info("Referencia repetida con otro ID: se envió sin check de aprobación ni comentario.")
-                st.caption("Carta + pagaré: no aplica en flujo independiente (solo envío de datos).")
-                st.caption(f"Tipo liquidación (cartera): {tipo_liquidacion}")
-                st.caption(f"Criterio: umbral {umbral:.2f} → {'Aprobado' if aprobado else 'No aprobado'}")
-            return True
-        except Exception as exc:
-            if show_messages:
-                st.error(f"No se pudo completar el envío: {exc}")
+    def _show_send_result(send_result: dict) -> bool:
+        if not send_result.get("ok"):
+            st.error(send_result.get("error", "No se pudo completar el envío."))
             return False
+        st.success("Envío automático a aprobación realizado correctamente.")
+        duplicate_mode = send_result.get("duplicate_mode")
+        if duplicate_mode == "exact_duplicate":
+            st.info("Se detectó duplicado exacto: anterior marcado como Duplicado.")
+        elif duplicate_mode == "reference_duplicate":
+            st.info("Referencia repetida con otro ID: se envió sin check de aprobación ni comentario.")
+        pred_info = send_result.get("prediction", {})
+        st.caption("Carta + pagaré: no aplica en flujo independiente (solo envío de datos).")
+        st.caption(f"Tipo liquidación (cartera): {pred_info.get('tipo_liquidacion', '')}")
+        st.caption(
+            f"Criterio: umbral {float(pred_info.get('umbral', 0)):.2f} → "
+            f"{'Aprobado' if send_result.get('aprobado') else 'No aprobado'}"
+        )
+        return True
 
     if btn_predecir:
-        _run_prediction(show_messages=True)
+        pred_info = run_prediction(_current_params(), cartera_df=cartera_df)
+        _show_prediction_result(pred_info)
 
     if btn_enviar:
-        if not referencia.strip() or not ids.strip() or not bancos.strip() or not correo.strip():
-            st.error("Completa referencia, IDs, bancos y correo.")
-            return
-        if not correo.strip().lower().endswith("@gobravo.com.co"):
-            st.error("El correo debe terminar en @gobravo.com.co")
-            return
-        pred = st.session_state.get("ind_pred_value")
-        if pred is None:
-            st.warning("Primero debes presionar **Predecir**.")
-            return
-        if cartera_df is None or cartera_df.empty:
-            st.error("No hay cartera disponible para obtener el Tipo de liquidación.")
-            return
-        pred_info = {
-            "pred": float(pred),
-            "tipo_liquidacion": str(st.session_state.get("ind_tipo_liquidacion", "Tradicional")),
-            "umbral": float(st.session_state.get("ind_umbral", 0.8)),
-        }
-        _run_send(pred_info, show_messages=True)
+        pred_info = run_prediction(_current_params(), cartera_df=cartera_df)
+        if _show_prediction_result(pred_info):
+            send_result = run_send(_current_params(), pred_info=pred_info, cartera_df=cartera_df)
+            _show_send_result(send_result)
 
     # Modo automático por archivo: predice siempre y envía solo si la columna enviar dice Sí.
     auto_flag = _norm(enviar_desde_archivo) in {"si", "sí", "yes", "true", "1"}
     if source_mode == "Archivo (CSV/XLSX/JSON)" and up is not None and referencia.strip():
         auto_sig = f"{up.name}|{getattr(up, 'size', 0)}|{referencia}|{ids}|{amount_total}|{auto_flag}"
         if st.session_state.get("ind_auto_sig") != auto_sig:
-            pred_info = _run_prediction(show_messages=True)
-            if pred_info and auto_flag:
-                sent_ok = _run_send(pred_info, show_messages=True)
-                if sent_ok:
+            pred_info = run_prediction(_current_params(), cartera_df=cartera_df)
+            if _show_prediction_result(pred_info) and auto_flag:
+                send_result = run_send(_current_params(), pred_info=pred_info, cartera_df=cartera_df)
+                if _show_send_result(send_result):
                     st.session_state.ind_auto_sig = auto_sig
-            elif pred_info and not auto_flag:
+            elif pred_info.get("ok") and not auto_flag:
                 st.caption("Archivo procesado: se calculó predicción automática y no se envió (enviar=No).")
                 st.session_state.ind_auto_sig = auto_sig
             else:
