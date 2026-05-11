@@ -31,7 +31,18 @@ MODEL_PATH = Path("mlp_recaudo_pipeline.joblib")
 DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
 DATA_CSV = Path("data/cartera_asignada_filtrada.csv")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
+GOOGLE_SHEET_TAB = "Historico Calculadora"
 GOOGLE_SHEET_TAB_RESPUESTAS = "Respuestas Estr"
+GOOGLE_SHEET_HEADERS = [
+    "fecha",
+    "referencia",
+    "ids_deuda",
+    "plazo",
+    "ratio_pp",
+    "cuota_apartado",
+    "amount_total",
+    "prediccion",
+]
 GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -294,6 +305,48 @@ def _upload_pdf_to_drive(drive_service, uploaded_file, folder_id: str) -> str:
         .execute()
     )
     return str(created.get("webViewLink", "")).strip()
+
+
+def _append_historico_calculadora(row_data: dict):
+    sheets_client, _ = _google_clients()
+    ws = sheets_client.open_by_key(GOOGLE_SHEET_ID).worksheet(GOOGLE_SHEET_TAB)
+    current_headers = ws.row_values(1)
+    if current_headers[: len(GOOGLE_SHEET_HEADERS)] != GOOGLE_SHEET_HEADERS:
+        end_col = _col_index_to_letter(len(GOOGLE_SHEET_HEADERS))
+        ws.update(f"A1:{end_col}1", [GOOGLE_SHEET_HEADERS])
+
+    ws.append_row(
+        [row_data.get(header, "") for header in GOOGLE_SHEET_HEADERS],
+        value_input_option="USER_ENTERED",
+    )
+
+
+def guardar_historico_calculadora(referencia, ids, features: dict, prediccion: float) -> dict:
+    row_data = {
+        "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "referencia": str(referencia),
+        "ids_deuda": re.sub(r"\s+", "", str(ids or "")),
+        "plazo": features.get("PRI-ULT"),
+        "ratio_pp": features.get("Ratio_PP"),
+        "cuota_apartado": features.get("C/A"),
+        "amount_total": features.get("AMOUNT_TOTAL"),
+        "prediccion": prediccion,
+    }
+    try:
+        _append_historico_calculadora(row_data)
+        return {
+            "ok": True,
+            "sheet_destination": f"Google Sheets > {GOOGLE_SHEET_TAB}",
+            "error": None,
+            "row": row_data,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "sheet_destination": f"Google Sheets > {GOOGLE_SHEET_TAB}",
+            "error": str(exc),
+            "row": row_data,
+        }
 
 
 def _append_respuesta(row_data: dict):
@@ -565,6 +618,12 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
         }
         pred = _predict_recaudo(model, features, float(case["pago_banco"]), float(case["primer_pago"]))
         umbral = 0.8 if _is_traditional_liquidation(tipo_liquidacion) else 0.74
+        historico_result = guardar_historico_calculadora(
+            referencia=referencia,
+            ids=case.get("ids", ""),
+            features=features,
+            prediccion=float(pred),
+        )
         return {
             "ok": True,
             "pred": float(pred),
@@ -573,6 +632,7 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
             "umbral": float(umbral),
             "aprobado": float(pred) >= float(umbral),
             "features": features,
+            "historico": historico_result,
         }
     except Exception as exc:
         return {"ok": False, "error": f"No se pudo calcular la predicción: {exc}"}
@@ -618,6 +678,19 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
     tipo_liquidacion = str(pred_info["tipo_liquidacion"])
     umbral = float(pred_info["umbral"])
     aprobado = float(pred) >= umbral
+    if "historico" not in pred_info:
+        features = pred_info.get("features") or {
+            "PRI-ULT": float(case["pri_ult"]),
+            "Ratio_PP": float(case["ratio_pp"]),
+            "C/A": float(case["c_a"]),
+            "AMOUNT_TOTAL": float(case["amount_total"]),
+        }
+        pred_info["historico"] = guardar_historico_calculadora(
+            referencia=referencia,
+            ids=ids,
+            features=features,
+            prediccion=float(pred),
+        )
 
     duplicate_check = _get_respuestas_duplicados_mes(referencia, ids)
     if not duplicate_check["ok"]:
@@ -833,6 +906,14 @@ def main():
             f"Criterio: umbral {float(pred_info['umbral']):.2f} → "
             f"{'Aprobado' if pred_info.get('aprobado') else 'No aprobado'}"
         )
+        historico = pred_info.get("historico") or {}
+        if historico.get("ok"):
+            st.caption(f"📊 Histórico guardado en: `{historico.get('sheet_destination')}`")
+        else:
+            st.warning(
+                "No se pudo guardar el histórico en Google Sheets. "
+                f"Detalle: {historico.get('error', 'Sin detalle')}"
+            )
         return True
 
     def _show_send_result(send_result: dict) -> bool:
