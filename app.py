@@ -924,6 +924,25 @@ def _compose_multi_flujo_pdf(base_pdf_bytes: bytes, extra_first_page_pdf_bytes: 
     output.seek(0)
     return output.getvalue()
 
+
+def _extract_first_page_pdf(pdf_bytes: bytes) -> bytes:
+    pypdf_spec = importlib.util.find_spec("pypdf")
+    if not pypdf_spec:
+        raise RuntimeError("No está disponible pypdf para generar el PDF sin pagaré estructurado.")
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+    if len(reader.pages) == 0:
+        raise RuntimeError("El PDF generado no contiene páginas.")
+
+    writer = PdfWriter()
+    writer.add_page(reader.pages[0])
+
+    output = BytesIO()
+    writer.write(output)
+    output.seek(0)
+    return output.getvalue()
+
 def build_recaudo_docx(
     template_path: Path,
     cronograma_df: pd.DataFrame,
@@ -3719,6 +3738,29 @@ if export_pdf_bytes:
         use_container_width=True,
         disabled=bool(missing_document_fields),
     )
+
+    export_pdf_sin_pagare_bytes = None
+    export_pdf_sin_pagare_error = None
+    try:
+        export_pdf_sin_pagare_bytes = _extract_first_page_pdf(export_pdf_bytes)
+    except Exception as first_page_exc:
+        export_pdf_sin_pagare_error = str(first_page_exc)
+
+    if export_pdf_sin_pagare_error:
+        st.warning(
+            "No pude preparar la descarga sin pagaré estructurado: "
+            f"{export_pdf_sin_pagare_error}"
+        )
+    else:
+        export_filename_sin_pagare = f"{date.today().isoformat()} - ref {referencia_export} - sin pagare estructurado.pdf"
+        st.download_button(
+            "⬇️ Descargar sin pagaré estructurado",
+            data=export_pdf_sin_pagare_bytes,
+            file_name=export_filename_sin_pagare,
+            mime="application/pdf",
+            use_container_width=True,
+            disabled=bool(missing_document_fields),
+        )
 else:
     if not export_pdf_error:
         st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el PDF.")
