@@ -26,10 +26,9 @@ from joblib import load
 # Nota de entorno:
 # Esta app puede instalarse de forma aislada con `requirements_independiente.txt`
 # sin tocar el `requirements.txt` principal de la calculadora original.
-
-MODEL_PATH = Path("mlp_recaudo_pipeline.joblib")
-DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
-DATA_CSV = Path("data/cartera_asignada_filtrada.csv")
+MODEL_PATH = Path(__file__).parent / "mlp_recaudo_pipeline.joblib"
+DATA_PARQUET = Path(__file__).parent / "data/cartera_asignada_filtrada.parquet"
+DATA_CSV = Path(__file__).parent / "data/cartera_asignada_filtrada.csv"
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB = "Historico Calculadora"
 GOOGLE_SHEET_TAB_RESPUESTAS = "Respuestas Estr"
