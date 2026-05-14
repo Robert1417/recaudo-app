@@ -522,9 +522,40 @@ def _to_float(value, default=0.0) -> float:
 
 
 def _extract_case_data_from_record(record: dict) -> dict:
-    if not isinstance(record, dict):
-        record = json.loads(str(record or "{}"))
+    # Si ya es un diccionario, úsalo directamente
+    if isinstance(record, dict):
+        pass  # Continuar con el código existente
     
+    # Si no es diccionario, intenta convertirlo
+    else:
+        # Caso 1: record es None o vacío
+        if record is None or (isinstance(record, str) and not record.strip()):
+            record = {}
+        
+        # Caso 2: record es string
+        elif isinstance(record, str):
+            record_str = record.strip()
+            
+            # Intentar parsear como JSON
+            try:
+                record = json.loads(record_str)
+            except json.JSONDecodeError:
+                # Si falla JSON, intentar con literal_eval (para dicts de Python)
+                try:
+                    record = ast.literal_eval(record_str)
+                    if not isinstance(record, dict):
+                        record = {}
+                except (ValueError, SyntaxError):
+                    # Si todo falla, log y diccionario vacío
+                    print(f"Warning: No se pudo parsear record: {repr(record_str[:100])}")
+                    record = {}
+        
+        # Caso 3: otro tipo (int, float, list, etc.)
+        else:
+            print(f"Warning: Tipo inesperado {type(record)}, usando diccionario vacío")
+            record = {}
+    
+    # Continuar con tu lógica original (ahora record es dict seguro)
     rec = {str(k).strip().lower(): v for k, v in dict(record or {}).items()}
 
     def pick(*keys, default=""):
