@@ -521,49 +521,55 @@ def _to_float(value, default=0.0) -> float:
         return float(default)
 
 
-def _extract_case_data_from_record(record: dict) -> dict:
-    # Si ya es un diccionario, úsalo directamente
-    if isinstance(record, dict):
-        pass  # Continuar con el código existente
+def _safe_to_dict(data):
+    """Convierte CUALQUIER cosa a diccionario de forma segura"""
+    if isinstance(data, dict):
+        return data
     
-    # Si no es diccionario, intenta convertirlo
-    else:
-        # Caso 1: record es None o vacío
-        if record is None or (isinstance(record, str) and not record.strip()):
-            record = {}
-        
-        # Caso 2: record es string
-        elif isinstance(record, str):
-            record_str = record.strip()
-            
-            # Intentar parsear como JSON
-            try:
-                record = json.loads(record_str)
-            except json.JSONDecodeError:
-                # Si falla JSON, intentar con literal_eval (para dicts de Python)
+    # Estrategias de conversión en orden
+    strategies = [
+        # Si es bytes, decodificar
+        lambda d: d.decode('utf-8') if isinstance(d, bytes) else None,
+        # Si es string, intentar JSON
+        lambda d: json.loads(d) if isinstance(d, str) and d.strip() else None,
+        # Si es string, intentar literal_eval
+        lambda d: ast.literal_eval(d) if isinstance(d, str) else None,
+        # Si es lista, convertir a dict
+        lambda d: dict(d) if isinstance(d, list) else None,
+        # Cualquier otro, convertir a string y luego JSON
+        lambda d: json.loads(str(d)) if d is not None else None,
+    ]
+    
+    for strategy in strategies:
+        try:
+            result = strategy(data)
+            if isinstance(result, dict):
+                return result
+            elif isinstance(result, str) and result.strip():
+                # Si dio string, intentar JSON nuevamente
                 try:
-                    record = ast.literal_eval(record_str)
-                    if not isinstance(record, dict):
-                        record = {}
-                except (ValueError, SyntaxError):
-                    # Si todo falla, log y diccionario vacío
-                    print(f"Warning: No se pudo parsear record: {repr(record_str[:100])}")
-                    record = {}
-        
-        # Caso 3: otro tipo (int, float, list, etc.)
-        else:
-            print(f"Warning: Tipo inesperado {type(record)}, usando diccionario vacío")
-            record = {}
+                    return json.loads(result)
+                except:
+                    pass
+        except:
+            continue
     
-    # Continuar con tu lógica original (ahora record es dict seguro)
-    rec = {str(k).strip().lower(): v for k, v in dict(record or {}).items()}
+    return {}
 
+
+def _extract_case_data_from_record(record):
+    # Convertir cualquier cosa a dict
+    record = _safe_to_dict(record)
+    
+    # Resto de tu función original
+    rec = {str(k).strip().lower(): v for k, v in dict(record or {}).items()}
+    
     def pick(*keys, default=""):
         for key in keys:
             if key in rec and rec[key] is not None:
                 return rec[key]
         return default
-
+    
     return {
         "referencia": str(pick("referencia", "reference", default="")).strip(),
         "ids": str(pick("ids", "id_deuda", "id deuda", "ids_deuda", default="")).strip(),
