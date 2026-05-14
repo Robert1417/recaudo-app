@@ -704,7 +704,9 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
     if not correo.lower().endswith("@gobravo.com.co"):
         return {"ok": False, "sent": False, "error": "El correo debe terminar en @gobravo.com.co."}
 
-    if pred_info is None:
+    pred_info = _safe_to_dict(pred_info)
+
+    if pred_info is None or len(pred_info) == 0:
         pred_info = run_prediction(params, cartera_df=cartera_df)
     if not pred_info or not pred_info.get("ok"):
         return {
