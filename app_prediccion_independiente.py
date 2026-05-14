@@ -522,6 +522,9 @@ def _to_float(value, default=0.0) -> float:
 
 
 def _extract_case_data_from_record(record: dict) -> dict:
+    if not isinstance(record, dict):
+        record = json.loads(str(record or "{}"))
+    
     rec = {str(k).strip().lower(): v for k, v in dict(record or {}).items()}
 
     def pick(*keys, default=""):
