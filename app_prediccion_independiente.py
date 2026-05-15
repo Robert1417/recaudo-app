@@ -370,9 +370,9 @@ def _append_respuesta(row_data: dict):
         elif "banco" in h:
             normalized[idx] = payload.get("bancos", "")
         elif "carta" in h and "pagare" in h:
-            normalized[idx] = ""
+            normalized[idx] = payload.get("carta_pagare_link", "")
         elif "pantallazo" in h and "aceptacion" in h:
-            normalized[idx] = ""
+            normalized[idx] = payload.get("pantallazo_aceptacion_link", "")
         elif "condonacion" in h and "mensualidades" in h:
             normalized[idx] = ""
         elif "pantallazo" in h and "correo" in h and "condonacion" in h:
@@ -576,6 +576,8 @@ def _extract_case_data_from_record(record):
         "correo": str(pick("correo", "correo_electronico", "email", default="")).strip(),
         "tipo_liquidacion": str(pick("tipo_liquidacion", "tipo de liquidacion", default="")).strip(),
         "enviar": str(pick("enviar", "enviar_si_no", "send", default="No")).strip() or "No",
+        "url1": str(pick("url1", "url_1", "link1", "link_1", "carta_pagare_link", default="")).strip(),
+        "url2": str(pick("url2", "url_2", "link2", "link_2", "pantallazo_aceptacion_link", default="")).strip(),
         "pri_ult": _to_float(pick("pri-ult", "pri_ult", "plazo"), 1.0),
         "ratio_pp": _to_float(pick("ratio_pp", "ratio pp"), 0.0),
         "c_a": _to_float(pick("c/a", "c_a", "cuota_apartado"), 1.0),
@@ -688,6 +690,8 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
     ids = str(case.get("ids", "")).strip()
     bancos = str(case.get("bancos", "")).strip()
     correo = str(case.get("correo", "")).strip()
+    url1 = str(case.get("url1", "")).strip()
+    url2 = str(case.get("url2", "")).strip()
 
     missing = [
         label
@@ -760,8 +764,8 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
             "referencia": referencia,
             "ids": re.sub(r"\s+", "", ids),
             "bancos": bancos,
-            "carta_pagare_link": "",
-            "pantallazo_aceptacion_link": "No requerido (flujo independiente)",
+            "carta_pagare_link": url1,
+            "pantallazo_aceptacion_link": url2,
             "condonacion_mensualidades": "No",
             "pantallazo_correo_condonacion_link": "",
             "comision_exito_total": float(case["amount_total"]),
@@ -802,7 +806,7 @@ def main():
     st.set_page_config(page_title="Predicción independiente", page_icon="⚡", layout="centered")
     st.title("⚡ Calculadora independiente (predicción + envío)")
     st.caption(
-        "Flujo independiente: solo ingresas features calculadas, subes carta y pagaré firmados, "
+        "Flujo independiente: solo ingresas features calculadas, pegas los links de soporte, "
         "y se envía automáticamente a aprobación."
     )
 
@@ -813,6 +817,8 @@ def main():
         "correo": "",
         "tipo_liquidacion": "",
         "enviar": "No",
+        "url1": "",
+        "url2": "",
         "pri_ult": 1.0,
         "ratio_pp": 0.0,
         "c_a": 1.0,
@@ -903,7 +909,9 @@ def main():
         ce_inicial = st.number_input("CE inicial", min_value=0.0, step=1000.0, value=float(defaults["ce_inicial"]))
 
     st.markdown("### Soporte documental")
-    st.caption("En este flujo independiente no se suben adjuntos; solo se envían datos a Sheets.")
+    st.caption("Pega los links que deben viajar a las columnas F y G de la hoja de aprobación.")
+    url1 = st.text_input("URL 1 / Carta + pagaré (columna F)", value=str(defaults.get("url1", "")))
+    url2 = st.text_input("URL 2 / Pantallazo aceptación (columna G)", value=str(defaults.get("url2", "")))
 
     enviar_desde_archivo = str(defaults.get("enviar", "No")).strip()
     st.caption(f"Valor 'enviar' detectado en archivo/fuente: **{enviar_desde_archivo or 'No'}**")
@@ -924,6 +932,8 @@ def main():
             "bancos": bancos,
             "correo": correo,
             "enviar": enviar_desde_archivo,
+            "url1": url1,
+            "url2": url2,
             "pri_ult": float(pri_ult),
             "ratio_pp": float(ratio_pp),
             "c_a": float(c_a),
@@ -968,7 +978,9 @@ def main():
         elif duplicate_mode == "reference_duplicate":
             st.info("Referencia repetida con otro ID: se envió sin check de aprobación ni comentario.")
         pred_info = send_result.get("prediction", {})
-        st.caption("Carta + pagaré: no aplica en flujo independiente (solo envío de datos).")
+        payload = send_result.get("payload", {})
+        st.caption(f"URL 1 enviada a columna F: {payload.get('carta_pagare_link', '') or 'Sin URL'}")
+        st.caption(f"URL 2 enviada a columna G: {payload.get('pantallazo_aceptacion_link', '') or 'Sin URL'}")
         st.caption(f"Tipo liquidación (cartera): {pred_info.get('tipo_liquidacion', '')}")
         st.caption(
             f"Criterio: umbral {float(pred_info.get('umbral', 0)):.2f} → "
