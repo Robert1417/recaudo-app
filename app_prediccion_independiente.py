@@ -628,6 +628,10 @@ def _load_repo_cartera() -> pd.DataFrame | None:
             return None
     return None
 
+def parse_response(response: dict, response_format: str) -> dict | str:
+    if response_format == "string":
+        return json.dumps(response)
+    return response
 
 def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict:
     """Calcula la predicción desde parámetros externos (por ejemplo, JSON de Berex).
@@ -635,10 +639,12 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
     Retorna un diccionario con `ok=True` y los datos de predicción, o `ok=False` con
     `error` si falta información o ocurre un problema al calcular.
     """
+    record = _safe_to_dict(params)
     case = _extract_case_data_from_record(params or {})
     referencia = str(case.get("referencia", "")).strip()
     if not referencia:
-        return {"ok": False, "error": "Para predecir debes enviar la referencia."}
+        response = {"ok": False, "error": "Para predecir debes enviar la referencia."}
+        return parse_response(response, record.get("format"))
 
     tipo_liquidacion = str(case.get("tipo_liquidacion", "")).strip()
     if not tipo_liquidacion:
@@ -665,7 +671,7 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
             features=features,
             prediccion=float(pred),
         )
-        return {
+        response = {
             "ok": True,
             "pred": float(pred),
             "tipo_liquidacion": str(tipo_liquidacion),
@@ -675,8 +681,11 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
             "features": features,
             "historico": historico_result,
         }
+
+        return parse_response(response, record.get("format"))
     except Exception as exc:
-        return {"ok": False, "error": f"No se pudo calcular la predicción: {exc}"}
+        response = {"ok": False, "error": f"No se pudo calcular la predicción: {exc}"}
+        return parse_response(response, record.get("format"))
 
 
 def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFrame | None = None) -> dict:
@@ -685,6 +694,7 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
     `params` puede venir directamente del JSON de Berex. Si `pred_info` no se envía,
     esta función ejecuta `run_prediction` antes de guardar el resultado en Sheets.
     """
+    record = _safe_to_dict(params)
     case = _extract_case_data_from_record(params or {})
     referencia = str(case.get("referencia", "")).strip()
     ids = str(case.get("ids", "")).strip()
@@ -704,20 +714,23 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
         if not value
     ]
     if missing:
-        return {"ok": False, "sent": False, "error": f"Faltan campos requeridos: {', '.join(missing)}."}
+        response = {"ok": False, "sent": False, "error": f"Faltan campos requeridos: {', '.join(missing)}."}
+        return parse_response(response, record.get("format"))
     if not correo.lower().endswith("@gobravo.com.co"):
-        return {"ok": False, "sent": False, "error": "El correo debe terminar en @gobravo.com.co."}
+        response = {"ok": False, "sent": False, "error": "El correo debe terminar en @gobravo.com.co."}
+        return parse_response(response, record.get("format"))
 
     pred_info = _safe_to_dict(pred_info)
 
     if pred_info is None or len(pred_info) == 0:
         pred_info = run_prediction(params, cartera_df=cartera_df)
     if not pred_info or not pred_info.get("ok"):
-        return {
+        response = {
             "ok": False,
             "sent": False,
             "error": (pred_info or {}).get("error", "No fue posible calcular la predicción antes de enviar."),
         }
+        return parse_response(response, record.get("format"))
 
     pred = float(pred_info["pred"])
     tipo_liquidacion = str(pred_info["tipo_liquidacion"])
@@ -739,12 +752,13 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
 
     duplicate_check = _get_respuestas_duplicados_mes(referencia, ids)
     if not duplicate_check["ok"]:
-        return {
+        response = {
             "ok": False,
             "sent": False,
             "prediction": pred_info,
             "error": f"No fue posible validar duplicados: {duplicate_check['error']}",
         }
+        return parse_response(response, record.get("format"))
     duplicate_mode = duplicate_check["mode"]
     exact_rows_previas = duplicate_check.get("exact_rows", [])
     if duplicate_mode == "exact_duplicate":
@@ -776,7 +790,7 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
             "prediccion": round(float(pred), 4),
         }
         _append_respuesta(payload)
-        return {
+        response = {
             "ok": True,
             "sent": True,
             "prediction": pred_info,
@@ -784,8 +798,10 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
             "aprobado": aprobado,
             "payload": payload,
         }
+        return parse_response(response, record.get("format"))
     except Exception as exc:
-        return {"ok": False, "sent": False, "prediction": pred_info, "error": f"No se pudo completar el envío: {exc}"}
+        response = {"ok": False, "sent": False, "prediction": pred_info, "error": f"No se pudo completar el envío: {exc}"}
+        return parse_response(response, record.get("format"))
 
 
 def process_prediction_request(params: dict, cartera_df: pd.DataFrame | None = None) -> dict:
