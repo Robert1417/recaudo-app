@@ -3759,7 +3759,7 @@ if export_pdf_bytes:
             file_name=export_filename_sin_pagare,
             mime="application/pdf",
             use_container_width=True,
-            disabled=bool(missing_document_fields),
+            disabled=False,
         )
 else:
     if not export_pdf_error:
