@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 import pandas as pd
 import numpy as np
 from copy import deepcopy
@@ -156,6 +157,7 @@ GOOGLE_DRIVE_UPLOAD_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 DRAFT_STATE_QUERY_KEY = "draft_id"
 DRAFT_STATE_DIR = Path(gettempdir()) / "recaudo_app_drafts"
 DRAFT_STATE_MAX_AGE_HOURS = 72
+CALCULATOR_HISTORY_PATH = Path(gettempdir()) / "recaudo_app_history.json"
 DRIVE_FOLDER_CARTA_PAGARE_ID = "1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk"
 DRIVE_FOLDER_PANTALLAZOS_ID = "1wTIUNP74ZD2MtVO_bOtowM-z9z0RgpxhEarfoElwQGE86kpMiPWz7qt4130YFYK6NiXZNRh1"
 DRIVE_FOLDER_CONDONACION_CORREO_ID = "1CN73OI6DjyEVGLsu1m9iszPPJ4xKfTZM5aMQ-lHNwHnlgzck0VjdL3MX5RuObC_n3zs-MFNF"
@@ -2086,6 +2088,64 @@ def _is_json_serializable(value) -> bool:
         return False
 
 
+def _load_calculator_history() -> list[dict]:
+    if not CALCULATOR_HISTORY_PATH.exists():
+        return []
+    try:
+        payload = json.loads(CALCULATOR_HISTORY_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, list) else []
+    except Exception:
+        return []
+
+
+def _save_calculator_history(entries: list[dict]) -> None:
+    try:
+        CALCULATOR_HISTORY_PATH.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _capture_history_snapshot(reference: str) -> dict:
+    state_data = {}
+    for key, value in st.session_state.items():
+        key_str = str(key)
+        if key_str.startswith(("drive_", "_", "FormSubmitter")):
+            continue
+        if key_str.endswith("_editor") or key_str == "cronograma_editor":
+            continue
+        if _is_json_serializable(value):
+            state_data[key_str] = value
+    return {
+        "saved_at": datetime.now().isoformat(),
+        "reference": str(reference or "").strip(),
+        "state": state_data,
+    }
+
+
+def _apply_history_snapshot(entry: dict) -> None:
+    state = entry.get("state", {})
+    if not isinstance(state, dict):
+        return
+    for key, value in state.items():
+        key_str = str(key)
+        if key_str.endswith("_editor") or key_str == "cronograma_editor":
+            continue
+        try:
+            st.session_state[key] = value
+        except StreamlitAPIException:
+            # Algunas keys de widgets no se pueden modificar después de instanciadas.
+            # Se omiten aquí y se aplican en un rerun temprano usando payload pendiente.
+            continue
+
+
+def _consume_pending_history_snapshot() -> None:
+    pending = st.session_state.pop("_history_pending_restore", None)
+    if not pending or not isinstance(pending, dict):
+        return
+    _apply_history_snapshot(pending)
+    st.session_state["_history_restore_ok"] = True
+
+
 def _restore_draft_state() -> None:
     if st.session_state.get("_draft_state_restored", False):
         return
@@ -2588,6 +2648,7 @@ def _require_drive_authentication() -> None:
 
 _require_drive_authentication()
 _restore_draft_state()
+_consume_pending_history_snapshot()
 
 
 def _is_corporate_email(email: str) -> bool:
@@ -2841,7 +2902,25 @@ st.success(f"✅ Base lista • filas: {len(df_base):,}")
 
 # =================== 2) Referencia → seleccionar id(s) ===================
 st.markdown("### 2) Referencia → seleccionar **Id deuda** (uno o varios)")
-ref_input = st.text_input("🔎 Escribe la **Referencia** (exacta como aparece en la base)")
+ref_input = st.text_input("🔎 Escribe la **Referencia** (exacta como aparece en la base)", key="ref_input")
+st.sidebar.markdown("### 🗂️ Historial")
+if st.session_state.pop("_history_restore_ok", False):
+    st.sidebar.success("Historial cargado. Revisa y continúa con envío.")
+historial = _load_calculator_history()
+historial_filtrado = [h for h in historial if ref_input.strip() in str(h.get("reference", "")).strip()] if ref_input.strip() else historial
+busqueda_historial = st.sidebar.text_input("Buscar referencia guardada", value=str(ref_input or ""), key="historial_busqueda")
+if busqueda_historial.strip():
+    historial_filtrado = [h for h in historial if busqueda_historial.strip() in str(h.get("reference", ""))]
+opciones_historial = [""] + [
+    f"{item.get('reference','(sin referencia)')} · {item.get('saved_at','')[:19]}"
+    for item in historial_filtrado[:100]
+]
+seleccion_historial = st.sidebar.selectbox("Abrir guardado", opciones_historial, index=0)
+if st.sidebar.button("Cargar historial seleccionado", use_container_width=True, disabled=not seleccion_historial):
+    idx = opciones_historial.index(seleccion_historial) - 1
+    if idx >= 0:
+        st.session_state["_history_pending_restore"] = historial_filtrado[idx]
+        st.rerun()
 _reset_reference_dependent_state(ref_input)
 if not ref_input:
     st.stop()
@@ -3706,6 +3785,8 @@ if not cronograma_editado.empty and not plan_df.empty:
         st.error(f"No pude preparar el documento PDF: {export_exc}")
 
 if export_pdf_bytes:
+    if "pdf_descargado" not in st.session_state:
+        st.session_state.pdf_descargado = False
     missing_document_fields = _missing_document_fields(template_context)
     if float(ce_inicial or 0.0) < ce_inicial_minimo_aprobacion:
         missing_document_fields.append("Cliente debe tener un abono a la comisión de éxito este mes")
@@ -3737,6 +3818,7 @@ if export_pdf_bytes:
         mime="application/pdf",
         use_container_width=True,
         disabled=bool(missing_document_fields),
+        on_click=lambda: st.session_state.update({"pdf_descargado": True}),
     )
 
     export_pdf_sin_pagare_bytes = None
@@ -3760,7 +3842,14 @@ if export_pdf_bytes:
             mime="application/pdf",
             use_container_width=True,
             disabled=False,
+            on_click=lambda: st.session_state.update({"pdf_descargado": True}),
         )
+    can_save_historial = bool(st.session_state.get("pdf_descargado", False))
+    if st.sidebar.button("💾 Guardar en historial", use_container_width=True, disabled=not can_save_historial):
+        historial_actual = _load_calculator_history()
+        historial_actual.insert(0, _capture_history_snapshot(ref_input))
+        _save_calculator_history(historial_actual[:300])
+        st.sidebar.success("Caso guardado en historial.")
 else:
     if not export_pdf_error:
         st.info("Primero completa datos suficientes en el cronograma y en el plan para generar el PDF.")
