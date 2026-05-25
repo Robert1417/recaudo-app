@@ -9,7 +9,7 @@
   "metrics": {
     "mae": 0.19120098156385235,
     "rmse": 0.26782750515732684,
-    "r2": 0.0673374402300938
+    "r2": 0.06733744023009358
   },
   "notes": "Pipeline: Log1p(C/A,AMOUNT_TOTAL)+winsor(0.5%)+imputer(median)+RobustScaler+MLP(64,32)",
   "versions": {
