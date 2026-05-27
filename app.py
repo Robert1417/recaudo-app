@@ -3550,7 +3550,7 @@ st.caption(
     "Las celdas exportadas se normalizan en Times New Roman 9.5 para que el estilo interno coincida con el resto del documento."
 )
 
-ce_inicial_minimo_aprobacion = 10000.0
+ce_inicial_minimo_aprobacion = 1000.0
 
 if "doc_graduacion_confirmada" not in st.session_state:
     st.session_state.doc_graduacion_confirmada = False
