@@ -23,6 +23,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from joblib import load
 
+from recaudo_rules import LOW_RATIO_PP_WARNING, apply_low_ratio_pp_cap
+
 # Nota de entorno:
 # Esta app puede instalarse de forma aislada con `requirements_independiente.txt`
 # sin tocar el `requirements.txt` principal de la calculadora original.
@@ -491,7 +493,7 @@ def _is_traditional_liquidation(tipo_liquidacion: str) -> bool:
     return "tradicional" in norm
 
 
-def _predict_recaudo(model, features: dict, pago_banco: float, primer_pago: float) -> float:
+def _predict_recaudo_result(model, features: dict) -> tuple[float, bool]:
     x = pd.DataFrame([features], columns=["PRI-ULT", "Ratio_PP", "C/A", "AMOUNT_TOTAL"])
     yhat = float(model.predict(x)[0])
 
@@ -505,10 +507,14 @@ def _predict_recaudo(model, features: dict, pago_banco: float, primer_pago: floa
     if float(features["AMOUNT_TOTAL"]) > 6_000_000:
         yhat += 0.05
 
-    if pago_banco > 0 and (primer_pago / pago_banco) < 0.10:
-        yhat = min(yhat, 0.74)
+    yhat = min(yhat, 0.99)
+    return apply_low_ratio_pp_cap(yhat, features["Ratio_PP"])
 
-    return min(yhat, 0.99)
+
+def _predict_recaudo(model, features: dict, pago_banco: float, primer_pago: float) -> float:
+    """Mantiene la interfaz anterior; la regla prioritaria usa Ratio_PP."""
+    prediction, _ = _predict_recaudo_result(model, features)
+    return prediction
 
 
 def _to_float(value, default=0.0) -> float:
@@ -663,7 +669,7 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
             "C/A": float(case["c_a"]),
             "AMOUNT_TOTAL": float(case["amount_total"]),
         }
-        pred = _predict_recaudo(model, features, float(case["pago_banco"]), float(case["primer_pago"]))
+        pred, low_ratio_cap_applied = _predict_recaudo_result(model, features)
         umbral = 0.8 if _is_traditional_liquidation(tipo_liquidacion) else 0.74
         historico_result = guardar_historico_calculadora(
             referencia=referencia,
@@ -678,6 +684,7 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
             "tipo_liquidacion_encontrado": tipo_liquidacion_encontrado,
             "umbral": float(umbral),
             "aprobado": float(pred) >= float(umbral),
+            "low_ratio_cap_applied": low_ratio_cap_applied,
             "features": features,
             "historico": historico_result,
         }
@@ -969,6 +976,8 @@ def main():
         st.session_state.ind_tipo_liquidacion = str(pred_info["tipo_liquidacion"])
         st.session_state.ind_umbral = float(pred_info["umbral"])
         st.success(f"Predicción calculada: {float(pred_info['pred']):.4f}")
+        if pred_info.get("low_ratio_cap_applied"):
+            st.warning(LOW_RATIO_PP_WARNING)
         st.caption(
             f"Criterio: umbral {float(pred_info['umbral']):.2f} → "
             f"{'Aprobado' if pred_info.get('aprobado') else 'No aprobado'}"

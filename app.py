@@ -44,6 +44,8 @@ from docx.text.paragraph import Paragraph
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
 
+from recaudo_rules import LOW_RATIO_PP_WARNING, apply_low_ratio_pp_cap
+
 class LogAndDrop(BaseEstimator, TransformerMixin):
     """
     Crea columnas log1p de ['C/A', 'AMOUNT_TOTAL'] y elimina las originales.
@@ -3853,20 +3855,19 @@ if do_predict:
         if feature_vals["AMOUNT_TOTAL"] > 6_000_000:
             yhat_adj += 0.05
 
-        # ✅ Regla de negocio: si el primer pago es menor al 10% del PAGO BANCO,
-        # la predicción no puede superar 0.74.
-        pago_banco_actual = float(st.session_state.get("pago_banco", 0.0) or 0.0)
-        primer_pago_actual = float(st.session_state.get("primer_pago_banco", pago_banco_actual) or 0.0)
-        if pago_banco_actual > 0:
-            ratio_primer_pago = primer_pago_actual / pago_banco_actual
-            if ratio_primer_pago < 0.10:
-                yhat_adj = min(yhat_adj, 0.74)
-
         # ✅ Regla de negocio: nunca permitir 1.00 o más.
         if yhat_adj >= 1.0:
             yhat_adj = 0.99
 
+        # ✅ Regla prioritaria: Ratio_PP bajo limita el resultado final a 0.75.
+        yhat_adj, low_ratio_cap_applied = apply_low_ratio_pp_cap(
+            yhat_adj,
+            feature_vals["Ratio_PP"],
+        )
+
         st.success(f"✅ Predicción de recaudo: {yhat_adj:,.2f}")
+        if low_ratio_cap_applied:
+            st.warning(LOW_RATIO_PP_WARNING)
 
         # ✅ Guardar registro del cálculo
         log_result = guardar_log_calculo(
