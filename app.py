@@ -3932,8 +3932,13 @@ else:
         type=["pdf"],
         key="carta_pagare_pdf",
     )
+    pantallazo_label = (
+        "📎 Adjuntar PDF del codeudor (hoja 1: cédula, hoja 2: certificado de ingresos)"
+        if st.session_state.get("doc_hay_codeudor", False)
+        else "📎 Adjunta mensaje de confirmación del cliente"
+    )
     pantallazo_file = st.file_uploader(
-        "📎 Adjuntar PDF del codeudor (hoja 1: cédula, hoja 2: certificado de ingresos)",
+        pantallazo_label,
         type=["pdf"],
         key="pantallazo_pdf",
     )
