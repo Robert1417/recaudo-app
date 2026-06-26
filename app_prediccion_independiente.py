@@ -23,6 +23,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from joblib import load
 
+import app_prediccion_masiva
 from recaudo_rules import LOW_RATIO_PP_WARNING, apply_low_ratio_pp_cap
 
 # Nota de entorno:
@@ -50,6 +51,7 @@ GOOGLE_SHEETS_SCOPES = [
 ]
 DRIVE_FOLDER_CARTA_PAGARE_ID = "1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk"
 GOOGLE_DRIVE_UPLOAD_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
 
 class LogAndDrop(BaseEstimator, TransformerMixin):
     def __init__(self, ca_col="C/A", amt_col="AMOUNT_TOTAL"):
@@ -695,6 +697,8 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
         return parse_response(response, record.get("format"))
 
 
+
+
 def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFrame | None = None) -> dict:
     """Calcula (si hace falta) y envía a aprobación usando parámetros externos.
 
@@ -854,7 +858,7 @@ def main():
     st.markdown("### Fuente de datos de entrada")
     source_mode = st.radio(
         "¿Cómo quieres cargar los inputs?",
-        ["Manual", "Archivo (CSV/XLSX/JSON)", "Endpoint (JSON)"],
+        ["Manual", "Archivo (CSV/XLSX/JSON)", "Masiva (CSV/XLSX)", "Endpoint (JSON)"],
         horizontal=True,
     )
 
@@ -911,6 +915,17 @@ def main():
             "No encontré la cartera en el repositorio. "
             "Asegúrate de tener `data/cartera_asignada_filtrada.parquet` o `.csv`."
         )
+
+    if source_mode == "Masiva (CSV/XLSX)":
+        app_prediccion_masiva.render_bulk_prediction_ui(
+            cartera_df=cartera_df,
+            load_model=_load_model,
+            extract_case_data=_extract_case_data_from_record,
+            predict_recaudo_result=_predict_recaudo_result,
+            is_traditional_liquidation=_is_traditional_liquidation,
+            resolver_tipo_liquidacion=_resolver_tipo_liquidacion_desde_cartera,
+        )
+        return
 
     st.markdown("### Datos del caso")
     referencia = st.text_input("Referencia", value=str(defaults["referencia"]))
