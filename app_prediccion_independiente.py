@@ -50,6 +50,40 @@ GOOGLE_SHEETS_SCOPES = [
 ]
 DRIVE_FOLDER_CARTA_PAGARE_ID = "1nEo1iZWzFySJX_90crO9tjTTX1Cr_yVxs-xyn1C0TMu78Jt8rs2QYqVXs_wgzxEvn1AU0nMk"
 GOOGLE_DRIVE_UPLOAD_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+BATCH_TEMPLATE_COLUMNS = [
+    "referencia",
+    "ids",
+    "bancos",
+    "correo",
+    "tipo_liquidacion",
+    "url1",
+    "url2",
+    "pri_ult",
+    "ratio_pp",
+    "c_a",
+    "amount_total",
+    "pago_banco",
+    "primer_pago",
+    "ce_inicial",
+]
+BATCH_RESULT_COLUMNS = [
+    "fila_origen",
+    "referencia_usada",
+    "ids_usados",
+    "pri_ult_usado",
+    "ratio_pp_usado",
+    "c_a_usado",
+    "amount_total_usado",
+    "pago_banco_usado",
+    "primer_pago_usado",
+    "ce_inicial_usado",
+    "tipo_liquidacion_resuelto",
+    "prediccion",
+    "umbral_aprobacion",
+    "aprobado_estimado",
+    "warning_ratio_pp",
+    "error_prediccion",
+]
 
 class LogAndDrop(BaseEstimator, TransformerMixin):
     def __init__(self, ca_col="C/A", amt_col="AMOUNT_TOTAL"):
@@ -526,6 +560,22 @@ def _to_float(value, default=0.0) -> float:
         return float(default)
 
 
+def _is_blank_value(value) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    return isinstance(value, str) and not value.strip()
+
+
+def _is_empty_record(record) -> bool:
+    record = _safe_to_dict(record)
+    return not any(not _is_blank_value(value) for value in record.values())
+
+
 def _safe_to_dict(data):
     """Convierte CUALQUIER cosa a diccionario de forma segura"""
     if isinstance(data, dict):
@@ -594,6 +644,23 @@ def _extract_case_data_from_record(record):
     }
 
 
+def _read_tabular_upload(uploaded_file) -> pd.DataFrame:
+    if uploaded_file is None:
+        raise ValueError("Debes cargar un archivo.")
+
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+
+    name = str(getattr(uploaded_file, "name", "") or "").lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(uploaded_file, sep=None, engine="python")
+    if name.endswith(".xlsx"):
+        return pd.read_excel(uploaded_file)
+    raise ValueError("Solo se permiten archivos CSV o XLSX para esta carga.")
+
+
 def _resolver_tipo_liquidacion_desde_cartera(cartera_df: pd.DataFrame, referencia: str) -> str:
     if cartera_df is None or cartera_df.empty:
         return ""
@@ -639,7 +706,7 @@ def parse_response(response: dict, response_format: str) -> dict | str:
         return json.dumps(response)
     return response
 
-def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict:
+def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None, *, save_history: bool = True) -> dict:
     """Calcula la predicción desde parámetros externos (por ejemplo, JSON de Berex).
 
     Retorna un diccionario con `ok=True` y los datos de predicción, o `ok=False` con
@@ -671,12 +738,21 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
         }
         pred, low_ratio_cap_applied = _predict_recaudo_result(model, features)
         umbral = 0.8 if _is_traditional_liquidation(tipo_liquidacion) else 0.74
-        historico_result = guardar_historico_calculadora(
-            referencia=referencia,
-            ids=case.get("ids", ""),
-            features=features,
-            prediccion=float(pred),
-        )
+        if save_history:
+            historico_result = guardar_historico_calculadora(
+                referencia=referencia,
+                ids=case.get("ids", ""),
+                features=features,
+                prediccion=float(pred),
+            )
+        else:
+            historico_result = {
+                "ok": True,
+                "sheet_destination": "",
+                "error": None,
+                "row": None,
+                "skipped": True,
+            }
         response = {
             "ok": True,
             "pred": float(pred),
@@ -738,7 +814,6 @@ def run_send(params: dict, pred_info: dict | None = None, cartera_df: pd.DataFra
             "error": (pred_info or {}).get("error", "No fue posible calcular la predicción antes de enviar."),
         }
         return parse_response(response, record.get("format"))
-
     pred = float(pred_info["pred"])
     tipo_liquidacion = str(pred_info["tipo_liquidacion"])
     umbral = float(pred_info["umbral"])
@@ -825,220 +900,84 @@ def process_prediction_request(params: dict, cartera_df: pd.DataFrame | None = N
     return run_send(params, pred_info=pred_info, cartera_df=cartera_df)
 
 
-def main():
-    st.set_page_config(page_title="Predicción independiente", page_icon="⚡", layout="centered")
-    st.title("⚡ Calculadora independiente (predicción + envío)")
-    st.caption(
-        "Flujo independiente: solo ingresas features calculadas, pegas los links de soporte, "
-        "y se envía automáticamente a aprobación."
+def _build_batch_template_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=BATCH_TEMPLATE_COLUMNS)
+
+
+def _build_batch_template_notes_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"campo": "referencia", "obligatorio": "Si", "descripcion": "Referencia del caso."},
+            {"campo": "ids", "obligatorio": "Recomendado", "descripcion": "ID o IDs de deuda del caso."},
+            {"campo": "bancos", "obligatorio": "No", "descripcion": "Se conserva por compatibilidad con el modo individual."},
+            {"campo": "correo", "obligatorio": "No", "descripcion": "Se conserva por compatibilidad con el modo individual."},
+            {"campo": "tipo_liquidacion", "obligatorio": "No", "descripcion": "Si va vacio, se intenta resolver desde la cartera."},
+            {"campo": "url1", "obligatorio": "No", "descripcion": "No se usa en la prediccion masiva; queda por compatibilidad."},
+            {"campo": "url2", "obligatorio": "No", "descripcion": "No se usa en la prediccion masiva; queda por compatibilidad."},
+            {"campo": "pri_ult", "obligatorio": "Si", "descripcion": "Plazo usado por el modelo."},
+            {"campo": "ratio_pp", "obligatorio": "Si", "descripcion": "Ratio del primer pago."},
+            {"campo": "c_a", "obligatorio": "Si", "descripcion": "Valor C/A calculado para el caso."},
+            {"campo": "amount_total", "obligatorio": "Si", "descripcion": "Comision exito total."},
+            {"campo": "pago_banco", "obligatorio": "No", "descripcion": "Se conserva para mantener el mismo formato del modo individual."},
+            {"campo": "primer_pago", "obligatorio": "No", "descripcion": "Se conserva para mantener el mismo formato del modo individual."},
+            {"campo": "ce_inicial", "obligatorio": "No", "descripcion": "Se conserva para mantener el mismo formato del modo individual."},
+        ]
     )
 
-    defaults = {
-        "referencia": "",
-        "ids": "",
-        "bancos": "",
-        "correo": "",
-        "tipo_liquidacion": "",
-        "enviar": "No",
-        "url1": "",
-        "url2": "",
-        "pri_ult": 1.0,
-        "ratio_pp": 0.0,
-        "c_a": 1.0,
-        "amount_total": 0.0,
-        "pago_banco": 0.0,
-        "primer_pago": 0.0,
-        "ce_inicial": 0.0,
-    }
 
-    st.markdown("### Fuente de datos de entrada")
-    source_mode = st.radio(
-        "¿Cómo quieres cargar los inputs?",
-        ["Manual", "Archivo (CSV/XLSX/JSON)", "Endpoint (JSON)"],
-        horizontal=True,
-    )
+def _build_excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            safe_sheet_name = str(sheet_name or "Hoja")[:31]
+            df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+    buffer.seek(0)
+    return buffer.getvalue()
 
-    up = None
-    if source_mode == "Archivo (CSV/XLSX/JSON)":
-        up = st.file_uploader("Sube un archivo con una fila", type=["csv", "xlsx", "json"], key="fuente_archivo")
-        if up is not None:
-            try:
-                if up.name.lower().endswith(".csv"):
-                    df_src = pd.read_csv(up)
-                    record = df_src.iloc[0].to_dict()
-                elif up.name.lower().endswith(".xlsx"):
-                    df_src = pd.read_excel(up)
-                    record = df_src.iloc[0].to_dict()
-                else:
-                    raw = json.loads(up.getvalue().decode("utf-8"))
-                    if isinstance(raw, list):
-                        record = dict(raw[0] if raw else {})
-                    else:
-                        record = dict(raw)
-                defaults.update(_extract_case_data_from_record(record))
-                st.success("Inputs cargados desde archivo. Puedes editarlos antes de enviar.")
-            except Exception as exc:
-                st.error(f"No se pudo leer el archivo: {exc}")
-    elif source_mode == "Endpoint (JSON)":
-        endpoint_url = st.text_input("URL endpoint (GET)")
-        endpoint_token = st.text_input("Bearer token (opcional)", type="password")
-        if st.button("Cargar desde endpoint", use_container_width=True):
-            if not endpoint_url.strip():
-                st.warning("Ingresa la URL del endpoint.")
-            else:
-                try:
-                    headers = {}
-                    if endpoint_token.strip():
-                        headers["Authorization"] = f"Bearer {endpoint_token.strip()}"
-                    resp = requests.get(endpoint_url.strip(), headers=headers, timeout=20)
-                    resp.raise_for_status()
-                    payload = resp.json()
-                    if isinstance(payload, list):
-                        record = dict(payload[0] if payload else {})
-                    else:
-                        record = dict(payload)
-                    defaults.update(_extract_case_data_from_record(record))
-                    st.success("Inputs cargados desde endpoint. Puedes editarlos antes de enviar.")
-                except Exception as exc:
-                    st.error(f"No se pudo cargar desde endpoint: {exc}")
 
-    st.markdown("### Cartera (consulta automática desde el repositorio)")
-    cartera_df = _load_repo_cartera()
-    if cartera_df is not None and not cartera_df.empty:
-        st.success("Cartera cargada desde `data/cartera_asignada_filtrada`.")
-    else:
-        st.error(
-            "No encontré la cartera en el repositorio. "
-            "Asegúrate de tener `data/cartera_asignada_filtrada.parquet` o `.csv`."
-        )
-
-    st.markdown("### Datos del caso")
-    referencia = st.text_input("Referencia", value=str(defaults["referencia"]))
-    ids = st.text_input("IDs deuda (separados por guion o coma)", value=str(defaults["ids"]))
-    bancos = st.text_input("Banco(s)", value=str(defaults["bancos"]))
-    correo = st.text_input("Correo corporativo", value=str(defaults["correo"]))
-    st.caption("Tipo de liquidación se toma automáticamente desde el archivo de Cartera.")
-
-    st.markdown("### Features ya calculadas")
-    c1, c2 = st.columns(2)
-    with c1:
-        pri_ult = st.number_input("PRI-ULT (plazo)", min_value=1.0, step=1.0, value=float(defaults["pri_ult"]))
-        c_a = st.number_input("C/A", min_value=0.01, step=0.01, value=float(defaults["c_a"]))
-        amount_total = st.number_input("AMOUNT_TOTAL", min_value=0.0, step=1000.0, value=float(defaults["amount_total"]))
-    with c2:
-        ratio_pp = st.number_input("Ratio_PP", min_value=0.0, step=0.01, value=float(defaults["ratio_pp"]))
-        pago_banco = st.number_input("PAGO BANCO", min_value=0.0, step=1000.0, value=float(defaults["pago_banco"]))
-        primer_pago = st.number_input("Primer pago banco", min_value=0.0, step=1000.0, value=float(defaults["primer_pago"]))
-        ce_inicial = st.number_input("CE inicial", min_value=0.0, step=1000.0, value=float(defaults["ce_inicial"]))
-
-    st.markdown("### Soporte documental")
-    st.caption("Pega los links que deben viajar a las columnas F y G de la hoja de aprobación.")
-    url1 = st.text_input("URL 1 / Carta + pagaré (columna F)", value=str(defaults.get("url1", "")))
-    url2 = st.text_input("URL 2 / Pantallazo aceptación (columna G)", value=str(defaults.get("url2", "")))
-
-    enviar_desde_archivo = str(defaults.get("enviar", "No")).strip()
-    st.caption(f"Valor 'enviar' detectado en archivo/fuente: **{enviar_desde_archivo or 'No'}**")
-
-    pred_col, send_col = st.columns(2)
-    with pred_col:
-        btn_predecir = st.button("🔮 Predecir", type="primary", use_container_width=True)
-    with send_col:
-        btn_enviar = st.button("📤 Enviar a aprobación", use_container_width=True)
-
-    if st.session_state.get("ind_pred_value") is not None:
-        st.info(f"Predicción actual: **{float(st.session_state.get('ind_pred_value')):.4f}**")
-
-    def _current_params() -> dict:
-        return {
-            "referencia": referencia,
-            "ids": ids,
-            "bancos": bancos,
-            "correo": correo,
-            "enviar": enviar_desde_archivo,
-            "url1": url1,
-            "url2": url2,
-            "pri_ult": float(pri_ult),
-            "ratio_pp": float(ratio_pp),
-            "c_a": float(c_a),
-            "amount_total": float(amount_total),
-            "pago_banco": float(pago_banco),
-            "primer_pago": float(primer_pago),
-            "ce_inicial": float(ce_inicial),
+def _build_batch_template_excel_bytes() -> bytes:
+    return _build_excel_bytes(
+        {
+            "plantilla": _build_batch_template_df(),
+            "instrucciones": _build_batch_template_notes_df(),
         }
-
-    def _show_prediction_result(pred_info: dict) -> bool:
-        if not pred_info.get("ok"):
-            st.error(pred_info.get("error", "No se pudo calcular la predicción."))
-            return False
-        if not pred_info.get("tipo_liquidacion_encontrado", True):
-            st.warning("No encontré la referencia en cartera; se asumirá Tipo de liquidación = Tradicional.")
-        st.session_state.ind_pred_value = float(pred_info["pred"])
-        st.session_state.ind_tipo_liquidacion = str(pred_info["tipo_liquidacion"])
-        st.session_state.ind_umbral = float(pred_info["umbral"])
-        st.success(f"Predicción calculada: {float(pred_info['pred']):.4f}")
-        if pred_info.get("low_ratio_cap_applied"):
-            st.warning(LOW_RATIO_PP_WARNING)
-        st.caption(
-            f"Criterio: umbral {float(pred_info['umbral']):.2f} → "
-            f"{'Aprobado' if pred_info.get('aprobado') else 'No aprobado'}"
-        )
-        historico = pred_info.get("historico") or {}
-        if historico.get("ok"):
-            st.caption(f"📊 Histórico guardado en: `{historico.get('sheet_destination')}`")
-        else:
-            st.warning(
-                "No se pudo guardar el histórico en Google Sheets. "
-                f"Detalle: {historico.get('error', 'Sin detalle')}"
-            )
-        return True
-
-    def _show_send_result(send_result: dict) -> bool:
-        if not send_result.get("ok"):
-            st.error(send_result.get("error", "No se pudo completar el envío."))
-            return False
-        st.success("Envío automático a aprobación realizado correctamente.")
-        duplicate_mode = send_result.get("duplicate_mode")
-        if duplicate_mode == "exact_duplicate":
-            st.info("Se detectó duplicado exacto: anterior marcado como Duplicado.")
-        elif duplicate_mode == "reference_duplicate":
-            st.info("Referencia repetida con otro ID: se envió sin check de aprobación ni comentario.")
-        pred_info = send_result.get("prediction", {})
-        payload = send_result.get("payload", {})
-        st.caption(f"URL 1 enviada a columna F: {payload.get('carta_pagare_link', '') or 'Sin URL'}")
-        st.caption(f"URL 2 enviada a columna G: {payload.get('pantallazo_aceptacion_link', '') or 'Sin URL'}")
-        st.caption(f"Tipo liquidación (cartera): {pred_info.get('tipo_liquidacion', '')}")
-        st.caption(
-            f"Criterio: umbral {float(pred_info.get('umbral', 0)):.2f} → "
-            f"{'Aprobado' if send_result.get('aprobado') else 'No aprobado'}"
-        )
-        return True
-
-    if btn_predecir:
-        pred_info = run_prediction(_current_params(), cartera_df=cartera_df)
-        _show_prediction_result(pred_info)
-
-    if btn_enviar:
-        pred_info = run_prediction(_current_params(), cartera_df=cartera_df)
-        if _show_prediction_result(pred_info):
-            send_result = run_send(_current_params(), pred_info=pred_info, cartera_df=cartera_df)
-            _show_send_result(send_result)
-
-    # Modo automático por archivo: predice siempre y envía solo si la columna enviar dice Sí.
-    auto_flag = _norm(enviar_desde_archivo) in {"si", "sí", "yes", "true", "1"}
-    if source_mode == "Archivo (CSV/XLSX/JSON)" and up is not None and referencia.strip():
-        auto_sig = f"{up.name}|{getattr(up, 'size', 0)}|{referencia}|{ids}|{amount_total}|{auto_flag}"
-        if st.session_state.get("ind_auto_sig") != auto_sig:
-            pred_info = run_prediction(_current_params(), cartera_df=cartera_df)
-            if _show_prediction_result(pred_info) and auto_flag:
-                send_result = run_send(_current_params(), pred_info=pred_info, cartera_df=cartera_df)
-                if _show_send_result(send_result):
-                    st.session_state.ind_auto_sig = auto_sig
-            elif pred_info.get("ok") and not auto_flag:
-                st.caption("Archivo procesado: se calculó predicción automática y no se envió (enviar=No).")
-                st.session_state.ind_auto_sig = auto_sig
-            else:
-                st.warning("No se pudo calcular la predicción automática; no se marcó como procesado.")
+    )
 
 
-if __name__ == "__main__":
-    main()
+def _build_batch_template_csv_bytes() -> bytes:
+    return _build_batch_template_df().to_csv(index=False).encode("utf-8-sig")
+
+
+def _build_batch_results(records_df: pd.DataFrame, cartera_df: pd.DataFrame | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if records_df is None or records_df.empty:
+        raise ValueError("El archivo no contiene filas para procesar.")
+
+    results = []
+    skipped_blank_rows = 0
+
+    for source_row_number, (_, row) in enumerate(records_df.iterrows(), start=2):
+        raw_record = row.to_dict()
+        if _is_empty_record(raw_record):
+            skipped_blank_rows += 1
+            continue
+
+        case = _extract_case_data_from_record(raw_record)
+        pred_info = run_prediction(raw_record, cartera_df=cartera_df, save_history=False)
+        result_row = dict(raw_record)
+        result_row.update(
+            {
+                "fila_origen": source_row_number,
+                "referencia_usada": case.get("referencia", ""),
+                "ids_usados": case.get("ids", ""),
+                "pri_ult_usado": float(case.get("pri_ult", 0.0)),
+                "ratio_pp_usado": float(case.get("ratio_pp", 0.0)),
+                "c_a_usado": float(case.get("c_a", 0.0)),
+                "amount_total_usado": float(case.get("amount_total", 0.0)),
+                "pago_banco_usado": float(case.get("pago_banco", 0.0)),
+                "primer_pago_usado": float(case.get("primer_pago", 0.0)),
+                "ce_inicial_usado": float(case.get("ce_inicial", 0.0)),
+                "tipo_liquidacion_resuelto": pred_info.get("tipo_liquidacion", "") if pred_info.get("ok") else "",
+                "prediccion": round(float(pred_info["pred"]), 4) if pred_info.get("ok") else None,
+                "umbral_aprobacion": float(pred_info["umbral"]) if pred_info.get("ok") else None,
+                "aprobado_estimado": "Si" if pred_info.get("ok") and pred_info.get("aprobado") else ("No" if pred_info.get("ok") else ""),
+                "warning_ratio_pp": LOW_RATIO_PP_WARNIN
