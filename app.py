@@ -109,7 +109,7 @@ def _configure_streamlit_page():
 
 
 _configure_streamlit_page()
-st.title("💸 Calculadora de Recaudo")
+st.title("💸 Calculadora de Recaudo 🚀 ඞ")
 
 import sklearn, numpy, joblib
 from sklearn.impute import SimpleImputer
