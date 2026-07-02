@@ -14,7 +14,6 @@ from joblib import load
 import re  # ✅ NUEVO
 from datetime import datetime, timedelta, timezone
 import os
-import sys
 import html as html_lib
 from io import BytesIO
 from zipfile import ZipFile
@@ -41,10 +40,6 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
 from docx.text.paragraph import Paragraph
-
-APP_DIR = Path(__file__).resolve().parent
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
 
 # ==== Transformadores CUSTOM (deben estar antes de load) ====
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -114,6 +109,7 @@ def _configure_streamlit_page():
 
 
 _configure_streamlit_page()
+st.title("💸 Calculadora de Recaudo 🚀 ඞ")
 
 import sklearn, numpy, joblib
 from sklearn.impute import SimpleImputer
@@ -127,28 +123,20 @@ st.sidebar.caption(
     f"💼 joblib: {joblib.__version__}"
 )
 
-# =================== 🔄 Reinicio manual (limpiar cache) ===================
-st.sidebar.markdown("### 🔄 Control")
-app_mode = st.sidebar.radio(
-    "Módulo",
-    ["Calculadora", "Pagos a Banco"],
-    key="app_mode",
+st.caption(
+    "1) La app carga automáticamente la base generada por el workflow (`data/cartera_asignada_filtrada`) • "
+    "2) Escribe la **Referencia** y selecciona **uno o varios Id deuda** • "
+    "3) Ajusta valores editables (Deuda, Apartado, Comisión, Saldo) • "
+    "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO** y **Comisión de éxito** • "
+    "6) Revisa KPIs (PLAZO lo ingresas tú)."
 )
 
+# =================== 🔄 Reinicio manual (limpiar cache) ===================
+st.sidebar.markdown("### 🔄 Control")
 if st.sidebar.button("Reiniciar calculadora (limpiar cache)"):
     st.cache_data.clear()
     st.cache_resource.clear()
     st.rerun()
-
-if app_mode == "Calculadora":
-    st.title("💸 Calculadora de Recaudo 🚀 ඞ")
-    st.caption(
-        "1) La app carga automáticamente la base generada por el workflow (`data/cartera_asignada_filtrada`) • "
-        "2) Escribe la **Referencia** y selecciona **uno o varios Id deuda** • "
-        "3) Ajusta valores editables (Deuda, Apartado, Comisión, Saldo) • "
-        "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO** y **Comisión de éxito** • "
-        "6) Revisa KPIs (PLAZO lo ingresas tú)."
-    )
 
 # ==== Rutas de artefactos generados por el notebook/Action ====
 DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
@@ -162,13 +150,6 @@ CLIENTES_LOOKUP_PATH = Path("data/Consulta_F_Clientes_Parte_1.csv")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB = "Historico Calculadora"
 GOOGLE_SHEET_TAB_RESPUESTAS = "Respuestas Estr"
-PAGOS_BANCO_SHEET_ID = "13Vf32LzRI2V95dIUqfevzm-ZmsDR3d17UTre_7XJ-UU"
-PAGOS_BANCO_SHEET_TAB = "Cartera"
-PAGOS_BANCO_HC_SHEET_ID = "1KO4ImvhNZB_jtgpvs9DU-6_0FskFmxC9Xo4Rz5Yt6dM"
-PAGOS_BANCO_HC_SHEET_TAB = "HC"
-PAGOS_BANCO_FLUJOS_SHEET_ID = "1njsvxi7PTVyIXYqI2zXbKOYVVxI0p4wbBOBK1l3jTnc"
-PAGOS_BANCO_FLUJOS_SHEET_TAB = "Flujos"
-PAGOS_BANCO_DEFAULT_RESPONSABLE = "Yithza Camila Paez Lopez"
 GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -1426,379 +1407,6 @@ def get_google_sheet_worksheet(tab_name: str = GOOGLE_SHEET_TAB):
     return spreadsheet.worksheet(tab_name)
 
 
-@st.cache_resource(show_spinner=False)
-def get_google_sheet_worksheet_by_key(spreadsheet_id: str, tab_name: str):
-    """
-    Devuelve una pestaña específica de un Google Sheet usando el service account.
-    """
-    creds_info = _load_google_service_account_info()
-    credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
-    client = gspread.authorize(credentials)
-    spreadsheet = client.open_by_key(spreadsheet_id)
-    return spreadsheet.worksheet(tab_name)
-
-
-def _parse_payment_date_series(values: pd.Series) -> pd.Series:
-    """
-    Convierte fechas de Sheets aceptando formato colombiano dd/mm/yyyy y formatos ISO.
-    """
-    text_values = values.astype(str).str.strip()
-    parsed = pd.to_datetime(text_values, errors="coerce", dayfirst=True)
-    missing_mask = parsed.isna()
-    if missing_mask.any():
-        parsed_iso = pd.to_datetime(text_values[missing_mask], errors="coerce", dayfirst=False)
-        parsed.loc[missing_mask] = parsed_iso
-    return parsed
-
-
-def _sheet_values_to_dataframe(values: list[list[str]]) -> pd.DataFrame:
-    """Convierte valores de Google Sheets en DataFrame rellenando filas cortas."""
-    if not values:
-        return pd.DataFrame()
-    headers = [str(header).strip() for header in values[0]]
-    rows = values[1:]
-    width = len(headers)
-    normalized_rows = [
-        row + [""] * (width - len(row)) if len(row) < width else row[:width]
-        for row in rows
-    ]
-    return pd.DataFrame(normalized_rows, columns=headers)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def load_active_negotiator_names() -> set[str]:
-    """Lee la hoja HC y retorna nombres con status Activo."""
-    worksheet = get_google_sheet_worksheet_by_key(PAGOS_BANCO_HC_SHEET_ID, PAGOS_BANCO_HC_SHEET_TAB)
-    hc_df = _sheet_values_to_dataframe(worksheet.get_all_values())
-    if hc_df.empty:
-        return set()
-
-    normalized_columns = {_norm(column): column for column in hc_df.columns}
-    name_col = normalized_columns.get(_norm("name"))
-    status_col = normalized_columns.get(_norm("status"))
-    if name_col is None or status_col is None:
-        missing = []
-        if name_col is None:
-            missing.append("name")
-        if status_col is None:
-            missing.append("status")
-        raise ValueError("Faltan columnas requeridas en HC: " + ", ".join(missing))
-
-    active_mask = hc_df[status_col].astype(str).map(_norm).eq("activo")
-    return {
-        _norm(name)
-        for name in hc_df.loc[active_mask, name_col].astype(str)
-        if str(name).strip()
-    }
-
-
-def _find_sheet_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    """Busca una columna por nombres candidatos normalizados."""
-    normalized_columns = {_norm(column): column for column in df.columns}
-    for candidate in candidates:
-        column = normalized_columns.get(_norm(candidate))
-        if column is not None:
-            return column
-    return None
-
-
-def _parse_sheet_amount_value(value) -> float:
-    """Parsea montos de Sheets con separadores de miles en coma o punto."""
-    if value is None or pd.isna(value):
-        return 0.0
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value or 0.0)
-
-    text = str(value).strip()
-    if not text:
-        return 0.0
-    cleaned = re.sub(r"[^0-9,.-]", "", text)
-    if not cleaned or cleaned in {"-", ",", "."}:
-        return 0.0
-
-    sign = -1 if cleaned.startswith("-") else 1
-    cleaned = cleaned.replace("-", "")
-    if "," in cleaned and "." in cleaned:
-        if cleaned.rfind(",") > cleaned.rfind("."):
-            cleaned = cleaned.replace(".", "").replace(",", ".")
-        else:
-            cleaned = cleaned.replace(",", "")
-    elif "," in cleaned:
-        parts = cleaned.split(",")
-        if len(parts) > 1 and all(len(part) == 3 for part in parts[1:]):
-            cleaned = "".join(parts)
-        else:
-            cleaned = cleaned.replace(",", ".")
-    elif "." in cleaned:
-        parts = cleaned.split(".")
-        if len(parts) > 1 and all(len(part) == 3 for part in parts[1:]):
-            cleaned = "".join(parts)
-
-    try:
-        return sign * float(cleaned)
-    except ValueError:
-        return 0.0
-
-
-def _build_pagos_banco_match_key(referencia, monto, fecha) -> tuple[str, int, str]:
-    """Crea llave estable por Referencia + Monto + Fecha."""
-    parsed_date = _parse_payment_date_series(pd.Series([fecha])).iloc[0]
-    date_key = "" if pd.isna(parsed_date) else parsed_date.strftime("%Y-%m-%d")
-    amount_key = int(round(_parse_sheet_amount_value(monto) * 100))
-    return (str(referencia or "").strip(), amount_key, date_key)
-
-
-def _map_cuenta_por_cobrar_status(raw_status: str, tipo_flujo: str) -> str:
-    """Mapea estados de cuenta por cobrar al lenguaje del módulo Pagos a Banco."""
-    status_norm = _norm(raw_status).upper().replace(" ", "_")
-    tipo_flujo_norm = _norm(tipo_flujo).upper().replace(" ", "_")
-
-    if status_norm == "CANCELADO" and tipo_flujo_norm == "PAGO_FUERA_DEL_PROGRAMA":
-        return "Pagado por Fuera"
-    if status_norm in {"COBRADO", "COBRO_PARCIAL", "COBRO_PARCIAL_COBRADO"}:
-        return "PAGADO"
-    if status_norm in {"EN_TRAMITE_DE_COBRO", "COBRO_PARCIAL_EN_TRAMITE"}:
-        return "En tramite"
-    if status_norm == "POR_COBRAR":
-        return "Por cobrar"
-    return str(raw_status or "Sin status").strip() or "Sin status"
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def load_pagos_banco_status_map() -> dict[tuple[str, int, str], str]:
-    """Lee Flujos y retorna status por Referencia + Monto + Fecha Comision estructurada."""
-    worksheet = get_google_sheet_worksheet_by_key(PAGOS_BANCO_FLUJOS_SHEET_ID, PAGOS_BANCO_FLUJOS_SHEET_TAB)
-    flujos_df = _sheet_values_to_dataframe(worksheet.get_all_values())
-    if flujos_df.empty:
-        return {}
-
-    ref_col = _find_sheet_column(flujos_df, ["Referencia"])
-    amount_col = _find_sheet_column(flujos_df, ["Monto"])
-    date_col = _find_sheet_column(flujos_df, ["Fecha Comision estructurada", "Fecha Comisión estructurada", "Fecha Comision", "Fecha Comisión"])
-    status_col = _find_sheet_column(flujos_df, ["Status de cuenta por cobrar"])
-    flow_type_col = _find_sheet_column(flujos_df, ["Tipo de flujo"])
-    required = {
-        "Referencia": ref_col,
-        "Monto": amount_col,
-        "Fecha Comision estructurada": date_col,
-        "Status de cuenta por cobrar": status_col,
-        "Tipo de flujo": flow_type_col,
-    }
-    missing = [name for name, column in required.items() if column is None]
-    if missing:
-        raise ValueError("Faltan columnas requeridas en Flujos: " + ", ".join(missing))
-
-    status_map = {}
-    for _, row in flujos_df.iterrows():
-        key = _build_pagos_banco_match_key(row[ref_col], row[amount_col], row[date_col])
-        if not key[0] or not key[2]:
-            continue
-        status_map[key] = _map_cuenta_por_cobrar_status(row[status_col], row[flow_type_col])
-    return status_map
-
-
-def _style_pagos_banco_table(df: pd.DataFrame):
-    """Resalta Status y Fecha limite de pago según estado y cercanía de fecha."""
-    today = pd.Timestamp(date.today())
-
-    def style_row(row):
-        styles = [""] * len(row)
-        status = str(row.get("Status", ""))
-        status_norm = _norm(status)
-        date_value = _parse_payment_date_series(pd.Series([row.get("Fecha limite de pago", "")])).iloc[0]
-        days_to_due = None if pd.isna(date_value) else (date_value.normalize() - today).days
-        is_paid = status_norm in {_norm("PAGADO"), _norm("Pagado por Fuera")}
-
-        for idx, column in enumerate(row.index):
-            if column == "Status":
-                if status_norm == _norm("PAGADO"):
-                    styles[idx] = "background-color: #b7e4c7; color: #0b3d20; font-weight: 800;"
-                elif status_norm == _norm("Pagado por Fuera"):
-                    styles[idx] = "background-color: #d8f3dc; color: #1b4332; font-weight: 800;"
-                elif status_norm == _norm("En tramite"):
-                    styles[idx] = "background-color: #fff3bf; color: #7a4f01; font-weight: 800;"
-                elif status_norm == _norm("Por cobrar"):
-                    styles[idx] = "background-color: #ffc9c9; color: #7f1d1d; font-weight: 800;"
-                else:
-                    styles[idx] = "font-weight: 800;"
-            elif column == "Fecha limite de pago" and days_to_due is not None and not is_paid:
-                if days_to_due <= 0:
-                    styles[idx] = "background-color: #ffc9c9; color: #7f1d1d; font-weight: 800;"
-                elif days_to_due <= 2:
-                    styles[idx] = "background-color: #fff3bf; color: #7a4f01; font-weight: 800;"
-        return styles
-
-    return df.style.apply(style_row, axis=1)
-
-@st.cache_data(ttl=900, show_spinner=False)
-def load_pagos_banco_data(current_year: int) -> pd.DataFrame:
-    """
-    Carga A:J de Cartera y filtra pagos del año actual con destination=bank.
-    """
-    worksheet = get_google_sheet_worksheet_by_key(PAGOS_BANCO_SHEET_ID, PAGOS_BANCO_SHEET_TAB)
-    values = worksheet.get("A:J")
-    if not values:
-        return pd.DataFrame()
-
-    df = _sheet_values_to_dataframe(values)
-    if df.empty:
-        return df
-
-    normalized_columns = {_norm(column): column for column in df.columns}
-    required_columns = {
-        "reference": "Referencia",
-        "amount": "Monto",
-        "bank": "Banco",
-        "debt_id": "Id deuda",
-        "payment_date": "Fecha limite de pago",
-        "requester": "Responsable",
-        "destination": "destination",
-    }
-    resolved_columns = {source: normalized_columns.get(_norm(source)) for source in required_columns}
-    missing = [source for source, column in resolved_columns.items() if column is None]
-    if missing:
-        raise ValueError("Faltan columnas requeridas en Cartera: " + ", ".join(missing))
-
-    payment_date_col = resolved_columns["payment_date"]
-    destination_col = resolved_columns["destination"]
-    payment_dates = _parse_payment_date_series(df[payment_date_col])
-    bank_mask = df[destination_col].astype(str).str.strip().str.lower().eq("bank")
-    year_mask = payment_dates.dt.year.eq(int(current_year))
-    result = df.loc[bank_mask & year_mask].copy()
-    result[payment_date_col] = payment_dates.loc[result.index].dt.strftime("%d/%m/%Y")
-
-    active_negotiators = load_active_negotiator_names()
-    requester_col = resolved_columns["requester"]
-    result[requester_col] = result[requester_col].where(
-        result[requester_col].astype(str).map(_norm).isin(active_negotiators),
-        PAGOS_BANCO_DEFAULT_RESPONSABLE,
-    )
-
-    display_columns = [
-        resolved_columns["reference"],
-        resolved_columns["amount"],
-        resolved_columns["bank"],
-        resolved_columns["debt_id"],
-        resolved_columns["payment_date"],
-        resolved_columns["requester"],
-    ]
-    renamed_columns = {
-        resolved_columns[source]: display_name
-        for source, display_name in required_columns.items()
-        if source != "destination"
-    }
-    result = result.loc[:, display_columns].rename(columns=renamed_columns).reset_index(drop=True)
-
-    status_map = load_pagos_banco_status_map()
-    result["Status"] = result.apply(
-        lambda row: status_map.get(
-            _build_pagos_banco_match_key(row["Referencia"], row["Monto"], row["Fecha limite de pago"]),
-            "Sin status",
-        ),
-        axis=1,
-    )
-    return result
-
-
-def render_pagos_banco_module() -> None:
-    """
-    Interfaz independiente para consultar pagos a banco desde la hoja Cartera.
-    """
-    st.title("🏦 Pagos a Banco")
-    st.caption(
-        "Consulta independiente de la calculadora: trae la hoja `Cartera` (columnas A:J), "
-        "filtrando `payment_date` del año actual y `destination = bank`."
-    )
-
-    current_year = date.today().year
-    st.markdown(f"### Pagos bancarios de {current_year}")
-    if st.button("🔄 Actualizar Pagos a Banco", use_container_width=True):
-        load_pagos_banco_data.clear()
-        load_active_negotiator_names.clear()
-        load_pagos_banco_status_map.clear()
-        st.rerun()
-
-    try:
-        with st.spinner("Cargando datos desde Google Sheets..."):
-            pagos_df = load_pagos_banco_data(current_year)
-    except Exception as e:
-        st.error(f"No pude cargar Pagos a Banco: {e}")
-        st.info("Verifica que `MI_JSON` tenga acceso a los Google Sheets y que las pestañas se llamen `Cartera`, `HC` y `Flujos`.")
-        st.stop()
-
-    if pagos_df.empty:
-        st.warning("No hay pagos a banco para el año actual con `destination = bank`.")
-        st.stop()
-
-    month_names = {
-        1: "Enero",
-        2: "Febrero",
-        3: "Marzo",
-        4: "Abril",
-        5: "Mayo",
-        6: "Junio",
-        7: "Julio",
-        8: "Agosto",
-        9: "Septiembre",
-        10: "Octubre",
-        11: "Noviembre",
-        12: "Diciembre",
-    }
-
-    st.markdown("### 🔎 Filtros")
-    filter_col1, filter_col2 = st.columns(2)
-    with filter_col1:
-        selected_month = st.selectbox(
-            "Mes de fecha límite de pago",
-            options=list(month_names.keys()),
-            index=date.today().month - 1,
-            format_func=lambda month: month_names.get(month, str(month)),
-            key="pagos_banco_month_filter",
-        )
-    with filter_col2:
-        responsable_options = sorted(
-            pagos_df["Responsable"].dropna().astype(str).loc[lambda values: values.str.strip() != ""].unique()
-        )
-        selected_responsable = st.selectbox(
-            "Responsable",
-            options=["Todos"] + responsable_options,
-            key="pagos_banco_responsable_filter",
-        )
-
-    st.caption(
-        "🟢 PAGADO / Pagado por Fuera · 🟡 En tramite o fecha a 2 días · "
-        "🔴 Por cobrar vencido o para hoy"
-    )
-
-    filtered_df = pagos_df.copy()
-    payment_dates = _parse_payment_date_series(filtered_df["Fecha limite de pago"])
-    filtered_df = filtered_df.loc[payment_dates.dt.month.eq(int(selected_month))].copy()
-    if selected_responsable != "Todos":
-        filtered_df = filtered_df[filtered_df["Responsable"].astype(str).eq(selected_responsable)].copy()
-
-    st.success(f"✅ Registros encontrados: {len(filtered_df):,} de {len(pagos_df):,}")
-    if filtered_df.empty:
-        st.warning("No hay pagos con los filtros seleccionados.")
-        st.stop()
-
-    amount_col = next((col for col in filtered_df.columns if _norm(col) == _norm("Monto")), None)
-    if amount_col:
-        total_amount = pd.to_numeric(
-            filtered_df[amount_col].astype(str).str.replace(",", "", regex=False),
-            errors="coerce",
-        ).fillna(0).sum()
-        st.metric("Total Monto", _format_currency0(total_amount, decimals=0))
-
-    st.dataframe(_style_pagos_banco_table(filtered_df), use_container_width=True, hide_index=True)
-    st.download_button(
-        "⬇️ Descargar CSV filtrado",
-        filtered_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"pagos_a_banco_{current_year}_{selected_month:02d}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-
 def _append_row_to_google_sheet(row_data: dict):
     """
     Inserta una fila en Google Sheets y retorna (ok, destination, error_msg).
@@ -1808,7 +1416,7 @@ def _append_row_to_google_sheet(row_data: dict):
         expected_headers = GOOGLE_SHEET_HEADERS
         current_headers = worksheet.row_values(1)
         if current_headers[: len(expected_headers)] != expected_headers:
-            worksheet.update(range_name="A1:H1", values=[expected_headers])
+            worksheet.update("A1:H1", [expected_headers])
 
         worksheet.append_row(
             [row_data.get(header, "") for header in expected_headers],
@@ -1895,8 +1503,8 @@ def _append_row_to_respuestas_estr(row_data: dict):
         target_row = last_data_row + 1
         end_col_letter = _col_index_to_letter(len(headers))
         worksheet.update(
-            range_name=f"A{target_row}:{end_col_letter}{target_row}",
-            values=[normalized],
+            f"A{target_row}:{end_col_letter}{target_row}",
+            [normalized],
             value_input_option="USER_ENTERED",
         )
         return True, f"Google Sheets > {GOOGLE_SHEET_TAB_RESPUESTAS}", None
@@ -1999,15 +1607,15 @@ def _marcar_anteriores_como_duplicado(exact_rows: list[dict]):
         if row_idx and aprob_col_idx:
             target_cell = f"{_col_index_to_letter(aprob_col_idx)}{row_idx}"
             worksheet.update(
-                range_name=target_cell,
-                values=[["FALSE"]],
+                target_cell,
+                [["FALSE"]],
                 value_input_option="USER_ENTERED",
             )
         if row_idx and comentario_col_idx and comentario_actual == "aprobado":
             target_cell = f"{_col_index_to_letter(comentario_col_idx)}{row_idx}"
             worksheet.update(
-                range_name=target_cell,
-                values=[["Duplicado"]],
+                target_cell,
+                [["Duplicado"]],
                 value_input_option="USER_ENTERED",
             )
 
@@ -2980,10 +2588,6 @@ def _require_drive_authentication() -> None:
     st.success("Cuenta Drive autenticada. Ya puedes usar la calculadora normalmente.")
 
 
-if app_mode == "Pagos a Banco":
-    render_pagos_banco_module()
-    st.stop()
-
 _require_drive_authentication()
 _restore_draft_state()
 
@@ -3408,9 +3012,8 @@ if not liquidacion_sin_portafolio.get("active", False):
         st.number_input(
             "🧮 N PaB",
             min_value=1,
-            max_value=240,
             step=1,
-            value=int(st.session_state.get("n_pab", 1) or 1),
+            value=int(st.session_state.n_pab),
             key="n_pab"
         )
 
@@ -3500,7 +3103,7 @@ if not liquidacion_sin_portafolio.get("active", False):
     comision_exito    = float(st.session_state.get("comision_exito", 0.0) or 0.0)
     ce_inicial        = float(st.session_state.get("ce_inicial_val", 0.0) or 0.0)
 
-    plazo = st.number_input("📅 PLAZO (meses) (lo ingresas tú)", min_value=1, max_value=240, step=1, value=1)
+    plazo = st.number_input("📅 PLAZO (meses) (lo ingresas tú)", min_value=1, step=1, value=1)
 
     # Primer PAGO BANCO: si hay más de un PaB, usamos el input; si no, todo el pago
     primer_pago_banco = float(
