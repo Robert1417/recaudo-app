@@ -109,6 +109,7 @@ def _configure_streamlit_page():
 
 
 _configure_streamlit_page()
+st.title("💸 Calculadora de Recaudo 🚀 ඞ")
 
 import sklearn, numpy, joblib
 from sklearn.impute import SimpleImputer
@@ -122,28 +123,20 @@ st.sidebar.caption(
     f"💼 joblib: {joblib.__version__}"
 )
 
-# =================== 🔄 Reinicio manual (limpiar cache) ===================
-st.sidebar.markdown("### 🔄 Control")
-app_mode = st.sidebar.radio(
-    "Módulo",
-    ["Calculadora", "Pagos a Banco"],
-    key="app_mode",
+st.caption(
+    "1) La app carga automáticamente la base generada por el workflow (`data/cartera_asignada_filtrada`) • "
+    "2) Escribe la **Referencia** y selecciona **uno o varios Id deuda** • "
+    "3) Ajusta valores editables (Deuda, Apartado, Comisión, Saldo) • "
+    "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO** y **Comisión de éxito** • "
+    "6) Revisa KPIs (PLAZO lo ingresas tú)."
 )
 
+# =================== 🔄 Reinicio manual (limpiar cache) ===================
+st.sidebar.markdown("### 🔄 Control")
 if st.sidebar.button("Reiniciar calculadora (limpiar cache)"):
     st.cache_data.clear()
     st.cache_resource.clear()
     st.rerun()
-
-if app_mode == "Calculadora":
-    st.title("💸 Calculadora de Recaudo 🚀 ඞ")
-    st.caption(
-        "1) La app carga automáticamente la base generada por el workflow (`data/cartera_asignada_filtrada`) • "
-        "2) Escribe la **Referencia** y selecciona **uno o varios Id deuda** • "
-        "3) Ajusta valores editables (Deuda, Apartado, Comisión, Saldo) • "
-        "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO** y **Comisión de éxito** • "
-        "6) Revisa KPIs (PLAZO lo ingresas tú)."
-    )
 
 # ==== Rutas de artefactos generados por el notebook/Action ====
 DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
@@ -157,8 +150,6 @@ CLIENTES_LOOKUP_PATH = Path("data/Consulta_F_Clientes_Parte_1.csv")
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB = "Historico Calculadora"
 GOOGLE_SHEET_TAB_RESPUESTAS = "Respuestas Estr"
-PAGOS_BANCO_SHEET_ID = "13Vf32LzRI2V95dIUqfevzm-ZmsDR3d17UTre_7XJ-UU"
-PAGOS_BANCO_SHEET_TAB = "Cartera"
 GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -1416,118 +1407,6 @@ def get_google_sheet_worksheet(tab_name: str = GOOGLE_SHEET_TAB):
     return spreadsheet.worksheet(tab_name)
 
 
-@st.cache_resource(show_spinner=False)
-def get_google_sheet_worksheet_by_key(spreadsheet_id: str, tab_name: str):
-    """
-    Devuelve una pestaña específica de un Google Sheet usando el service account.
-    """
-    creds_info = _load_google_service_account_info()
-    credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
-    client = gspread.authorize(credentials)
-    spreadsheet = client.open_by_key(spreadsheet_id)
-    return spreadsheet.worksheet(tab_name)
-
-
-def _parse_payment_date_series(values: pd.Series) -> pd.Series:
-    """
-    Convierte fechas de Sheets aceptando formato colombiano dd/mm/yyyy y formatos ISO.
-    """
-    text_values = values.astype(str).str.strip()
-    parsed = pd.to_datetime(text_values, errors="coerce", dayfirst=True)
-    missing_mask = parsed.isna()
-    if missing_mask.any():
-        parsed_iso = pd.to_datetime(text_values[missing_mask], errors="coerce", dayfirst=False)
-        parsed.loc[missing_mask] = parsed_iso
-    return parsed
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def load_pagos_banco_data(current_year: int) -> pd.DataFrame:
-    """
-    Carga A:J de Cartera y filtra pagos del año actual con destination=bank.
-    """
-    worksheet = get_google_sheet_worksheet_by_key(PAGOS_BANCO_SHEET_ID, PAGOS_BANCO_SHEET_TAB)
-    values = worksheet.get("A:J")
-    if not values:
-        return pd.DataFrame()
-
-    headers = [str(header).strip() for header in values[0]]
-    rows = values[1:]
-    width = len(headers)
-    normalized_rows = [
-        row + [""] * (width - len(row)) if len(row) < width else row[:width]
-        for row in rows
-    ]
-    df = pd.DataFrame(normalized_rows, columns=headers)
-    if df.empty:
-        return df
-
-    normalized_columns = {_norm(column): column for column in df.columns}
-    payment_date_col = normalized_columns.get("payment_date")
-    destination_col = normalized_columns.get("destination")
-    if payment_date_col is None or destination_col is None:
-        missing = []
-        if payment_date_col is None:
-            missing.append("payment_date")
-        if destination_col is None:
-            missing.append("destination")
-        raise ValueError("Faltan columnas requeridas en Cartera: " + ", ".join(missing))
-
-    payment_dates = _parse_payment_date_series(df[payment_date_col])
-    bank_mask = df[destination_col].astype(str).str.strip().str.lower().eq("bank")
-    year_mask = payment_dates.dt.year.eq(int(current_year))
-    result = df.loc[bank_mask & year_mask].copy()
-    result[payment_date_col] = payment_dates.loc[result.index].dt.strftime("%d/%m/%Y")
-    return result.reset_index(drop=True)
-
-
-def render_pagos_banco_module() -> None:
-    """
-    Interfaz independiente para consultar pagos a banco desde la hoja Cartera.
-    """
-    st.title("🏦 Pagos a Banco")
-    st.caption(
-        "Consulta independiente de la calculadora: trae la hoja `Cartera` (columnas A:J), "
-        "filtrando `payment_date` del año actual y `destination = bank`."
-    )
-
-    current_year = date.today().year
-    st.markdown(f"### Pagos bancarios de {current_year}")
-    if st.button("🔄 Actualizar Pagos a Banco", use_container_width=True):
-        load_pagos_banco_data.clear()
-        st.rerun()
-
-    try:
-        with st.spinner("Cargando datos desde Google Sheets..."):
-            pagos_df = load_pagos_banco_data(current_year)
-    except Exception as e:
-        st.error(f"No pude cargar Pagos a Banco: {e}")
-        st.info("Verifica que `MI_JSON` tenga acceso al Google Sheet y que la pestaña se llame `Cartera`.")
-        st.stop()
-
-    st.success(f"✅ Registros encontrados: {len(pagos_df):,}")
-    if pagos_df.empty:
-        st.warning("No hay pagos a banco para el año actual con `destination = bank`.")
-        st.stop()
-
-    amount_col = next((col for col in pagos_df.columns if _norm(col) == "amount"), None)
-    if amount_col:
-        total_amount = pd.to_numeric(
-            pagos_df[amount_col].astype(str).str.replace(",", "", regex=False),
-            errors="coerce",
-        ).fillna(0).sum()
-        st.metric("Total amount", _format_currency0(total_amount, decimals=0))
-
-    st.dataframe(pagos_df, use_container_width=True, hide_index=True)
-    st.download_button(
-        "⬇️ Descargar CSV filtrado",
-        pagos_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"pagos_a_banco_{current_year}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-
 def _append_row_to_google_sheet(row_data: dict):
     """
     Inserta una fila en Google Sheets y retorna (ok, destination, error_msg).
@@ -2708,10 +2587,6 @@ def _require_drive_authentication() -> None:
     _persist_drive_token_in_query()
     st.success("Cuenta Drive autenticada. Ya puedes usar la calculadora normalmente.")
 
-
-if app_mode == "Pagos a Banco":
-    render_pagos_banco_module()
-    st.stop()
 
 _require_drive_authentication()
 _restore_draft_state()
