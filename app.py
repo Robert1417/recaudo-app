@@ -108,7 +108,7 @@ class Winsorizer(BaseEstimator, TransformerMixin):
 pd.set_option("mode.copy_on_write", True)
 def _configure_streamlit_page():
     try:
-        st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
+        st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="wide")
     except Exception:
         return
 
@@ -1430,12 +1430,19 @@ def get_google_sheet_worksheet(tab_name: str = GOOGLE_SHEET_TAB):
 def get_google_sheet_worksheet_by_key(spreadsheet_id: str, tab_name: str):
     """
     Devuelve una pestaña específica de un Google Sheet usando el service account.
+
+    Si la pestaña configurada no existe, usa la primera pestaña del archivo.
+    Esto permite consumir bases compartidas por URL cuando el `gid=0` apunta
+    a una pestaña con nombre distinto al esperado.
     """
     creds_info = _load_google_service_account_info()
     credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
     client = gspread.authorize(credentials)
     spreadsheet = client.open_by_key(spreadsheet_id)
-    return spreadsheet.worksheet(tab_name)
+    try:
+        return spreadsheet.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        return spreadsheet.get_worksheet(0)
 
 
 def _parse_payment_date_series(values: pd.Series) -> pd.Series:
@@ -1466,16 +1473,17 @@ def _sheet_values_to_dataframe(values: list[list[str]]) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_active_negotiator_names() -> set[str]:
-    """Lee la hoja HC y retorna nombres con status Activo."""
+def load_active_negotiator_metadata() -> dict[str, dict[str, str]]:
+    """Lee la hoja HC y retorna metadata de negociadores activos por nombre normalizado."""
     worksheet = get_google_sheet_worksheet_by_key(PAGOS_BANCO_HC_SHEET_ID, PAGOS_BANCO_HC_SHEET_TAB)
     hc_df = _sheet_values_to_dataframe(worksheet.get_all_values())
     if hc_df.empty:
-        return set()
+        return {}
 
     normalized_columns = {_norm(column): column for column in hc_df.columns}
     name_col = normalized_columns.get(_norm("name"))
     status_col = normalized_columns.get(_norm("status"))
+    leader_col = normalized_columns.get(_norm("leader"))
     if name_col is None or status_col is None:
         missing = []
         if name_col is None:
@@ -1485,11 +1493,23 @@ def load_active_negotiator_names() -> set[str]:
         raise ValueError("Faltan columnas requeridas en HC: " + ", ".join(missing))
 
     active_mask = hc_df[status_col].astype(str).map(_norm).eq("activo")
-    return {
-        _norm(name)
-        for name in hc_df.loc[active_mask, name_col].astype(str)
-        if str(name).strip()
-    }
+    metadata = {}
+    for _, row in hc_df.loc[active_mask].iterrows():
+        name = str(row.get(name_col, "")).strip()
+        if not name:
+            continue
+        leader = str(row.get(leader_col, "")).strip() if leader_col is not None else ""
+        metadata[_norm(name)] = {
+            "name": name,
+            "leader": leader or "Sin líder",
+        }
+    return metadata
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_active_negotiator_names() -> set[str]:
+    """Lee la hoja HC y retorna nombres con status Activo."""
+    return set(load_active_negotiator_metadata())
 
 
 def _find_sheet_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -1554,13 +1574,13 @@ def _map_cuenta_por_cobrar_status(raw_status: str, tipo_flujo: str) -> str:
     tipo_flujo_norm = _norm(tipo_flujo).upper().replace(" ", "_")
 
     if status_norm == "CANCELADO" and tipo_flujo_norm == "PAGO_FUERA_DEL_PROGRAMA":
-        return "Pagado por Fuera"
+        return "🟢 Pagado por Fuera"
     if status_norm in {"COBRADO", "COBRO_PARCIAL", "COBRO_PARCIAL_COBRADO"}:
-        return "PAGADO"
+        return "✅ PAGADO"
     if status_norm in {"EN_TRAMITE_DE_COBRO", "COBRO_PARCIAL_EN_TRAMITE"}:
-        return "En tramite"
+        return "🟡 En tramite"
     if status_norm == "POR_COBRAR":
-        return "Por cobrar"
+        return "🔴 No pagado"
     return str(raw_status or "Sin status").strip() or "Sin status"
 
 
@@ -1607,18 +1627,18 @@ def _style_pagos_banco_table(df: pd.DataFrame):
         status_norm = _norm(status)
         date_value = _parse_payment_date_series(pd.Series([row.get("Fecha limite de pago", "")])).iloc[0]
         days_to_due = None if pd.isna(date_value) else (date_value.normalize() - today).days
-        is_paid = status_norm in {_norm("PAGADO"), _norm("Pagado por Fuera")}
+        is_paid = any(paid_status in status_norm for paid_status in {_norm("PAGADO"), _norm("Pagado por Fuera")})
 
         for idx, column in enumerate(row.index):
             if column == "Status":
-                if status_norm == _norm("PAGADO"):
-                    styles[idx] = "background-color: #b7e4c7; color: #0b3d20; font-weight: 800;"
-                elif status_norm == _norm("Pagado por Fuera"):
-                    styles[idx] = "background-color: #d8f3dc; color: #1b4332; font-weight: 800;"
-                elif status_norm == _norm("En tramite"):
-                    styles[idx] = "background-color: #fff3bf; color: #7a4f01; font-weight: 800;"
-                elif status_norm == _norm("Por cobrar"):
-                    styles[idx] = "background-color: #ffc9c9; color: #7f1d1d; font-weight: 800;"
+                if _norm("Pagado por Fuera") in status_norm:
+                    styles[idx] = "background-color: #d8f3dc; color: #1b4332; font-weight: 900; border-left: 6px solid #74c69d;"
+                elif _norm("PAGADO") in status_norm:
+                    styles[idx] = "background-color: #b7e4c7; color: #0b3d20; font-weight: 900; border-left: 6px solid #2d6a4f;"
+                elif _norm("En tramite") in status_norm:
+                    styles[idx] = "background-color: #fff3bf; color: #7a4f01; font-weight: 900; border-left: 6px solid #f59f00;"
+                elif _norm("No pagado") in status_norm:
+                    styles[idx] = "background-color: #ffc9c9; color: #7f1d1d; font-weight: 900; border-left: 6px solid #c92a2a;"
                 else:
                     styles[idx] = "font-weight: 800;"
             elif column == "Fecha limite de pago" and days_to_due is not None and not is_paid:
@@ -1668,10 +1688,14 @@ def load_pagos_banco_data(current_year: int) -> pd.DataFrame:
     result[payment_date_col] = payment_dates.loc[result.index].dt.strftime("%d/%m/%Y")
 
     active_negotiators = load_active_negotiator_names()
+    negotiator_metadata = load_active_negotiator_metadata()
     requester_col = resolved_columns["requester"]
     result[requester_col] = result[requester_col].where(
         result[requester_col].astype(str).map(_norm).isin(active_negotiators),
         PAGOS_BANCO_DEFAULT_RESPONSABLE,
+    )
+    result["Lider"] = result[requester_col].astype(str).map(
+        lambda name: negotiator_metadata.get(_norm(name), {}).get("leader", "Sin líder")
     )
 
     display_columns = [
@@ -1681,6 +1705,7 @@ def load_pagos_banco_data(current_year: int) -> pd.DataFrame:
         resolved_columns["debt_id"],
         resolved_columns["payment_date"],
         resolved_columns["requester"],
+        "Lider",
     ]
     renamed_columns = {
         resolved_columns[source]: display_name
@@ -1700,6 +1725,47 @@ def load_pagos_banco_data(current_year: int) -> pd.DataFrame:
     return result
 
 
+def _is_pagos_banco_incumplido(status, fecha_limite) -> bool:
+    """Marca incumplidos: no pagados con fecha límite para hoy o vencida."""
+    status_norm = _norm(status)
+    if any(paid_status in status_norm for paid_status in {_norm("PAGADO"), _norm("Pagado por Fuera")}):
+        return False
+    if _norm("En tramite") in status_norm:
+        return False
+    date_value = _parse_payment_date_series(pd.Series([fecha_limite])).iloc[0]
+    if pd.isna(date_value):
+        return False
+    return (date_value.normalize() - pd.Timestamp(date.today())).days <= 0
+
+
+def _build_incumplidos_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Construye resumen de incumplidos por líder y responsable."""
+    if df.empty:
+        return pd.DataFrame()
+
+    summary_df = df.copy()
+    summary_df["Incumplido"] = summary_df.apply(
+        lambda row: _is_pagos_banco_incumplido(row.get("Status", ""), row.get("Fecha limite de pago", "")),
+        axis=1,
+    )
+    summary_df = summary_df[summary_df["Incumplido"]].copy()
+    if summary_df.empty:
+        return pd.DataFrame()
+
+    summary_df["Monto incumplido"] = summary_df["Monto"].map(_parse_sheet_amount_value)
+    grouped = (
+        summary_df.groupby(["Lider", "Responsable"], dropna=False)
+        .agg(
+            Incumplidos=("Incumplido", "size"),
+            **{"Monto incumplido": ("Monto incumplido", "sum")},
+        )
+        .reset_index()
+        .sort_values(["Lider", "Monto incumplido", "Incumplidos"], ascending=[True, False, False])
+    )
+    grouped["Monto incumplido"] = grouped["Monto incumplido"].map(lambda value: _format_currency0(value, decimals=0))
+    return grouped
+
+
 def render_pagos_banco_module() -> None:
     """
     Interfaz independiente para consultar pagos a banco desde la hoja Cartera.
@@ -1715,6 +1781,7 @@ def render_pagos_banco_module() -> None:
     if st.button("🔄 Actualizar Pagos a Banco", use_container_width=True):
         load_pagos_banco_data.clear()
         load_active_negotiator_names.clear()
+        load_active_negotiator_metadata.clear()
         load_pagos_banco_status_map.clear()
         st.rerun()
 
@@ -1746,7 +1813,7 @@ def render_pagos_banco_module() -> None:
     }
 
     st.markdown("### 🔎 Filtros")
-    filter_col1, filter_col2 = st.columns(2)
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
     with filter_col1:
         selected_month = st.selectbox(
             "Mes de fecha límite de pago",
@@ -1756,8 +1823,24 @@ def render_pagos_banco_module() -> None:
             key="pagos_banco_month_filter",
         )
     with filter_col2:
+        lider_options = sorted(
+            pagos_df["Lider"].dropna().astype(str).loc[lambda values: values.str.strip() != ""].unique()
+        )
+        selected_lider = st.selectbox(
+            "Líder",
+            options=["Todos"] + lider_options,
+            key="pagos_banco_lider_filter",
+        )
+    with filter_col3:
         responsable_options = sorted(
-            pagos_df["Responsable"].dropna().astype(str).loc[lambda values: values.str.strip() != ""].unique()
+            pagos_df.loc[
+                pagos_df["Lider"].astype(str).eq(selected_lider) if selected_lider != "Todos" else slice(None),
+                "Responsable",
+            ]
+            .dropna()
+            .astype(str)
+            .loc[lambda values: values.str.strip() != ""]
+            .unique()
         )
         selected_responsable = st.selectbox(
             "Responsable",
@@ -1767,12 +1850,14 @@ def render_pagos_banco_module() -> None:
 
     st.caption(
         "🟢 PAGADO / Pagado por Fuera · 🟡 En tramite o fecha a 2 días · "
-        "🔴 Por cobrar vencido o para hoy"
+        "🔴 No pagado vencido o para hoy"
     )
 
     filtered_df = pagos_df.copy()
     payment_dates = _parse_payment_date_series(filtered_df["Fecha limite de pago"])
     filtered_df = filtered_df.loc[payment_dates.dt.month.eq(int(selected_month))].copy()
+    if selected_lider != "Todos":
+        filtered_df = filtered_df[filtered_df["Lider"].astype(str).eq(selected_lider)].copy()
     if selected_responsable != "Todos":
         filtered_df = filtered_df[filtered_df["Responsable"].astype(str).eq(selected_responsable)].copy()
 
@@ -1783,13 +1868,58 @@ def render_pagos_banco_module() -> None:
 
     amount_col = next((col for col in filtered_df.columns if _norm(col) == _norm("Monto")), None)
     if amount_col:
-        total_amount = pd.to_numeric(
-            filtered_df[amount_col].astype(str).str.replace(",", "", regex=False),
-            errors="coerce",
-        ).fillna(0).sum()
+        total_amount = filtered_df[amount_col].map(_parse_sheet_amount_value).sum()
         st.metric("Total Monto", _format_currency0(total_amount, decimals=0))
 
-    st.dataframe(_style_pagos_banco_table(filtered_df), use_container_width=True, hide_index=True)
+    st.markdown("### 🚨 Resumen de incumplidos")
+    incumplidos_summary = _build_incumplidos_summary(filtered_df)
+    if incumplidos_summary.empty:
+        st.success("No hay incumplidos para los filtros seleccionados.")
+    else:
+        incumplidos_total = incumplidos_summary["Incumplidos"].sum()
+        monto_total_incumplido = filtered_df.loc[
+            filtered_df.apply(
+                lambda row: _is_pagos_banco_incumplido(row.get("Status", ""), row.get("Fecha limite de pago", "")),
+                axis=1,
+            ),
+            amount_col,
+        ].map(_parse_sheet_amount_value).sum()
+        metric_col1, metric_col2 = st.columns(2)
+        metric_col1.metric("Incumplidos", f"{int(incumplidos_total):,}")
+        metric_col2.metric("Monto incumplido", _format_currency0(monto_total_incumplido, decimals=0))
+        st.dataframe(incumplidos_summary, use_container_width=True, hide_index=True)
+
+    st.markdown("### 📋 Detalle de pagos")
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDataFrame"] { width: 100%; }
+        div[data-testid="stDataFrame"] div[role="gridcell"],
+        div[data-testid="stDataFrame"] div[role="columnheader"] {
+            white-space: normal;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    table_height = min(760, 38 + (len(filtered_df) + 1) * 35)
+    st.dataframe(
+        _style_pagos_banco_table(filtered_df),
+        use_container_width=True,
+        hide_index=True,
+        height=table_height,
+        column_config={
+            "Referencia": st.column_config.TextColumn("Referencia", width="small"),
+            "Monto": st.column_config.TextColumn("Monto", width="small"),
+            "Banco": st.column_config.TextColumn("Banco", width="medium"),
+            "Id deuda": st.column_config.TextColumn("Id deuda", width="small"),
+            "Fecha limite de pago": st.column_config.TextColumn("Fecha límite de pago", width="medium"),
+            "Responsable": st.column_config.TextColumn("Responsable", width="medium"),
+            "Lider": st.column_config.TextColumn("Líder", width="medium"),
+            "Status": st.column_config.TextColumn("Status", width="medium"),
+        },
+    )
     st.download_button(
         "⬇️ Descargar CSV filtrado",
         filtered_df.to_csv(index=False).encode("utf-8-sig"),
