@@ -108,7 +108,7 @@ class Winsorizer(BaseEstimator, TransformerMixin):
 pd.set_option("mode.copy_on_write", True)
 def _configure_streamlit_page():
     try:
-        st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="wide")
+        st.set_page_config(page_title="Calculadora de Recaudo", page_icon="💸", layout="centered")
     except Exception:
         return
 
@@ -1430,19 +1430,12 @@ def get_google_sheet_worksheet(tab_name: str = GOOGLE_SHEET_TAB):
 def get_google_sheet_worksheet_by_key(spreadsheet_id: str, tab_name: str):
     """
     Devuelve una pestaña específica de un Google Sheet usando el service account.
-
-    Si la pestaña configurada no existe, usa la primera pestaña del archivo.
-    Esto permite consumir bases compartidas por URL cuando el `gid=0` apunta
-    a una pestaña con nombre distinto al esperado.
     """
     creds_info = _load_google_service_account_info()
     credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
     client = gspread.authorize(credentials)
     spreadsheet = client.open_by_key(spreadsheet_id)
-    try:
-        return spreadsheet.worksheet(tab_name)
-    except gspread.WorksheetNotFound:
-        return spreadsheet.get_worksheet(0)
+    return spreadsheet.worksheet(tab_name)
 
 
 def _parse_payment_date_series(values: pd.Series) -> pd.Series:
@@ -1561,13 +1554,13 @@ def _map_cuenta_por_cobrar_status(raw_status: str, tipo_flujo: str) -> str:
     tipo_flujo_norm = _norm(tipo_flujo).upper().replace(" ", "_")
 
     if status_norm == "CANCELADO" and tipo_flujo_norm == "PAGO_FUERA_DEL_PROGRAMA":
-        return "🟢 Pagado por Fuera"
+        return "Pagado por Fuera"
     if status_norm in {"COBRADO", "COBRO_PARCIAL", "COBRO_PARCIAL_COBRADO"}:
-        return "✅ PAGADO"
+        return "PAGADO"
     if status_norm in {"EN_TRAMITE_DE_COBRO", "COBRO_PARCIAL_EN_TRAMITE"}:
-        return "🟡 En tramite"
+        return "En tramite"
     if status_norm == "POR_COBRAR":
-        return "🔴 Por cobrar"
+        return "Por cobrar"
     return str(raw_status or "Sin status").strip() or "Sin status"
 
 
@@ -1614,18 +1607,18 @@ def _style_pagos_banco_table(df: pd.DataFrame):
         status_norm = _norm(status)
         date_value = _parse_payment_date_series(pd.Series([row.get("Fecha limite de pago", "")])).iloc[0]
         days_to_due = None if pd.isna(date_value) else (date_value.normalize() - today).days
-        is_paid = any(paid_status in status_norm for paid_status in {_norm("PAGADO"), _norm("Pagado por Fuera")})
+        is_paid = status_norm in {_norm("PAGADO"), _norm("Pagado por Fuera")}
 
         for idx, column in enumerate(row.index):
             if column == "Status":
-                if _norm("PAGADO") in status_norm:
-                    styles[idx] = "background-color: #b7e4c7; color: #0b3d20; font-weight: 900; border-left: 6px solid #2d6a4f;"
-                elif _norm("Pagado por Fuera") in status_norm:
-                    styles[idx] = "background-color: #d8f3dc; color: #1b4332; font-weight: 900; border-left: 6px solid #74c69d;"
-                elif _norm("En tramite") in status_norm:
-                    styles[idx] = "background-color: #fff3bf; color: #7a4f01; font-weight: 900; border-left: 6px solid #f59f00;"
-                elif _norm("Por cobrar") in status_norm:
-                    styles[idx] = "background-color: #ffc9c9; color: #7f1d1d; font-weight: 900; border-left: 6px solid #c92a2a;"
+                if status_norm == _norm("PAGADO"):
+                    styles[idx] = "background-color: #b7e4c7; color: #0b3d20; font-weight: 800;"
+                elif status_norm == _norm("Pagado por Fuera"):
+                    styles[idx] = "background-color: #d8f3dc; color: #1b4332; font-weight: 800;"
+                elif status_norm == _norm("En tramite"):
+                    styles[idx] = "background-color: #fff3bf; color: #7a4f01; font-weight: 800;"
+                elif status_norm == _norm("Por cobrar"):
+                    styles[idx] = "background-color: #ffc9c9; color: #7f1d1d; font-weight: 800;"
                 else:
                     styles[idx] = "font-weight: 800;"
             elif column == "Fecha limite de pago" and days_to_due is not None and not is_paid:
@@ -1796,34 +1789,7 @@ def render_pagos_banco_module() -> None:
         ).fillna(0).sum()
         st.metric("Total Monto", _format_currency0(total_amount, decimals=0))
 
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stDataFrame"] { width: 100%; }
-        div[data-testid="stDataFrame"] div[role="gridcell"],
-        div[data-testid="stDataFrame"] div[role="columnheader"] {
-            white-space: normal;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    table_height = min(760, 38 + (len(filtered_df) + 1) * 35)
-    st.dataframe(
-        _style_pagos_banco_table(filtered_df),
-        use_container_width=True,
-        hide_index=True,
-        height=table_height,
-        column_config={
-            "Referencia": st.column_config.TextColumn("Referencia", width="small"),
-            "Monto": st.column_config.TextColumn("Monto", width="small"),
-            "Banco": st.column_config.TextColumn("Banco", width="medium"),
-            "Id deuda": st.column_config.TextColumn("Id deuda", width="small"),
-            "Fecha limite de pago": st.column_config.TextColumn("Fecha límite de pago", width="medium"),
-            "Responsable": st.column_config.TextColumn("Responsable", width="medium"),
-            "Status": st.column_config.TextColumn("Status", width="medium"),
-        },
-    )
+    st.dataframe(_style_pagos_banco_table(filtered_df), use_container_width=True, hide_index=True)
     st.download_button(
         "⬇️ Descargar CSV filtrado",
         filtered_df.to_csv(index=False).encode("utf-8-sig"),
