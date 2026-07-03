@@ -128,12 +128,53 @@ st.sidebar.caption(
 )
 
 # =================== 🔄 Reinicio manual (limpiar cache) ===================
+EDITOR_MODE_PASSWORD = "Estructurados*1214"
+
+
+def is_editor_mode_authenticated() -> bool:
+    """Valida si el modo editor fue solicitado con la contraseña correcta."""
+    return (
+        bool(st.session_state.get("editor_mode_requested", False))
+        and st.session_state.get("editor_mode_password", "") == EDITOR_MODE_PASSWORD
+    )
+
+
+def app_today() -> date:
+    """Fecha operativa global; en modo editor permite simular otro día."""
+    if is_editor_mode_authenticated():
+        return st.session_state.get("editor_fecha_operativa", date.today())
+    return date.today()
+
 st.sidebar.markdown("### 🔄 Control")
 app_mode = st.sidebar.radio(
     "Módulo",
     ["Calculadora", "Pagos a Banco"],
     key="app_mode",
 )
+editor_mode_requested = st.sidebar.toggle(
+    "🛠️ Modo editor",
+    value=bool(st.session_state.get("editor_mode_requested", False)),
+    help="Permite simular la fecha operativa y habilita ediciones avanzadas en los módulos.",
+    key="editor_mode_requested",
+)
+if editor_mode_requested:
+    st.sidebar.text_input(
+        "Contraseña modo editor",
+        type="password",
+        key="editor_mode_password",
+        help="Solo usuarios autorizados pueden activar las ediciones avanzadas.",
+    )
+editor_mode = is_editor_mode_authenticated()
+if editor_mode:
+    st.sidebar.date_input(
+        "Fecha operativa",
+        value=st.session_state.get("editor_fecha_operativa", date.today()),
+        key="editor_fecha_operativa",
+        help="La calculadora y Pagos a Banco se comportan como si hoy fuera esta fecha.",
+    )
+    st.sidebar.caption(f"Simulando hoy: **{app_today().strftime('%d/%m/%Y')}**")
+elif editor_mode_requested:
+    st.sidebar.warning("Contraseña incorrecta. El modo editor no está activo.")
 
 if st.sidebar.button("Reiniciar calculadora (limpiar cache)"):
     st.cache_data.clear()
@@ -169,6 +210,7 @@ PAGOS_BANCO_HC_SHEET_TAB = "HC"
 PAGOS_BANCO_FLUJOS_SHEET_ID = "1njsvxi7PTVyIXYqI2zXbKOYVVxI0p4wbBOBK1l3jTnc"
 PAGOS_BANCO_FLUJOS_SHEET_TAB = "Flujos"
 PAGOS_BANCO_DEFAULT_RESPONSABLE = "Yithza Camila Paez Lopez"
+PAGOS_BANCO_STATUS_OVERRIDES_PATH = Path("data/pagos_banco_status_overrides.json")
 GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -444,7 +486,7 @@ def _build_document_context(
     direccion_cliente="",
     suma_comisiones_total=None,
 ) -> dict[str, str]:
-    today = date.today()
+    today = app_today()
     bancos_unicos = _join_unique_values(bancos)
     comision_total_text = _format_currency_cop(comision_total)
     suma_comisiones_value = float(suma_comisiones_total if suma_comisiones_total is not None else comision_total)
@@ -858,7 +900,7 @@ def _build_liquidacion_sin_portafolio(
                 cuota_apartado = (numerador / (plazo - 1)) / apartado_base
 
             cronograma_deuda, _ = construir_cronograma_pagos(
-                fecha_inicial=date.today(),
+                fecha_inicial=app_today(),
                 plazo=plazo,
                 n_pab=n_pab,
                 pago_banco_total=pago_banco,
@@ -1584,6 +1626,51 @@ def _map_cuenta_por_cobrar_status(raw_status: str, tipo_flujo: str) -> str:
     return str(raw_status or "Sin status").strip() or "Sin status"
 
 
+PAGOS_BANCO_STATUS_OPTIONS = [
+    "✅ PAGADO",
+    "🟢 Pagado por Fuera",
+    "🟡 En tramite",
+    "🔴 No pagado",
+    "🚫 Incumplido por el Cliente",
+    "Sin status",
+]
+
+
+def _load_pagos_banco_status_overrides() -> dict[str, str]:
+    """Carga overrides persistentes de status creados desde modo editor."""
+    try:
+        if not PAGOS_BANCO_STATUS_OVERRIDES_PATH.exists():
+            return {}
+        payload = json.loads(PAGOS_BANCO_STATUS_OVERRIDES_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            str(key): str(value)
+            for key, value in payload.items()
+            if str(value).strip()
+        }
+    except Exception:
+        return {}
+
+
+def _save_pagos_banco_status_overrides(overrides: dict[str, str]) -> None:
+    """Guarda overrides persistentes de status en disco."""
+    PAGOS_BANCO_STATUS_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    clean_overrides = {
+        str(key): str(value).strip()
+        for key, value in (overrides or {}).items()
+        if str(key).strip() and str(value).strip()
+    }
+    PAGOS_BANCO_STATUS_OVERRIDES_PATH.write_text(
+        json.dumps(clean_overrides, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _serialize_pagos_banco_match_key(key: tuple[str, int, str]) -> str:
+    return json.dumps([str(key[0]), int(key[1]), str(key[2])], ensure_ascii=False, separators=(",", ":"))
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def load_pagos_banco_status_map() -> dict[tuple[str, int, str], str]:
     """Lee Flujos y retorna status por Referencia + Monto + Fecha Comision estructurada."""
@@ -1619,7 +1706,7 @@ def load_pagos_banco_status_map() -> dict[tuple[str, int, str], str]:
 
 def _style_pagos_banco_table(df: pd.DataFrame):
     """Resalta Status y Fecha limite de pago según estado y cercanía de fecha."""
-    today = pd.Timestamp(date.today())
+    today = pd.Timestamp(app_today())
 
     def style_row(row):
         styles = [""] * len(row)
@@ -1639,6 +1726,8 @@ def _style_pagos_banco_table(df: pd.DataFrame):
                     styles[idx] = "background-color: #fff3bf; color: #7a4f01; font-weight: 900; border-left: 6px solid #f59f00;"
                 elif _norm("No pagado") in status_norm:
                     styles[idx] = "background-color: #ffc9c9; color: #7f1d1d; font-weight: 900; border-left: 6px solid #c92a2a;"
+                elif _norm("Incumplido por el Cliente") in status_norm:
+                    styles[idx] = "background-color: #e03131; color: #ffffff; font-weight: 900; border-left: 6px solid #7f1d1d;"
                 else:
                     styles[idx] = "font-weight: 800;"
             elif column == "Fecha limite de pago" and days_to_due is not None and not is_paid:
@@ -1722,12 +1811,24 @@ def load_pagos_banco_data(current_year: int) -> pd.DataFrame:
         ),
         axis=1,
     )
+    status_overrides = _load_pagos_banco_status_overrides()
+    result["status_override_key"] = result.apply(
+        lambda row: _serialize_pagos_banco_match_key(
+            _build_pagos_banco_match_key(row["Referencia"], row["Monto"], row["Fecha limite de pago"])
+        ),
+        axis=1,
+    )
+    result["Status base"] = result["Status"]
+    result["Status manual"] = result["status_override_key"].map(status_overrides).fillna("")
+    result["Status"] = result["Status manual"].where(result["Status manual"].astype(str).str.strip() != "", result["Status"])
     return result
 
 
 def _is_pagos_banco_incumplido(status, fecha_limite) -> bool:
     """Marca incumplidos: no pagados con fecha límite para hoy o vencida."""
     status_norm = _norm(status)
+    if _norm("Incumplido por el Cliente") in status_norm:
+        return True
     if any(paid_status in status_norm for paid_status in {_norm("PAGADO"), _norm("Pagado por Fuera")}):
         return False
     if _norm("En tramite") in status_norm:
@@ -1735,7 +1836,7 @@ def _is_pagos_banco_incumplido(status, fecha_limite) -> bool:
     date_value = _parse_payment_date_series(pd.Series([fecha_limite])).iloc[0]
     if pd.isna(date_value):
         return False
-    return (date_value.normalize() - pd.Timestamp(date.today())).days <= 0
+    return (date_value.normalize() - pd.Timestamp(app_today())).days <= 0
 
 
 def _build_incumplidos_summary(df: pd.DataFrame) -> pd.DataFrame:
@@ -1766,6 +1867,87 @@ def _build_incumplidos_summary(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
+def _augment_pagos_banco_tracking(df: pd.DataFrame) -> pd.DataFrame:
+    """Agrega columnas auxiliares para seguimiento, alertas y resúmenes."""
+    if df.empty:
+        return df.copy()
+    tracking_df = df.copy()
+    tracking_df["Monto num"] = tracking_df["Monto"].map(_parse_sheet_amount_value)
+    due_dates = _parse_payment_date_series(tracking_df["Fecha limite de pago"])
+    tracking_df["Fecha limite parsed"] = due_dates
+    tracking_df["Dias a vencer"] = (due_dates.dt.normalize() - pd.Timestamp(app_today())).dt.days
+    tracking_df["Alerta fecha"] = np.select(
+        [
+            tracking_df["Dias a vencer"].eq(0),
+            tracking_df["Dias a vencer"].eq(1),
+            tracking_df["Dias a vencer"].lt(0),
+        ],
+        ["🔥 Vence hoy", "⏰ Vence mañana", "🚨 Vencido"],
+        default="",
+    )
+    tracking_df["Pagado"] = tracking_df["Status"].astype(str).map(
+        lambda status: any(paid in _norm(status) for paid in {_norm("PAGADO"), _norm("Pagado por Fuera")})
+    )
+    tracking_df["En tramite"] = tracking_df["Status"].astype(str).map(lambda status: _norm("En tramite") in _norm(status))
+    tracking_df["Incumplido"] = tracking_df.apply(
+        lambda row: _is_pagos_banco_incumplido(row.get("Status", ""), row.get("Fecha limite de pago", "")),
+        axis=1,
+    )
+    return tracking_df
+
+
+def _build_leader_general_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Resumen comparativo general por líder."""
+    tracking_df = _augment_pagos_banco_tracking(df)
+    if tracking_df.empty:
+        return pd.DataFrame()
+    grouped = (
+        tracking_df.groupby("Lider", dropna=False)
+        .agg(
+            Clientes=("Referencia", "nunique"),
+            Pagos=("Referencia", "size"),
+            **{
+                "Monto total": ("Monto num", "sum"),
+                "Monto pagado": ("Monto num", lambda values: values[tracking_df.loc[values.index, "Pagado"]].sum()),
+                "Monto incumplido": ("Monto num", lambda values: values[tracking_df.loc[values.index, "Incumplido"]].sum()),
+                "Vencen hoy": ("Alerta fecha", lambda values: values.eq("🔥 Vence hoy").sum()),
+                "Vencen mañana": ("Alerta fecha", lambda values: values.eq("⏰ Vence mañana").sum()),
+                "En trámite": ("En tramite", "sum"),
+            },
+        )
+        .reset_index()
+    )
+    grouped["Avance"] = np.where(grouped["Monto total"] > 0, grouped["Monto pagado"] / grouped["Monto total"], 0.0)
+    grouped = grouped.sort_values(["Avance", "Monto incumplido"], ascending=[False, True])
+    for column in ["Monto total", "Monto pagado", "Monto incumplido"]:
+        grouped[column] = grouped[column].map(lambda value: _format_currency0(value, decimals=0))
+    grouped["Avance"] = grouped["Avance"].map(lambda value: f"{value:.1%}")
+    return grouped
+
+
+def _build_leader_person_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Resumen individual por líder/persona/status con clientes y monto."""
+    tracking_df = _augment_pagos_banco_tracking(df)
+    if tracking_df.empty:
+        return pd.DataFrame()
+    grouped = (
+        tracking_df.groupby(["Lider", "Responsable", "Status"], dropna=False)
+        .agg(
+            Clientes=("Referencia", "nunique"),
+            Pagos=("Referencia", "size"),
+            **{
+                "Monto": ("Monto num", "sum"),
+                "Vencen hoy": ("Alerta fecha", lambda values: values.eq("🔥 Vence hoy").sum()),
+                "Vencen mañana": ("Alerta fecha", lambda values: values.eq("⏰ Vence mañana").sum()),
+            },
+        )
+        .reset_index()
+        .sort_values(["Lider", "Responsable", "Status"])
+    )
+    grouped["Monto"] = grouped["Monto"].map(lambda value: _format_currency0(value, decimals=0))
+    return grouped
+
+
 def render_pagos_banco_module() -> None:
     """
     Interfaz independiente para consultar pagos a banco desde la hoja Cartera.
@@ -1776,7 +1958,7 @@ def render_pagos_banco_module() -> None:
         "filtrando `payment_date` del año actual y `destination = bank`."
     )
 
-    current_year = date.today().year
+    current_year = app_today().year
     st.markdown(f"### Pagos bancarios de {current_year}")
     if st.button("🔄 Actualizar Pagos a Banco", use_container_width=True):
         load_pagos_banco_data.clear()
@@ -1813,12 +1995,12 @@ def render_pagos_banco_module() -> None:
     }
 
     st.markdown("### 🔎 Filtros")
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
     with filter_col1:
         selected_month = st.selectbox(
             "Mes de fecha límite de pago",
             options=list(month_names.keys()),
-            index=date.today().month - 1,
+            index=app_today().month - 1,
             format_func=lambda month: month_names.get(month, str(month)),
             key="pagos_banco_month_filter",
         )
@@ -1847,6 +2029,17 @@ def render_pagos_banco_module() -> None:
             options=["Todos"] + responsable_options,
             key="pagos_banco_responsable_filter",
         )
+    with filter_col4:
+        status_options = sorted(
+            pagos_df["Status"].dropna().astype(str).loc[lambda values: values.str.strip() != ""].unique()
+        )
+        selected_statuses = st.multiselect(
+            "Status",
+            options=status_options,
+            default=[],
+            placeholder="Todos",
+            key="pagos_banco_status_filter",
+        )
 
     st.caption(
         "🟢 PAGADO / Pagado por Fuera · 🟡 En tramite o fecha a 2 días · "
@@ -1860,6 +2053,8 @@ def render_pagos_banco_module() -> None:
         filtered_df = filtered_df[filtered_df["Lider"].astype(str).eq(selected_lider)].copy()
     if selected_responsable != "Todos":
         filtered_df = filtered_df[filtered_df["Responsable"].astype(str).eq(selected_responsable)].copy()
+    if selected_statuses:
+        filtered_df = filtered_df[filtered_df["Status"].astype(str).isin(selected_statuses)].copy()
 
     st.success(f"✅ Registros encontrados: {len(filtered_df):,} de {len(pagos_df):,}")
     if filtered_df.empty:
@@ -1870,6 +2065,42 @@ def render_pagos_banco_module() -> None:
     if amount_col:
         total_amount = filtered_df[amount_col].map(_parse_sheet_amount_value).sum()
         st.metric("Total Monto", _format_currency0(total_amount, decimals=0))
+
+    tracking_filtered_df = _augment_pagos_banco_tracking(filtered_df)
+    alert_col1, alert_col2, alert_col3 = st.columns(3)
+    alert_col1.metric("🔥 Vencen hoy", int(tracking_filtered_df["Alerta fecha"].eq("🔥 Vence hoy").sum()))
+    alert_col2.metric("⏰ Vencen mañana", int(tracking_filtered_df["Alerta fecha"].eq("⏰ Vence mañana").sum()))
+    alert_col3.metric("🚨 Vencidos / incumplidos", int(tracking_filtered_df["Incumplido"].sum()))
+
+    st.markdown("### 🏁 Resumen general por líder")
+    leader_summary = _build_leader_general_summary(filtered_df)
+    if leader_summary.empty:
+        st.info("No hay datos para resumir por líder con los filtros seleccionados.")
+    else:
+        st.dataframe(leader_summary, use_container_width=True, hide_index=True)
+
+    st.markdown("### 👥 Resumen individual por líder, persona y status")
+    person_summary = _build_leader_person_summary(filtered_df)
+    if person_summary.empty:
+        st.info("No hay datos para el resumen individual.")
+    else:
+        st.dataframe(person_summary, use_container_width=True, hide_index=True)
+
+    if selected_lider != "Todos":
+        st.markdown(f"### 🔎 Detalle compartible del líder: {selected_lider}")
+        leader_detail = tracking_filtered_df[
+            [
+                "Responsable",
+                "Referencia",
+                "Monto",
+                "Status",
+                "Fecha limite de pago",
+                "Alerta fecha",
+                "Banco",
+                "Id deuda",
+            ]
+        ].sort_values(["Responsable", "Fecha limite parsed", "Referencia"])
+        st.dataframe(leader_detail, use_container_width=True, hide_index=True)
 
     st.markdown("### 🚨 Resumen de incumplidos")
     incumplidos_summary = _build_incumplidos_summary(filtered_df)
@@ -1889,7 +2120,65 @@ def render_pagos_banco_module() -> None:
         metric_col2.metric("Monto incumplido", _format_currency0(monto_total_incumplido, decimals=0))
         st.dataframe(incumplidos_summary, use_container_width=True, hide_index=True)
 
+    if editor_mode:
+        st.markdown("### 🛠️ Editor de status")
+        st.caption("Los status editados aquí quedan guardados localmente y tienen prioridad sobre la base de Flujos.")
+        editor_columns = [
+            "Referencia",
+            "Monto",
+            "Banco",
+            "Id deuda",
+            "Fecha limite de pago",
+            "Responsable",
+            "Lider",
+            "Status",
+            "Status base",
+            "Status manual",
+            "status_override_key",
+        ]
+        editor_status_options = sorted(set(PAGOS_BANCO_STATUS_OPTIONS + filtered_df["Status"].dropna().astype(str).tolist()))
+        edited_status_df = st.data_editor(
+            filtered_df[editor_columns],
+            use_container_width=True,
+            hide_index=True,
+            key="pagos_banco_status_editor",
+            disabled=[column for column in editor_columns if column != "Status"],
+            column_config={
+                "Status": st.column_config.SelectboxColumn("Status", options=editor_status_options, required=True),
+                "status_override_key": st.column_config.TextColumn("Llave override", width="small"),
+            },
+        )
+        save_col1, save_col2 = st.columns(2)
+        with save_col1:
+            if st.button("💾 Guardar status editados", use_container_width=True):
+                overrides = _load_pagos_banco_status_overrides()
+                for _, row in edited_status_df.iterrows():
+                    override_key = str(row.get("status_override_key", "")).strip()
+                    status = str(row.get("Status", "")).strip()
+                    base_status = str(row.get("Status base", "")).strip()
+                    if not override_key or not status:
+                        continue
+                    if status == base_status:
+                        overrides.pop(override_key, None)
+                    else:
+                        overrides[override_key] = status
+                _save_pagos_banco_status_overrides(overrides)
+                load_pagos_banco_data.clear()
+                st.success("Status manuales guardados.")
+                st.rerun()
+        with save_col2:
+            if st.button("🧹 Quitar overrides de este filtro", use_container_width=True):
+                overrides = _load_pagos_banco_status_overrides()
+                for override_key in edited_status_df["status_override_key"].astype(str):
+                    overrides.pop(override_key, None)
+                _save_pagos_banco_status_overrides(overrides)
+                load_pagos_banco_data.clear()
+                st.success("Overrides removidos para los registros filtrados.")
+                st.rerun()
+
     st.markdown("### 📋 Detalle de pagos")
+    display_df = tracking_filtered_df.drop(columns=["Monto num", "Fecha limite parsed", "Pagado", "En tramite", "Incumplido"], errors="ignore")
+    display_df = display_df.drop(columns=["status_override_key", "Status base", "Status manual"], errors="ignore")
 
     st.markdown(
         """
@@ -1903,9 +2192,9 @@ def render_pagos_banco_module() -> None:
         """,
         unsafe_allow_html=True,
     )
-    table_height = min(760, 38 + (len(filtered_df) + 1) * 35)
+    table_height = min(760, 38 + (len(display_df) + 1) * 35)
     st.dataframe(
-        _style_pagos_banco_table(filtered_df),
+        _style_pagos_banco_table(display_df),
         use_container_width=True,
         hide_index=True,
         height=table_height,
@@ -1918,11 +2207,13 @@ def render_pagos_banco_module() -> None:
             "Responsable": st.column_config.TextColumn("Responsable", width="medium"),
             "Lider": st.column_config.TextColumn("Líder", width="medium"),
             "Status": st.column_config.TextColumn("Status", width="medium"),
+            "Dias a vencer": st.column_config.NumberColumn("Días a vencer", width="small"),
+            "Alerta fecha": st.column_config.TextColumn("Alerta fecha", width="medium"),
         },
     )
     st.download_button(
         "⬇️ Descargar CSV filtrado",
-        filtered_df.to_csv(index=False).encode("utf-8-sig"),
+        display_df.to_csv(index=False).encode("utf-8-sig"),
         file_name=f"pagos_a_banco_{current_year}_{selected_month:02d}.csv",
         mime="text/csv",
         use_container_width=True,
@@ -3651,7 +3942,7 @@ if not liquidacion_sin_portafolio.get("active", False):
         cuota_apartado = np.nan
 
     cronograma_df, cronograma_meta = construir_cronograma_pagos(
-        fecha_inicial=date.today(),
+        fecha_inicial=app_today(),
         plazo=int(plazo),
         n_pab=n_pab,
         pago_banco_total=pago_banco,
@@ -3720,7 +4011,7 @@ with fecha_cfg_5:
         st.rerun()
 
 cronograma_df, cronograma_meta = construir_cronograma_pagos(
-    fecha_inicial=date.today(),
+    fecha_inicial=app_today(),
     plazo=int(plazo),
     n_pab=n_pab,
     pago_banco_total=pago_banco,
@@ -3739,7 +4030,7 @@ cronograma_base_editado, _ = aplicar_overrides_cronograma(
     cronograma_df=cronograma_df,
     overrides_map=cronograma_overrides,
     totales_por_tipo=totales_por_tipo,
-    fecha_inicial=date.today(),
+    fecha_inicial=app_today(),
     dia_pago_banco=dia_pago_banco,
     dia_pago_comision=dia_pago_comision,
     primer_pago_banco_input=primer_pago_banco,
@@ -3774,7 +4065,7 @@ cronograma_editado, advertencias_cronograma = aplicar_overrides_cronograma(
     cronograma_df=cronograma_df,
     overrides_map=cronograma_overrides,
     totales_por_tipo=totales_por_tipo,
-    fecha_inicial=date.today(),
+    fecha_inicial=app_today(),
     dia_pago_banco=dia_pago_banco,
     dia_pago_comision=dia_pago_comision,
     primer_pago_banco_input=primer_pago_banco,
@@ -3804,7 +4095,7 @@ if liquidacion_sin_portafolio.get("active", False):
             cronograma_df=cronograma_deuda_base,
             overrides_map=deuda_overrides,
             totales_por_tipo=detalle.get("totales_por_tipo", {}),
-            fecha_inicial=date.today(),
+            fecha_inicial=app_today(),
             dia_pago_banco=dia_pago_banco,
             dia_pago_comision=dia_pago_comision,
             primer_pago_banco_input=float(detalle.get("primer_pago_banco", 0.0) or 0.0),
@@ -3839,7 +4130,7 @@ if liquidacion_sin_portafolio.get("active", False):
             cronograma_df=cronograma_deuda_base,
             overrides_map=deuda_overrides,
             totales_por_tipo=detalle.get("totales_por_tipo", {}),
-            fecha_inicial=date.today(),
+            fecha_inicial=app_today(),
             dia_pago_banco=dia_pago_banco,
             dia_pago_comision=dia_pago_comision,
             primer_pago_banco_input=float(detalle.get("primer_pago_banco", 0.0) or 0.0),
@@ -4256,7 +4547,7 @@ if export_pdf_bytes:
     if suma_pago_entidad > float(pago_banco_doc if "pago_banco_doc" in locals() else pago_banco) + 0.01:
         missing_document_fields.append("Ajustar cronograma: Pago a Entidad Financiera no puede ser mayor a PAGO BANCO")
     referencia_export = re.sub(r"[^A-Za-z0-9._-]+", " ", str(ref_input or "sin referencia")).strip() or "sin referencia"
-    export_filename = f"{date.today().isoformat()} - ref {referencia_export}.pdf"
+    export_filename = f"{app_today().isoformat()} - ref {referencia_export}.pdf"
     if missing_document_fields:
         st.warning("Completa o corrige estos puntos antes de descargar el PDF: " + ", ".join(missing_document_fields))
     st.download_button(
@@ -4281,7 +4572,7 @@ if export_pdf_bytes:
             f"{export_pdf_sin_pagare_error}"
         )
     else:
-        export_filename_sin_pagare = f"{date.today().isoformat()} - ref {referencia_export} - sin pagare estructurado.pdf"
+        export_filename_sin_pagare = f"{app_today().isoformat()} - ref {referencia_export} - sin pagare estructurado.pdf"
         st.download_button(
             "⬇️ Descargar sin pagaré estructurado",
             data=export_pdf_sin_pagare_bytes,
