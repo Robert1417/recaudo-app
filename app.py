@@ -190,12 +190,6 @@ if app_mode == "Calculadora":
         "4) Ingresa **PAGO BANCO** y **N PaB** → se calcula **DESCUENTO** y **Comisión de éxito** • "
         "6) Revisa KPIs (PLAZO lo ingresas tú)."
     )
-    if editor_mode:
-        st.success(
-            "🛠️ Editor total activo: puedes simular la fecha, crear o modificar deudas, "
-            "editar pagos del mes actual, ajustar los campos del documento, descargar con "
-            "advertencias y enviar adjuntos sin validar su contenido."
-        )
 
 # ==== Rutas de artefactos generados por el notebook/Action ====
 DATA_PARQUET = Path("data/cartera_asignada_filtrada.parquet")
@@ -3552,7 +3546,6 @@ def _reset_reference_dependent_state(new_reference: str) -> None:
 
     dynamic_prefixes = (
         "selector_ids_",
-        "editor_debts_",
         "cronograma_",
         "plan_liquidacion_",
         "lsp_",
@@ -3582,7 +3575,6 @@ def _reset_reference_dependent_state(new_reference: str) -> None:
         "duplicate_confirm_key",
         "last_prediction_value",
         "last_prediction_ready",
-        "editor_prediction_override",
     }
 
     for key in list(st.session_state.keys()):
@@ -3666,16 +3658,6 @@ if faltan:
 df_base = _normalize_numeric(df_base, [col_deu, col_apar, col_com, col_saldo, col_ce])
 st.success(f"✅ Base lista • filas: {len(df_base):,}")
 
-# El número de producto se utiliza para completar el documento estructurado.
-# En modo editor se solicita también al crear una deuda manual.
-col_numero_producto_base = (
-    _find_col(
-        df_base,
-        ["Número de Crédito", "Numero de Credito", "Número Crédito", "Numero Producto"],
-    )
-    or _find_col_contains(df_base, ["numero", "credito"])
-)
-
 # =================== 2) Referencia → seleccionar id(s) ===================
 st.markdown("### 2) Referencia → seleccionar **Id deuda** (uno o varios)")
 ref_input = st.text_input("🔎 Escribe la **Referencia** (exacta como aparece en la base)")
@@ -3687,92 +3669,6 @@ df_ref = df_base[df_base[col_ref].astype(str) == str(ref_input)]
 if df_ref.empty:
     st.warning("No encontramos esa referencia en la base.")
     st.stop()
-
-# En modo editor se puede complementar la cartera de una referencia con deudas
-# manuales. Se conservan en sesión (no se escriben en la base del workflow) y
-# desde aquí siguen exactamente el mismo flujo que una deuda cargada en la base.
-if editor_mode:
-    editor_debts_key = f"editor_debts_{ref_input}"
-    if not col_numero_producto_base:
-        st.error("La base no tiene una columna para el Número de producto.")
-        st.stop()
-
-    editor_columns = [
-        col_id,
-        col_banco,
-        col_deu,
-        col_numero_producto_base,
-        col_apar,
-        col_com,
-        col_saldo,
-        col_ce,
-    ]
-    editor_debts = df_ref.reindex(columns=editor_columns).copy()
-
-    if editor_debts_key not in st.session_state:
-        st.session_state[editor_debts_key] = editor_debts
-
-    st.info(
-        "🛠️ Modo editor: agrega o modifica deudas para esta referencia. "
-        "Las deudas creadas se usarán en todo el cálculo, documento y envío actual."
-    )
-    editable_debts = st.data_editor(
-        st.session_state[editor_debts_key],
-        key=f"{editor_debts_key}_table",
-        num_rows="dynamic",
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            col_id: st.column_config.TextColumn("Id deuda", required=True),
-            col_banco: st.column_config.TextColumn("Banco", required=True),
-            col_deu: st.column_config.NumberColumn("Deuda", min_value=0.0, format="%f"),
-            col_numero_producto_base: st.column_config.TextColumn("Número de producto", required=True),
-            col_apar: st.column_config.NumberColumn("Apartado mensual", min_value=0.0, format="%f"),
-            col_com: st.column_config.NumberColumn("Comisión mensual", min_value=0.0, format="%f"),
-            col_saldo: st.column_config.NumberColumn("Saldo/Ahorro", min_value=0.0, format="%f"),
-            col_ce: st.column_config.NumberColumn("CE", min_value=0.0, format="%f"),
-        },
-    )
-    editable_debts = editable_debts.dropna(how="all")
-    editable_debts[col_id] = editable_debts[col_id].fillna("").astype(str).str.strip()
-    editable_debts[col_banco] = editable_debts[col_banco].fillna("").astype(str).str.strip()
-    editable_debts[col_numero_producto_base] = (
-        editable_debts[col_numero_producto_base]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
-    )
-    invalid_editor_rows = (
-        editable_debts[col_id].eq("")
-        | editable_debts[col_banco].eq("")
-        | editable_debts[col_numero_producto_base].eq("")
-    )
-    duplicate_editor_ids = editable_debts[col_id].duplicated(keep=False) & editable_debts[col_id].ne("")
-    if invalid_editor_rows.any() or duplicate_editor_ids.any():
-        st.warning(
-            "Cada deuda debe tener Id deuda, Banco y Número de producto; "
-            "los Id deuda no se pueden repetir."
-        )
-        st.stop()
-
-    for numeric_column in [col_deu, col_apar, col_com, col_saldo, col_ce]:
-        editable_debts[numeric_column] = pd.to_numeric(
-            editable_debts[numeric_column], errors="coerce"
-        ).fillna(0.0).clip(lower=0.0)
-
-    # Reconstituye las columnas auxiliares que usa el resto de la calculadora.
-    # La primera fila existente aporta valores contextuales (por ejemplo, tipo
-    # de liquidación) para que las deudas manuales se comporten como las de base.
-    template_row = df_ref.iloc[0].copy()
-    df_ref = df_ref.iloc[0:0].copy().reindex(columns=df_base.columns)
-    for _, debt_row in editable_debts.iterrows():
-        new_row = template_row.copy()
-        new_row[col_ref] = ref_input
-        for column in editor_columns:
-            new_row[column] = debt_row[column]
-        df_ref.loc[len(df_ref)] = new_row
-    st.session_state[editor_debts_key] = editable_debts.copy()
 
 st.subheader("Resultados (elige Id deuda)")
 df_preview = (
@@ -4151,7 +4047,7 @@ for row_position_str, cambios in (cronograma_editor_state.get("edited_rows", {})
     if row_position < 0 or row_position >= len(cronograma_base_visible):
         continue
     row = cronograma_base_visible.iloc[row_position]
-    if int(row["months_ahead"]) == 0 and not editor_mode:
+    if int(row["months_ahead"]) == 0:
         cronograma_locked_rows_changed = True
         continue
     row_key = str(row["row_key"])
@@ -4216,7 +4112,7 @@ if liquidacion_sin_portafolio.get("active", False):
             if row_position < 0 or row_position >= len(deuda_visible_base):
                 continue
             row = deuda_visible_base.iloc[row_position]
-            if int(row["months_ahead"]) == 0 and not editor_mode:
+            if int(row["months_ahead"]) == 0:
                 deuda_locked_rows_changed = True
                 continue
             row_key = str(row["row_key"])
@@ -4292,10 +4188,7 @@ elif not cronograma_visible.empty:
     )
     cronograma_view.index = range(1, len(cronograma_view) + 1)
     st.caption("Sugerencia: banco y comisión van en meses diferentes, pero si mueves una comisión al mismo mes del banco se respeta y las demás comisiones siguen ocupando los meses restantes sin dejar huecos.")
-    if editor_mode:
-        st.caption("🛠️ Modo editor: también puedes modificar los pagos del mes actual.")
-    else:
-        st.caption("Filas 1 y 2 bloqueadas (no editables).")
+    st.caption("Filas 1 y 2 bloqueadas (no editables).")
     st.data_editor(
         cronograma_view,
         key="cronograma_editor",
@@ -4374,9 +4267,9 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
         col1, col2 = st.columns(2)
         with col1:
             referencia_doc = st.text_input("Referencia documento", value=str(default_context.get("referencia", "")), key="doc_referencia")
-            dia_firma_doc = st.text_input("Día firma", value=str(default_context.get("dia_firma", "")), key="doc_dia_firma", disabled=not editor_mode)
-            mes_firma_doc = st.text_input("Mes firma", value=str(default_context.get("mes_firma", "")), key="doc_mes_firma", disabled=not editor_mode)
-            anio_firma_doc = st.text_input("Año firma", value=str(default_context.get("anio_firma", "")), key="doc_anio_firma", disabled=not editor_mode)
+            dia_firma_doc = st.text_input("Día firma", value=str(default_context.get("dia_firma", "")), key="doc_dia_firma", disabled=True)
+            mes_firma_doc = st.text_input("Mes firma", value=str(default_context.get("mes_firma", "")), key="doc_mes_firma", disabled=True)
+            anio_firma_doc = st.text_input("Año firma", value=str(default_context.get("anio_firma", "")), key="doc_anio_firma", disabled=True)
             entidad_financiera_doc = st.text_input("Entidad financiera", value=str(default_context.get("entidad_financiera", "")), key="doc_entidad_financiera")
             nombre_cliente_doc = st.text_input("Nombre cliente", value=str(default_context.get("nombre_cliente", "")), key="doc_nombre_cliente")
             correo_cliente_doc = st.text_input("Correo cliente", value=str(default_context.get("correo_cliente", "")), key="doc_correo_cliente")
@@ -4387,8 +4280,8 @@ def _build_document_context_inputs(default_context: dict[str, str]) -> dict[str,
             cedula_cliente_doc = st.text_input("Cédula cliente", value=str(default_context.get("cedula_cliente", "")), key="doc_cedula_cliente")
             ciudad_cliente_doc = st.text_input("Ciudad cliente", value=str(default_context.get("ciudad_cliente", "")), key="doc_ciudad_cliente")
             direccion_cliente_doc = st.text_input("Dirección cliente", value=str(default_context.get("direccion_cliente", "")), key="doc_direccion_cliente")
-            pago_banco_doc = st.text_input("Pago banco documento", value=str(default_context.get("pago_banco", "")), key="doc_pago_banco", disabled=not editor_mode)
-            comision_total_doc = st.text_input("Comisión total documento", value=str(default_context.get("comision_total", "")), key="doc_comision_total", disabled=not editor_mode)
+            pago_banco_doc = st.text_input("Pago banco documento", value=str(default_context.get("pago_banco", "")), key="doc_pago_banco", disabled=True)
+            comision_total_doc = st.text_input("Comisión total documento", value=str(default_context.get("comision_total", "")), key="doc_comision_total", disabled=True)
 
         hay_codeudor_doc = st.checkbox(
             "¿Hay codeudor?",
@@ -4657,15 +4550,13 @@ if export_pdf_bytes:
     export_filename = f"{app_today().isoformat()} - ref {referencia_export}.pdf"
     if missing_document_fields:
         st.warning("Completa o corrige estos puntos antes de descargar el PDF: " + ", ".join(missing_document_fields))
-        if editor_mode:
-            st.info("🛠️ Modo editor: las advertencias no bloquean la descarga.")
     st.download_button(
         "⬇️ Descargar PDF con tablas",
         data=export_pdf_bytes,
         file_name=export_filename,
         mime="application/pdf",
         use_container_width=True,
-        disabled=bool(missing_document_fields) and not editor_mode,
+        disabled=bool(missing_document_fields),
     )
 
     export_pdf_sin_pagare_bytes = None
@@ -4888,44 +4779,28 @@ if condonacion_mensualidades == "Si":
         key="condonacion_correo_soporte",
     )
 
-if editor_mode:
-    st.number_input(
-        "🛠️ Predicción para el envío",
-        min_value=0.0,
-        max_value=1.0,
-        value=float(st.session_state.get("last_prediction_value", 0.0) or 0.0),
-        step=0.01,
-        format="%.4f",
-        key="editor_prediction_override",
-        help="Permite enviar desde el modo editor sin ejecutar previamente el modelo.",
-    )
-
 enviar_aprobacion = st.button("Enviar AProbación estructurados", use_container_width=True)
 if enviar_aprobacion:
-    pred_value = (
-        st.session_state.get("editor_prediction_override", 0.0)
-        if editor_mode
-        else st.session_state.get("last_prediction_value")
-    )
+    pred_value = st.session_state.get("last_prediction_value")
     carta_link_final = ""
     pantallazo_link_final = ""
     condonacion_correo_link_final = ""
     duplicate_mode = "none"
     duplicate_exact_rows = []
     duplicate_key = f"{datetime.now().strftime('%Y-%m')}|{_norm(ref_input)}|{'-'.join(sorted(_ids_to_set(ids_sel)))}"
-    if pred_value is None and not editor_mode:
+    if pred_value is None:
         st.warning("Primero debes presionar **Predecir recaudo**.")
-    elif float(ce_inicial or 0.0) < ce_inicial_minimo_aprobacion and not editor_mode:
+    elif float(ce_inicial or 0.0) < ce_inicial_minimo_aprobacion:
         st.warning("Cliente debe tener un abono a la comisión de éxito este mes.")
     elif not correo_para_sheets:
         st.warning("Debes ingresar el correo electrónico antes de enviar.")
-    elif not _is_corporate_email(correo_para_sheets) and not editor_mode:
+    elif not _is_corporate_email(correo_para_sheets):
         st.warning("Correo incorrecto: debe terminar en @gobravo.com.co.")
     elif condonacion_mensualidades not in {"Si", "No"}:
         st.warning("Debes seleccionar Si o No en condonación de mensualidades.")
-    elif (carta_pagare_file is None or pantallazo_file is None) and not editor_mode:
+    elif carta_pagare_file is None or pantallazo_file is None:
         st.warning("Debes adjuntar Carta/Pagaré (solo PDF) y PDF del codeudor (hoja 1 cédula, hoja 2 certificado de ingresos).")
-    elif condonacion_mensualidades == "Si" and condonacion_correo_file is None and not editor_mode:
+    elif condonacion_mensualidades == "Si" and condonacion_correo_file is None:
         st.warning("Debes adjuntar el pantallazo de correo de aprobación de condonación (PDF o imagen).")
     else:
         pred_value_envio = round(float(pred_value or 0.0), 4)
@@ -4933,33 +4808,30 @@ if enviar_aprobacion:
             f"Predicción de recaudo usada para este envío: **{pred_value_envio:.4f}** "
             "(este mismo valor se guarda en la última columna)."
         )
-        if editor_mode:
-            st.info("🛠️ Modo editor: se omitieron los bloqueos por duplicados del mes.")
-        else:
-            duplicate_check = _get_respuestas_duplicados_mes(ref_input, ids_sel)
-            if not duplicate_check["ok"]:
-                st.error(
-                    "No fue posible validar duplicados contra la hoja de respuestas. "
-                    f"Detalle: {duplicate_check['error']}"
-                )
-                st.stop()
+        duplicate_check = _get_respuestas_duplicados_mes(ref_input, ids_sel)
+        if not duplicate_check["ok"]:
+            st.error(
+                "No fue posible validar duplicados contra la hoja de respuestas. "
+                f"Detalle: {duplicate_check['error']}"
+            )
+            st.stop()
 
-            duplicate_mode = duplicate_check["mode"]
-            duplicate_exact_rows = duplicate_check.get("exact_rows", [])
-            confirmed_key = str(st.session_state.get("duplicate_confirm_key", ""))
-            if duplicate_mode == "exact_duplicate" and confirmed_key != duplicate_key:
-                st.session_state.duplicate_confirm_key = duplicate_key
-                st.warning(
-                    "⚠️ Esta referencia con el/los mismo(s) ID(s) ya fue subida este mes. "
-                    "Si deseas reenviarla a aprobación, presiona nuevamente **Enviar AProbación estructurados**."
-                )
-                st.stop()
-            if duplicate_mode == "reference_duplicate":
-                st.warning(
-                    "ℹ️ Esta referencia ya fue originada este mes con otro ID de deuda. "
-                    "Se enviará sin check de aprobación estructurados y sin comentario. "
-                    "Por favor contacta al equipo de estructurados."
-                )
+        duplicate_mode = duplicate_check["mode"]
+        duplicate_exact_rows = duplicate_check.get("exact_rows", [])
+        confirmed_key = str(st.session_state.get("duplicate_confirm_key", ""))
+        if duplicate_mode == "exact_duplicate" and confirmed_key != duplicate_key:
+            st.session_state.duplicate_confirm_key = duplicate_key
+            st.warning(
+                "⚠️ Esta referencia con el/los mismo(s) ID(s) ya fue subida este mes. "
+                "Si deseas reenviarla a aprobación, presiona nuevamente **Enviar AProbación estructurados**."
+            )
+            st.stop()
+        if duplicate_mode == "reference_duplicate":
+            st.warning(
+                "ℹ️ Esta referencia ya fue originada este mes con otro ID de deuda. "
+                "Se enviará sin check de aprobación estructurados y sin comentario. "
+                "Por favor contacta al equipo de estructurados."
+            )
             
         flow_validacion_pdf = cronograma_visible
         if liquidacion_sin_portafolio.get("active", False):
@@ -4968,23 +4840,16 @@ if enviar_aprobacion:
                 first_key = next(iter(cronos_lsp))
                 flow_validacion_pdf = cronos_lsp.get(first_key, cronograma_visible)
 
-        if editor_mode:
-            # El editor autorizado puede enviar el adjunto tal como fue cargado.
-            # Se omite únicamente la revisión del contenido del PDF (referencia,
-            # firmas, QR y coincidencia del flujo); Drive sigue validando que sea
-            # un archivo PDF para evitar errores técnicos en el almacenamiento.
-            st.info("🛠️ Modo editor: se omitió la validación del contenido de la Carta/Pagaré.")
-        else:
-            is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(
-                carta_pagare_file,
-                ref_input,
-                flow_validacion_pdf,
-                comision_exito_total=comision_exito,
-                ce_inicial=ce_inicial,
-            )
-            if not is_valid_pdf:
-                st.warning(pdf_validation_message)
-                st.stop()
+        is_valid_pdf, pdf_validation_message = _validate_carta_pagare_pdf(
+            carta_pagare_file,
+            ref_input,
+            flow_validacion_pdf,
+            comision_exito_total=comision_exito,
+            ce_inicial=ce_inicial,
+        )
+        if not is_valid_pdf:
+            st.warning(pdf_validation_message)
+            st.stop()
         try:
             drive_service = _build_drive_service_from_session()
             if drive_service is None:
@@ -4994,31 +4859,24 @@ if enviar_aprobacion:
                 )
                 st.stop()
 
-            if carta_pagare_file is not None:
-                carta_upload = _upload_file_to_drive(
-                    drive_service,
-                    carta_pagare_file,
-                    DRIVE_FOLDER_CARTA_PAGARE_ID,
-                    allowed_extensions=(".pdf",),
-                    invalid_message="Carta con pagaré firmado: solo se permite PDF.",
-                )
-                carta_link_final = carta_upload.get("webViewLink", "")
-                st.caption(f"📂 Carta/Pagaré cargado: {carta_link_final}")
-            elif editor_mode:
-                carta_link_final = "No adjuntado (modo editor)"
-
-            if pantallazo_file is not None:
-                pantallazo_upload = _upload_file_to_drive(
-                    drive_service,
-                    pantallazo_file,
-                    DRIVE_FOLDER_PANTALLAZOS_ID,
-                    allowed_extensions=(".pdf",),
-                    invalid_message="Soporte de codeudor: solo se permite PDF (hoja 1 cédula, hoja 2 certificado de ingresos).",
-                )
-                pantallazo_link_final = pantallazo_upload.get("webViewLink", "")
-                st.caption(f"📂 Pantallazo cargado: {pantallazo_link_final}")
-            elif editor_mode:
-                pantallazo_link_final = "No adjuntado (modo editor)"
+            carta_upload = _upload_file_to_drive(
+                drive_service,
+                carta_pagare_file,
+                DRIVE_FOLDER_CARTA_PAGARE_ID,
+                allowed_extensions=(".pdf",),
+                invalid_message="Carta con pagaré firmado: solo se permite PDF.",
+            )
+            pantallazo_upload = _upload_file_to_drive(
+                drive_service,
+                pantallazo_file,
+                DRIVE_FOLDER_PANTALLAZOS_ID,
+                allowed_extensions=(".pdf",),
+                invalid_message="Soporte de codeudor: solo se permite PDF (hoja 1 cédula, hoja 2 certificado de ingresos).",
+            )
+            carta_link_final = carta_upload.get("webViewLink", "")
+            pantallazo_link_final = pantallazo_upload.get("webViewLink", "")
+            st.caption(f"📂 Carta/Pagaré cargado: {carta_link_final}")
+            st.caption(f"📂 Pantallazo cargado: {pantallazo_link_final}")
             if condonacion_mensualidades == "Si" and condonacion_correo_file is not None:
                 condonacion_upload = _upload_file_to_drive(
                     drive_service,
@@ -5031,8 +4889,6 @@ if enviar_aprobacion:
                 st.caption(f"📂 Correo aprobación condonación cargado: {condonacion_correo_link_final}")
             elif condonacion_mensualidades == "No":
                 condonacion_correo_link_final = ""
-            elif editor_mode:
-                condonacion_correo_link_final = "No adjuntado (modo editor)"
         except Exception as e:
             st.error(f"No se pudieron subir los adjuntos a Drive: {e}")
             st.stop()
@@ -5040,7 +4896,7 @@ if enviar_aprobacion:
     if (
         pred_value is not None
         and correo_para_sheets
-        and (editor_mode or _is_corporate_email(correo_para_sheets))
+        and _is_corporate_email(correo_para_sheets)
         and condonacion_mensualidades in {"Si", "No"}
         and carta_link_final
         and pantallazo_link_final
