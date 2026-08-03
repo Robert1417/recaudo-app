@@ -129,6 +129,28 @@ st.sidebar.caption(
 
 # =================== 🔄 Reinicio manual (limpiar cache) ===================
 EDITOR_MODE_PASSWORD = "Estructurados*1214"
+CALCULATOR_ACCESS_PASSWORD = EDITOR_MODE_PASSWORD
+
+
+def is_calculator_authenticated() -> bool:
+    """Indica si la sesión actual tiene acceso a la calculadora."""
+    return bool(st.session_state.get("calculator_authenticated", False))
+
+
+def _authenticate_calculator() -> None:
+    """Valida el acceso y elimina inmediatamente la contraseña ingresada."""
+    candidate = str(st.session_state.get("calculator_password", ""))
+    authenticated = secrets.compare_digest(candidate, CALCULATOR_ACCESS_PASSWORD)
+    st.session_state["calculator_authenticated"] = authenticated
+    st.session_state["calculator_password_invalid"] = bool(candidate) and not authenticated
+    st.session_state["calculator_password"] = ""
+
+
+def _logout_calculator() -> None:
+    """Cierra el acceso a la calculadora y limpia su estado de autenticación."""
+    st.session_state["calculator_authenticated"] = False
+    st.session_state["calculator_password_invalid"] = False
+    st.session_state["calculator_password"] = ""
 
 
 def is_editor_mode_authenticated() -> bool:
@@ -184,6 +206,35 @@ app_mode = st.sidebar.radio(
     ["Calculadora", "Pagos a Banco"],
     key="app_mode",
 )
+
+if app_mode == "Calculadora" and not is_calculator_authenticated():
+    st.title("🔒 Calculadora de Recaudo")
+    st.info("Ingresa la contraseña para acceder. La calculadora permanecerá bloqueada hasta autenticarte.")
+    st.text_input(
+        "Contraseña",
+        type="password",
+        key="calculator_password",
+        on_change=_authenticate_calculator,
+        placeholder="Ingresa la contraseña",
+    )
+    st.button(
+        "Ingresar",
+        type="primary",
+        on_click=_authenticate_calculator,
+        use_container_width=True,
+    )
+    if st.session_state.get("calculator_password_invalid", False):
+        st.error("Contraseña incorrecta. La calculadora continúa bloqueada.")
+    st.stop()
+
+if app_mode == "Calculadora":
+    st.sidebar.success("🔓 Calculadora desbloqueada")
+    st.sidebar.button(
+        "🔒 Bloquear calculadora",
+        on_click=_logout_calculator,
+        use_container_width=True,
+    )
+
 editor_mode_requested = st.sidebar.toggle(
     "🛠️ Modo editor",
     value=bool(st.session_state.get("editor_mode_requested", False)),
