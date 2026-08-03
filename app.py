@@ -121,14 +121,38 @@ from sklearn.impute import SimpleImputer
 # 🔧 PARCHE compatibilidad modelo viejo vs sklearn nuevo
 if not hasattr(SimpleImputer, "_fill_dtype"):
     SimpleImputer._fill_dtype = None
-st.sidebar.caption(
-    f"🧩 NumPy: {numpy.__version__}\n"
-    f"🧠 scikit-learn: {sklearn.__version__}\n"
-    f"💼 joblib: {joblib.__version__}"
-)
-
 # =================== 🔄 Reinicio manual (limpiar cache) ===================
 EDITOR_MODE_PASSWORD = "Estructurados*1214"
+CALCULATOR_PASSWORD_SECRET = "CALCULATOR_PASSWORD"
+
+
+def _calculator_password() -> str:
+    """Obtiene la clave de acceso sin exponerla en el estado de la sesión."""
+    return str(st.secrets.get(CALCULATOR_PASSWORD_SECRET, EDITOR_MODE_PASSWORD))
+
+
+def _require_calculator_password() -> None:
+    """Detiene por completo la aplicación hasta validar la clave una sola vez."""
+    if st.session_state.get("calculator_authenticated", False):
+        return
+
+    st.title("🔐 Acceso protegido")
+    st.info("Ingresa la contraseña para utilizar la Calculadora de Berex.")
+    with st.form("calculator_login", clear_on_submit=True):
+        candidate = st.text_input("Contraseña", type="password")
+        submitted = st.form_submit_button("Ingresar", use_container_width=True)
+
+    if submitted:
+        if secrets.compare_digest(str(candidate), _calculator_password()):
+            st.session_state["calculator_authenticated"] = True
+            st.session_state.pop("calculator_password_invalid", None)
+            st.rerun()
+        else:
+            st.session_state["calculator_password_invalid"] = True
+
+    if st.session_state.get("calculator_password_invalid", False):
+        st.error("Contraseña incorrecta. Intenta nuevamente.")
+    st.stop()
 
 
 def is_editor_mode_authenticated() -> bool:
@@ -137,15 +161,6 @@ def is_editor_mode_authenticated() -> bool:
         bool(st.session_state.get("editor_mode_requested", False))
         and bool(st.session_state.get("editor_mode_authenticated", False))
     )
-
-
-def _authenticate_editor_mode() -> None:
-    """Valida el ingreso y borra inmediatamente el texto secreto del estado."""
-    candidate = str(st.session_state.get("editor_mode_password", ""))
-    authenticated = secrets.compare_digest(candidate, EDITOR_MODE_PASSWORD)
-    st.session_state["editor_mode_authenticated"] = authenticated
-    st.session_state["editor_mode_password_invalid"] = bool(candidate) and not authenticated
-    st.session_state["editor_mode_password"] = ""
 
 
 def _logout_editor_mode() -> None:
@@ -179,6 +194,13 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+_require_calculator_password()
+
+st.sidebar.caption(
+    f"🧩 NumPy: {numpy.__version__}\n"
+    f"🧠 scikit-learn: {sklearn.__version__}\n"
+    f"💼 joblib: {joblib.__version__}"
+)
 app_mode = st.sidebar.radio(
     "Módulo",
     ["Calculadora", "Pagos a Banco"],
@@ -194,14 +216,10 @@ if not editor_mode_requested:
     st.session_state["editor_mode_authenticated"] = False
     st.session_state["editor_mode_password_invalid"] = False
     st.session_state["editor_mode_password"] = ""
-elif not is_editor_mode_authenticated():
-    st.sidebar.text_input(
-        "Contraseña modo editor",
-        type="password",
-        key="editor_mode_password",
-        help="Solo usuarios autorizados pueden activar las ediciones avanzadas.",
-        on_change=_authenticate_editor_mode,
-    )
+else:
+    # El acceso general ya validó la clave. El editor no debe iniciar otro
+    # login ni perder el primer cambio realizado después de activarlo.
+    st.session_state["editor_mode_authenticated"] = True
 editor_mode = is_editor_mode_authenticated()
 if editor_mode:
     st.sidebar.success("Modo editor autenticado. La contraseña no queda guardada ni visible.")
@@ -3096,11 +3114,11 @@ def _extract_oauth_code(redirect_text: str) -> str:
     return text
 
 
-def _build_drive_service_from_session():
-    creds = _get_drive_user_credentials()
-    if creds is None:
-        return None
-    return build("drive", "v3", credentials=creds)
+def _build_drive_service():
+    """Crea Drive con la cuenta de servicio, sin autenticar al usuario final."""
+    creds_info = _load_google_service_account_info()
+    credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
 
 def _get_drive_user_credentials(*, refresh_if_needed: bool = True):
@@ -3522,7 +3540,6 @@ if app_mode == "Pagos a Banco":
     render_pagos_banco_module()
     st.stop()
 
-_require_drive_authentication()
 _restore_draft_state()
 
 
@@ -4999,44 +5016,29 @@ st.markdown("---")
 st.markdown("### 8) Envío a aprobación de estructurados")
 st.caption("Este envío se hace solo cuando presionas el botón de aprobación.")
 
-st.markdown("#### Adjuntos obligatorios (Drive con autenticación de usuario)")
+st.markdown("#### Adjuntos obligatorios")
 st.caption(
-    "Flujo automático: autentica tu cuenta Google y sube los adjuntos obligatorios."
+    "Los adjuntos se guardan automáticamente; no necesitas autenticar una cuenta de Google Drive."
 )
 
-oauth_disponible = _oauth_drive_configurado()
 carta_pagare_file = None
 pantallazo_file = None
 condonacion_correo_file = None
-if not oauth_disponible:
-    st.error(
-        "Este despliegue no tiene secretos OAuth configurados. "
-        "Configura GOOGLE_OAUTH_CLIENT_ID y GOOGLE_OAUTH_CLIENT_SECRET."
-    )
-else:
-    if _get_drive_user_credentials() is not None:
-        st.success("Cuenta Drive autenticada en esta sesión.")
-    else:
-        st.info(
-            "La sesión de Drive se validará y refrescará automáticamente "
-            "cuando envíes a aprobación."
-        )
-
-    carta_pagare_file = st.file_uploader(
-        "📎 Adjuntar carta con pagaré firmado (PDF)",
-        type=["pdf"],
-        key="carta_pagare_pdf",
-    )
-    pantallazo_label = (
-        "📎 Adjuntar PDF del codeudor (hoja 1: cédula, hoja 2: certificado de ingresos)"
-        if st.session_state.get("doc_hay_codeudor", False)
-        else "📎 Adjunta mensaje de confirmación del cliente"
-    )
-    pantallazo_file = st.file_uploader(
-        pantallazo_label,
-        type=["pdf"],
-        key="pantallazo_pdf",
-    )
+carta_pagare_file = st.file_uploader(
+    "📎 Adjuntar carta con pagaré firmado (PDF)",
+    type=["pdf"],
+    key="carta_pagare_pdf",
+)
+pantallazo_label = (
+    "📎 Adjuntar PDF del codeudor (hoja 1: cédula, hoja 2: certificado de ingresos)"
+    if st.session_state.get("doc_hay_codeudor", False)
+    else "📎 Adjunta mensaje de confirmación del cliente"
+)
+pantallazo_file = st.file_uploader(
+    pantallazo_label,
+    type=["pdf"],
+    key="pantallazo_pdf",
+)
     
 correo_para_sheets = st.text_input(
     "📧 Dirección de correo electrónico (obligatorio para enviar)",
@@ -5153,13 +5155,7 @@ if enviar_aprobacion:
                 st.warning(pdf_validation_message)
                 st.stop()
         try:
-            drive_service = _build_drive_service_from_session()
-            if drive_service is None:
-                st.warning(
-                    "No fue posible recuperar automáticamente la sesión de Drive. "
-                    "Recarga la app e intenta nuevamente."
-                )
-                st.stop()
+            drive_service = _build_drive_service()
 
             if carta_pagare_file is not None:
                 carta_upload = _upload_file_to_drive(
