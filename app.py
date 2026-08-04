@@ -121,14 +121,38 @@ from sklearn.impute import SimpleImputer
 # 🔧 PARCHE compatibilidad modelo viejo vs sklearn nuevo
 if not hasattr(SimpleImputer, "_fill_dtype"):
     SimpleImputer._fill_dtype = None
-st.sidebar.caption(
-    f"🧩 NumPy: {numpy.__version__}\n"
-    f"🧠 scikit-learn: {sklearn.__version__}\n"
-    f"💼 joblib: {joblib.__version__}"
-)
-
 # =================== 🔄 Reinicio manual (limpiar cache) ===================
 EDITOR_MODE_PASSWORD = "Estructurados*1214"
+CALCULATOR_PASSWORD_SECRET = "CALCULATOR_PASSWORD"
+
+
+def _calculator_password() -> str:
+    """Obtiene la clave de acceso sin exponerla en el estado de la sesión."""
+    return str(st.secrets.get(CALCULATOR_PASSWORD_SECRET, EDITOR_MODE_PASSWORD))
+
+
+def _require_calculator_password() -> None:
+    """Detiene por completo la aplicación hasta validar la clave una sola vez."""
+    if st.session_state.get("calculator_authenticated", False):
+        return
+
+    st.title("🔐 Acceso protegido")
+    st.info("Ingresa la contraseña para utilizar la Calculadora de Berex.")
+    with st.form("calculator_login", clear_on_submit=True):
+        candidate = st.text_input("Contraseña", type="password")
+        submitted = st.form_submit_button("Ingresar", use_container_width=True)
+
+    if submitted:
+        if secrets.compare_digest(str(candidate), _calculator_password()):
+            st.session_state["calculator_authenticated"] = True
+            st.session_state.pop("calculator_password_invalid", None)
+            st.rerun()
+        else:
+            st.session_state["calculator_password_invalid"] = True
+
+    if st.session_state.get("calculator_password_invalid", False):
+        st.error("Contraseña incorrecta. Intenta nuevamente.")
+    st.stop()
 
 
 def is_editor_mode_authenticated() -> bool:
@@ -137,15 +161,6 @@ def is_editor_mode_authenticated() -> bool:
         bool(st.session_state.get("editor_mode_requested", False))
         and bool(st.session_state.get("editor_mode_authenticated", False))
     )
-
-
-def _authenticate_editor_mode() -> None:
-    """Valida el ingreso y borra inmediatamente el texto secreto del estado."""
-    candidate = str(st.session_state.get("editor_mode_password", ""))
-    authenticated = secrets.compare_digest(candidate, EDITOR_MODE_PASSWORD)
-    st.session_state["editor_mode_authenticated"] = authenticated
-    st.session_state["editor_mode_password_invalid"] = bool(candidate) and not authenticated
-    st.session_state["editor_mode_password"] = ""
 
 
 def _logout_editor_mode() -> None:
@@ -179,6 +194,11 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+st.sidebar.caption(
+    f"🧩 NumPy: {numpy.__version__}\n"
+    f"🧠 scikit-learn: {sklearn.__version__}\n"
+    f"💼 joblib: {joblib.__version__}"
+)
 app_mode = st.sidebar.radio(
     "Módulo",
     ["Calculadora", "Pagos a Banco"],
@@ -194,14 +214,10 @@ if not editor_mode_requested:
     st.session_state["editor_mode_authenticated"] = False
     st.session_state["editor_mode_password_invalid"] = False
     st.session_state["editor_mode_password"] = ""
-elif not is_editor_mode_authenticated():
-    st.sidebar.text_input(
-        "Contraseña modo editor",
-        type="password",
-        key="editor_mode_password",
-        help="Solo usuarios autorizados pueden activar las ediciones avanzadas.",
-        on_change=_authenticate_editor_mode,
-    )
+else:
+    # El acceso general ya validó la clave. El editor no debe iniciar otro
+    # login ni perder el primer cambio realizado después de activarlo.
+    st.session_state["editor_mode_authenticated"] = True
 editor_mode = is_editor_mode_authenticated()
 if editor_mode:
     st.sidebar.success("Modo editor autenticado. La contraseña no queda guardada ni visible.")
@@ -3523,6 +3539,7 @@ if app_mode == "Pagos a Banco":
     st.stop()
 
 _require_drive_authentication()
+_require_calculator_password()
 _restore_draft_state()
 
 
