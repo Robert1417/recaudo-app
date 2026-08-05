@@ -124,6 +124,18 @@ if not hasattr(SimpleImputer, "_fill_dtype"):
 # =================== 🔄 Reinicio manual (limpiar cache) ===================
 EDITOR_MODE_PASSWORD = "Estructurados*1214"
 CALCULATOR_PASSWORD_SECRET = "CALCULATOR_PASSWORD"
+PASSWORDLESS_CALCULATOR_EMAILS = {
+    "william.abril@gobravo.com.co",
+    "karol.quevedo@gobravo.com.co",
+    "laura.torres@gobravo.com.co",
+    "david.tinjaca@gobravo.com.co",
+    "dioben.araujo@gobravo.com.co",
+    "roberto.chapman@gobravo.com.co",
+}
+
+
+def _normalize_email(email: str) -> str:
+    return str(email or "").strip().lower()
 
 
 def _calculator_password() -> str:
@@ -131,9 +143,37 @@ def _calculator_password() -> str:
     return str(st.secrets.get(CALCULATOR_PASSWORD_SECRET, EDITOR_MODE_PASSWORD))
 
 
+def _is_passwordless_calculator_email(email: str) -> bool:
+    return _normalize_email(email) in PASSWORDLESS_CALCULATOR_EMAILS
+
+
+def _get_authenticated_drive_email() -> str:
+    """Consulta el correo de la cuenta Google autenticada en Drive."""
+    cached_email = _normalize_email(st.session_state.get("drive_authenticated_email", ""))
+    if cached_email:
+        return cached_email
+
+    try:
+        drive_service = _build_drive_service_from_session()
+        if drive_service is None:
+            return ""
+        about = drive_service.about().get(fields="user(emailAddress)").execute()
+        email = _normalize_email((about.get("user") or {}).get("emailAddress", ""))
+        if email:
+            st.session_state["drive_authenticated_email"] = email
+        return email
+    except Exception:
+        return ""
+
+
 def _require_calculator_password() -> None:
     """Detiene por completo la aplicación hasta validar la clave una sola vez."""
     if st.session_state.get("calculator_authenticated", False):
+        return
+
+    drive_email = _get_authenticated_drive_email()
+    if _is_passwordless_calculator_email(drive_email):
+        st.session_state["calculator_authenticated"] = True
         return
 
     st.title("🔐 Acceso protegido")
@@ -3544,7 +3584,7 @@ _restore_draft_state()
 
 
 def _is_corporate_email(email: str) -> bool:
-    return str(email or "").strip().lower().endswith("@gobravo.com.co")
+    return _normalize_email(email).endswith("@gobravo.com.co")
 
 
 def _is_traditional_liquidation(tipo_liquidacion: str) -> bool:
