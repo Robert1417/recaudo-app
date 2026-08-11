@@ -124,6 +124,8 @@ if not hasattr(SimpleImputer, "_fill_dtype"):
 # =================== 🔄 Reinicio manual (limpiar cache) ===================
 EDITOR_MODE_PASSWORD = "Estructurados*1214"
 CALCULATOR_PASSWORD_SECRET = "CALCULATOR_PASSWORD"
+EDITOR_PASSWORD_SECRET = "EDITOR_MODE_PASSWORD"
+PUBLIC_ACCESS_SECRET = "CALCULATOR_PUBLIC_ACCESS"
 PASSWORDLESS_CALCULATOR_EMAILS = {
     "william.abril@gobravo.com.co",
     "karol.quevedo@gobravo.com.co",
@@ -141,6 +143,19 @@ def _normalize_email(email: str) -> str:
 def _calculator_password() -> str:
     """Obtiene la clave de acceso sin exponerla en el estado de la sesión."""
     return str(st.secrets.get(CALCULATOR_PASSWORD_SECRET, EDITOR_MODE_PASSWORD))
+
+
+def _editor_password() -> str:
+    """Obtiene la clave exclusiva del modo editor."""
+    return str(st.secrets.get(EDITOR_PASSWORD_SECRET, EDITOR_MODE_PASSWORD))
+
+
+def _calculator_public_access_enabled() -> bool:
+    """Indica si el administrador abrió la calculadora para todos los usuarios."""
+    configured_value = st.secrets.get(PUBLIC_ACCESS_SECRET, False)
+    if isinstance(configured_value, bool):
+        return configured_value
+    return str(configured_value).strip().lower() in {"1", "true", "yes", "si", "sí", "on"}
 
 
 def _is_passwordless_calculator_email(email: str) -> bool:
@@ -169,6 +184,9 @@ def _get_authenticated_drive_email() -> str:
 def _require_calculator_password() -> None:
     """Detiene por completo la aplicación hasta validar la clave una sola vez."""
     if st.session_state.get("calculator_authenticated", False):
+        return
+
+    if _calculator_public_access_enabled():
         return
 
     drive_email = _get_authenticated_drive_email()
@@ -218,6 +236,10 @@ def app_today() -> date:
     return date.today()
 
 st.sidebar.markdown("### 🔄 Control")
+if _calculator_public_access_enabled():
+    st.sidebar.success("🔓 Acceso general habilitado por el administrador")
+else:
+    st.sidebar.caption("🔒 Acceso general protegido con contraseña")
 # Streamlit incluye por defecto un botón para revelar los campos password. Se
 # oculta también por CSS como defensa visual adicional mientras se autentica.
 st.markdown(
@@ -255,9 +277,27 @@ if not editor_mode_requested:
     st.session_state["editor_mode_password_invalid"] = False
     st.session_state["editor_mode_password"] = ""
 else:
-    # El acceso general ya validó la clave. El editor no debe iniciar otro
-    # login ni perder el primer cambio realizado después de activarlo.
-    st.session_state["editor_mode_authenticated"] = True
+    if not st.session_state.get("editor_mode_authenticated", False):
+        st.sidebar.warning(
+            "El modo editor siempre requiere su contraseña, incluso cuando la "
+            "calculadora está abierta para todos."
+        )
+        with st.sidebar.form("editor_mode_login", clear_on_submit=True):
+            editor_candidate = st.text_input(
+                "Contraseña de editor",
+                type="password",
+                key="editor_mode_password",
+            )
+            editor_submitted = st.form_submit_button("Desbloquear modo editor", use_container_width=True)
+
+        if editor_submitted:
+            if secrets.compare_digest(str(editor_candidate), _editor_password()):
+                st.session_state["editor_mode_authenticated"] = True
+                st.session_state["editor_mode_password_invalid"] = False
+                st.rerun()
+            else:
+                st.session_state["editor_mode_authenticated"] = False
+                st.session_state["editor_mode_password_invalid"] = True
 editor_mode = is_editor_mode_authenticated()
 if editor_mode:
     st.sidebar.success("Modo editor autenticado. La contraseña no queda guardada ni visible.")
