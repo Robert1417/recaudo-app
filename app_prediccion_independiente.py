@@ -207,7 +207,6 @@ def _start_drive_oauth_flow() -> str:
     flow.code_verifier = code_verifier
     auth_url, _ = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
         prompt="consent",
     )
     st.session_state.drive_oauth_cfg = cfg

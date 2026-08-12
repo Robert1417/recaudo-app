@@ -3226,7 +3226,6 @@ def _get_drive_flow_and_auth_url():
     packed_state = _encode_oauth_state({"s": secrets.token_urlsafe(24), "v": code_verifier})
     auth_url, state = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
         prompt="consent",
         state=packed_state,
     )
