@@ -126,6 +126,9 @@ EDITOR_MODE_PASSWORD = "Estructurados*1214"
 CALCULATOR_PASSWORD_SECRET = "CALCULATOR_PASSWORD"
 EDITOR_PASSWORD_SECRET = "EDITOR_MODE_PASSWORD"
 PUBLIC_ACCESS_SECRET = "CALCULATOR_PUBLIC_ACCESS"
+PUBLIC_ACCESS_CONFIG_KEY = "CALCULATOR_PUBLIC_ACCESS"
+PUBLIC_ACCESS_CONFIG_TAB = "Configuracion App"
+CALCULATOR_OWNER_EMAIL = "roberto.chapman@gobravo.com.co"
 PASSWORDLESS_CALCULATOR_EMAILS = {
     "william.abril@gobravo.com.co",
     "karol.quevedo@gobravo.com.co",
@@ -150,12 +153,21 @@ def _editor_password() -> str:
     return str(st.secrets.get(EDITOR_PASSWORD_SECRET, EDITOR_MODE_PASSWORD))
 
 
-def _calculator_public_access_enabled() -> bool:
-    """Indica si el administrador abrió la calculadora para todos los usuarios."""
-    configured_value = st.secrets.get(PUBLIC_ACCESS_SECRET, False)
+def _as_bool(configured_value) -> bool:
     if isinstance(configured_value, bool):
         return configured_value
     return str(configured_value).strip().lower() in {"1", "true", "yes", "si", "sí", "on"}
+
+
+def _calculator_public_access_enabled() -> bool:
+    """Lee el interruptor compartido y usa el secreto solo como valor inicial."""
+    try:
+        override = _load_public_access_override()
+    except Exception:
+        override = None
+    if override is not None:
+        return _as_bool(override)
+    return _as_bool(st.secrets.get(PUBLIC_ACCESS_SECRET, False))
 
 
 def _is_passwordless_calculator_email(email: str) -> bool:
@@ -236,10 +248,6 @@ def app_today() -> date:
     return date.today()
 
 st.sidebar.markdown("### 🔄 Control")
-if _calculator_public_access_enabled():
-    st.sidebar.success("🔓 Acceso general habilitado por el administrador")
-else:
-    st.sidebar.caption("🔒 Acceso general protegido con contraseña")
 # Streamlit incluye por defecto un botón para revelar los campos password. Se
 # oculta también por CSS como defensa visual adicional mientras se autentica.
 st.markdown(
@@ -1640,6 +1648,50 @@ def get_google_sheet_worksheet_by_key(spreadsheet_id: str, tab_name: str):
         return spreadsheet.worksheet(tab_name)
     except gspread.WorksheetNotFound:
         return spreadsheet.get_worksheet(0)
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _load_public_access_override():
+    """Obtiene el interruptor global guardado en Sheets; ``None`` usa Secrets."""
+    try:
+        worksheet = get_google_sheet_worksheet(PUBLIC_ACCESS_CONFIG_TAB)
+    except gspread.WorksheetNotFound:
+        return None
+
+    for row in worksheet.get_all_values():
+        if row and str(row[0]).strip() == PUBLIC_ACCESS_CONFIG_KEY:
+            return row[1] if len(row) > 1 else None
+    return None
+
+
+def _save_public_access_override(enabled: bool, owner_email: str) -> None:
+    """Crea o actualiza el interruptor global que comparten todas las sesiones."""
+    try:
+        worksheet = get_google_sheet_worksheet(PUBLIC_ACCESS_CONFIG_TAB)
+    except gspread.WorksheetNotFound:
+        creds_info = _load_google_service_account_info()
+        credentials = Credentials.from_service_account_info(creds_info, scopes=GOOGLE_SHEETS_SCOPES)
+        client = gspread.authorize(credentials)
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        worksheet = spreadsheet.add_worksheet(title=PUBLIC_ACCESS_CONFIG_TAB, rows=20, cols=4)
+        worksheet.append_row(["CLAVE", "VALOR", "ACTUALIZADO_POR", "ACTUALIZADO_EN"])
+
+    values = worksheet.get_all_values()
+    target_row = next(
+        (index for index, row in enumerate(values, start=1) if row and str(row[0]).strip() == PUBLIC_ACCESS_CONFIG_KEY),
+        None,
+    )
+    payload = [
+        PUBLIC_ACCESS_CONFIG_KEY,
+        "true" if enabled else "false",
+        _normalize_email(owner_email),
+        datetime.now(timezone.utc).isoformat(),
+    ]
+    if target_row is None:
+        worksheet.append_row(payload)
+    else:
+        worksheet.update(f"A{target_row}:D{target_row}", [payload])
+    _load_public_access_override.clear()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -3619,6 +3671,24 @@ if app_mode == "Pagos a Banco":
     st.stop()
 
 _require_drive_authentication()
+authenticated_email = _get_authenticated_drive_email()
+public_access_enabled = _calculator_public_access_enabled()
+if public_access_enabled:
+    st.sidebar.success("🔓 Acceso general habilitado: nadie necesita la contraseña general.")
+else:
+    st.sidebar.caption("🔒 Acceso general protegido con contraseña.")
+
+if authenticated_email == CALCULATOR_OWNER_EMAIL:
+    st.sidebar.markdown("#### 👤 Control del propietario")
+    action_label = "🔒 Exigir contraseña a todos" if public_access_enabled else "🔓 Abrir calculadora para todos"
+    if st.sidebar.button(action_label, use_container_width=True, key="owner_public_access_toggle"):
+        try:
+            _save_public_access_override(not public_access_enabled, authenticated_email)
+            st.session_state.pop("calculator_authenticated", None)
+            st.rerun()
+        except Exception as exc:
+            st.sidebar.error(f"No fue posible cambiar el acceso general: {exc}")
+
 _require_calculator_password()
 _restore_draft_state()
 
