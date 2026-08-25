@@ -7,13 +7,13 @@
   ],
   "target": "recaudo_real",
   "metrics": {
-    "mae": 0.2019161581743877,
-    "rmse": 0.2609547859105226,
-    "r2": 0.050029660721398916
+    "mae": 0.2016598222694582,
+    "rmse": 0.26091674968418777,
+    "r2": 0.05030657193690913
   },
   "notes": "Pipeline: Log1p(C/A,AMOUNT_TOTAL)+winsor(0.5%)+imputer(median)+RobustScaler+MLP(64,32)",
   "versions": {
-    "python": "3.10.20",
+    "python": "3.10.21",
     "numpy": "1.24.4",
     "pandas": "2.2.2",
     "sklearn": "1.4.2",
