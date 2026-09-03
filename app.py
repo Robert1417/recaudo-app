@@ -132,10 +132,10 @@ CALCULATOR_OWNER_EMAIL = "roberto.chapman@gobravo.com.co"
 PASSWORDLESS_CALCULATOR_EMAILS = {
     "william.abril@gobravo.com.co",
     "karol.quevedo@gobravo.com.co",
-    "laura.torres@gobravo.com.co",
     "david.tinjaca@gobravo.com.co",
     "dioben.araujo@gobravo.com.co",
     "roberto.chapman@gobravo.com.co",
+    "sara.cruz@gobravo.com.co"
 }
 
 
