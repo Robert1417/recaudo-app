@@ -25,6 +25,7 @@ from joblib import load
 
 import app_prediccion_masiva
 from recaudo_rules import LOW_RATIO_PP_WARNING, apply_low_ratio_pp_cap
+from risky_clients import extract_risky_references, normalize_reference
 
 # Nota de entorno:
 # Esta app puede instalarse de forma aislada con `requirements_independiente.txt`
@@ -35,6 +36,8 @@ DATA_CSV = Path(__file__).parent / "data/cartera_asignada_filtrada.csv"
 GOOGLE_SHEET_ID = "1Aahltn7TSRf6ZpTpS-vPgpB89hO-r5KxpAhqKAPXziE"
 GOOGLE_SHEET_TAB = "Historico Calculadora"
 GOOGLE_SHEET_TAB_RESPUESTAS = "Respuestas Estr"
+RISKY_CLIENT_SHEET_ID = "1spKkK3J7cCkVq3nmy0ovNFM41YMaIip6sjLgZFpO9cI"
+RISKY_CLIENT_SHEET_GID = 0
 GOOGLE_SHEET_HEADERS = [
     "fecha",
     "referencia",
@@ -272,6 +275,23 @@ def _google_clients():
     sheets_client = gspread.authorize(creds)
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
     return sheets_client, drive_service
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_risky_references() -> set[str]:
+    """Carga con la cuenta de servicio de MI_JSON las referencias Atrasado."""
+    sheets_client, _ = _google_clients()
+    try:
+        spreadsheet = sheets_client.open_by_key(RISKY_CLIENT_SHEET_ID)
+    except gspread.exceptions.SpreadsheetNotFound as exc:
+        raise RuntimeError(
+            "No pude acceder a la base de clientes riesgosos. Comparte el Google Sheet "
+            "con el client_email de la cuenta de servicio configurada en MI_JSON."
+        ) from exc
+    worksheet = spreadsheet.get_worksheet_by_id(RISKY_CLIENT_SHEET_GID)
+    if worksheet is None:
+        raise RuntimeError(f"No encontré la pestaña con gid={RISKY_CLIENT_SHEET_GID} en la base de riesgo.")
+    return extract_risky_references(worksheet.get_all_values())
 
 
 @st.cache_resource(show_spinner=False)
@@ -671,6 +691,7 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
             "AMOUNT_TOTAL": float(case["amount_total"]),
         }
         pred, low_ratio_cap_applied = _predict_recaudo_result(model, features)
+        risky_client = normalize_reference(referencia) in _load_risky_references()
         umbral = 0.8 if _is_traditional_liquidation(tipo_liquidacion) else 0.74
         historico_result = guardar_historico_calculadora(
             referencia=referencia,
@@ -685,6 +706,7 @@ def run_prediction(params: dict, cartera_df: pd.DataFrame | None = None) -> dict
             "tipo_liquidacion_encontrado": tipo_liquidacion_encontrado,
             "umbral": float(umbral),
             "aprobado": float(pred) >= float(umbral),
+            "risky_client": bool(risky_client),
             "low_ratio_cap_applied": low_ratio_cap_applied,
             "features": features,
             "historico": historico_result,
@@ -923,6 +945,8 @@ def main():
             predict_recaudo_result=_predict_recaudo_result,
             is_traditional_liquidation=_is_traditional_liquidation,
             resolver_tipo_liquidacion=_resolver_tipo_liquidacion_desde_cartera,
+            load_risky_references=_load_risky_references,
+            normalize_reference=normalize_reference,
         )
         return
 
@@ -990,6 +1014,7 @@ def main():
         st.session_state.ind_tipo_liquidacion = str(pred_info["tipo_liquidacion"])
         st.session_state.ind_umbral = float(pred_info["umbral"])
         st.success(f"Predicción calculada: {float(pred_info['pred']):.4f}")
+        st.caption(f"Cliente riesgoso (Atrasado): **{'Sí' if pred_info['risky_client'] else 'No'}**")
         if pred_info.get("low_ratio_cap_applied"):
             st.warning(LOW_RATIO_PP_WARNING)
         st.caption(
