@@ -25,6 +25,7 @@ BULK_INPUT_COLUMNS = [
 ]
 BULK_OUTPUT_PREDICTION_COLUMN = "predicción"
 BULK_OUTPUT_APPROVED_COLUMN = "aprobado"
+BULK_OUTPUT_RISKY_CLIENT_COLUMN = "risky_client"
 
 
 def build_template_df() -> pd.DataFrame:
@@ -57,6 +58,8 @@ def run_bulk_predictions(
     predict_recaudo_result: Callable,
     is_traditional_liquidation: Callable,
     resolver_tipo_liquidacion: Callable,
+    load_risky_references: Callable,
+    normalize_reference: Callable,
 ) -> tuple[pd.DataFrame, dict]:
     """Calcula predicciones masivas sin enviar casos a aprobación ni guardar histórico."""
     if df_input is None or df_input.empty:
@@ -68,16 +71,19 @@ def run_bulk_predictions(
         raise ValueError("Faltan columnas requeridas en el archivo: " + ", ".join(missing_cols))
 
     model = load_model()
+    risky_references = load_risky_references()
     total_ok = 0
     errors: list[str] = []
     predictions: list[float | None] = []
     approved_flags: list[bool | None] = []
+    risky_client_flags: list[bool] = []
     error_values: list[str] = []
 
     for row_number, row in enumerate(df_result.to_dict(orient="records"), start=2):
         case = extract_case_data(row)
+        referencia = str(case.get("referencia", "")).strip()
+        risky_client_flags.append(normalize_reference(referencia) in risky_references)
         try:
-            referencia = str(case.get("referencia", "")).strip()
             if not referencia:
                 raise ValueError("referencia vacía")
 
@@ -110,6 +116,7 @@ def run_bulk_predictions(
 
     df_result[BULK_OUTPUT_PREDICTION_COLUMN] = predictions
     df_result[BULK_OUTPUT_APPROVED_COLUMN] = approved_flags
+    df_result[BULK_OUTPUT_RISKY_CLIENT_COLUMN] = risky_client_flags
     if errors:
         df_result["error_prediccion"] = error_values
 
@@ -130,6 +137,8 @@ def render_bulk_prediction_ui(
     predict_recaudo_result: Callable,
     is_traditional_liquidation: Callable,
     resolver_tipo_liquidacion: Callable,
+    load_risky_references: Callable,
+    normalize_reference: Callable,
 ) -> None:
     """Renderiza el módulo Streamlit de carga masiva."""
     st.markdown("### Carga masiva de predicciones")
@@ -177,6 +186,8 @@ def render_bulk_prediction_ui(
                 predict_recaudo_result=predict_recaudo_result,
                 is_traditional_liquidation=is_traditional_liquidation,
                 resolver_tipo_liquidacion=resolver_tipo_liquidacion,
+                load_risky_references=load_risky_references,
+                normalize_reference=normalize_reference,
             )
             st.success(f"Predicciones calculadas: {bulk_summary['ok']:,} de {bulk_summary['total']:,} filas.")
             if bulk_summary["errors"]:
