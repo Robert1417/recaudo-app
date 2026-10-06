@@ -13,7 +13,7 @@
   },
   "notes": "Pipeline: Log1p(C/A,AMOUNT_TOTAL)+winsor(0.5%)+imputer(median)+RobustScaler+MLP(64,32)",
   "versions": {
-    "python": "3.10.21",
+    "python": "3.10.22",
     "numpy": "1.24.4",
     "pandas": "2.2.2",
     "sklearn": "1.4.2",
